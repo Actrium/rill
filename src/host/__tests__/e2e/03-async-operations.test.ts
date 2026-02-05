@@ -8,7 +8,7 @@
  * - Timer operations (setTimeout, setInterval)
  *
  * NOTE: useEffect-based tests have been moved to Playwright E2E:
- * @see tests/e2e-wasm-sandbox/rill-useeffect.e2e.ts
+ * @see tests/wasm-sandbox/rill-useeffect.e2e.ts
  *
  * The mock environment cannot test useEffect because react-reconciler
  * captures setTimeout at module import time, before Engine's polyfill.
@@ -37,7 +37,7 @@ describe('E2E Async: Callback with Async Return', () => {
       function App() {
         const handleSubmit = async (data) => {
           await new Promise(resolve => setTimeout(resolve, 50));
-          globalThis.__sendEventToHost('SUBMIT_PROCESSED', { result: data.toUpperCase() });
+          globalThis.__rill_emitEvent('SUBMIT_PROCESSED', { result: data.toUpperCase() });
           return { success: true, result: data.toUpperCase() };
         };
 
@@ -47,7 +47,7 @@ describe('E2E Async: Callback with Async Return', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -77,7 +77,7 @@ describe('E2E Async: Callback with Async Return', () => {
           await new Promise(resolve => setTimeout(resolve, 20));
           const result = { processed: item, timestamp: Date.now() };
           setQueue(prev => [...prev, result]);
-          globalThis.__sendEventToHost('ITEM_PROCESSED', result);
+          globalThis.__rill_emitEvent('ITEM_PROCESSED', result);
           return result;
         };
 
@@ -87,7 +87,7 @@ describe('E2E Async: Callback with Async Return', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -136,7 +136,7 @@ describe('E2E Async: Error Handling in Async Code', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -158,7 +158,7 @@ describe('E2E Async: Error Handling in Async Code', () => {
               setTimeout(() => reject(new Error('Caught error')), 20)
             );
           } catch (e) {
-            globalThis.__sendEventToHost('ERROR_CAUGHT', { message: e.message });
+            globalThis.__rill_emitEvent('ERROR_CAUGHT', { message: e.message });
             return { error: e.message };
           }
         };
@@ -169,7 +169,7 @@ describe('E2E Async: Error Handling in Async Code', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -207,14 +207,14 @@ describe('E2E Async: Direct Timer Tests', () => {
 
       // Direct timer (not in useEffect)
       setTimeout(() => {
-        globalThis.__sendEventToHost('TIMEOUT_FIRED');
+        globalThis.__rill_emitEvent('TIMEOUT_FIRED');
       }, 50);
 
       function App() {
         return React.createElement('View', { testID: 'container' });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -231,16 +231,16 @@ describe('E2E Async: Direct Timer Tests', () => {
 
       // Async IIFE (not in useEffect)
       (async () => {
-        globalThis.__sendEventToHost('ASYNC_START');
+        globalThis.__rill_emitEvent('ASYNC_START');
         await new Promise(resolve => setTimeout(resolve, 30));
-        globalThis.__sendEventToHost('ASYNC_DONE');
+        globalThis.__rill_emitEvent('ASYNC_DONE');
       })();
 
       function App() {
         return React.createElement('View', { testID: 'container' });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -266,14 +266,14 @@ describe('E2E Async: Direct Timer Tests', () => {
         ];
 
         const values = await Promise.all(promises);
-        globalThis.__sendEventToHost('ALL_RESOLVED', { values });
+        globalThis.__rill_emitEvent('ALL_RESOLVED', { values });
       })();
 
       function App() {
         return React.createElement('View', { testID: 'container' });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -294,14 +294,14 @@ describe('E2E Async: Direct Timer Tests', () => {
           new Promise(resolve => setTimeout(() => resolve('slow'), 100)),
           new Promise(resolve => setTimeout(() => resolve('fast'), 10))
         ]);
-        globalThis.__sendEventToHost('RACE_WINNER', { winner: result });
+        globalThis.__rill_emitEvent('RACE_WINNER', { winner: result });
       })();
 
       function App() {
         return React.createElement('View', { testID: 'container' });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -320,11 +320,11 @@ describe('E2E Async: Direct Timer Tests', () => {
       let count = 0;
       const interval = setInterval(() => {
         count++;
-        globalThis.__sendEventToHost('TICK', { count });
+        globalThis.__rill_emitEvent('TICK', { count });
 
         if (count >= 3) {
           clearInterval(interval);
-          globalThis.__sendEventToHost('INTERVAL_STOPPED');
+          globalThis.__rill_emitEvent('INTERVAL_STOPPED');
         }
       }, 20);
 
@@ -332,7 +332,7 @@ describe('E2E Async: Direct Timer Tests', () => {
         return React.createElement('View', { testID: 'container' });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);

@@ -317,7 +317,7 @@ void testSandboxHostFunction() {
       "var sandbox = globalThis.__QuickJSSandboxJSI;"
       "var rt = sandbox.createRuntime();"
       "var ctx = rt.createContext();"
-      "ctx.setGlobal('callback', function(x) { return x * 2; });"
+      "ctx.inject('callback', function(x) { return x * 2; });"
       "ctx.eval('callback(21)');"
       "ctx.dispose();"
       "rt.dispose();");
@@ -337,7 +337,7 @@ void testSandboxGuestFunction() {
       "var rt = sandbox.createRuntime();"
       "var ctx = rt.createContext();"
       "ctx.eval('function add(a, b) { return a + b; }');"
-      "var add = ctx.getGlobal('add');"
+      "var add = ctx.extract('add');"
       "add(1, 2);"
       "ctx.dispose();"
       "rt.dispose();");
@@ -356,10 +356,10 @@ void testFullWithoutDispose() {
       "var sandbox = globalThis.__QuickJSSandboxJSI;"
       "var rt = sandbox.createRuntime();"
       "var ctx = rt.createContext();"
-      "ctx.setGlobal('callback', function(x) { return x * 2; });"
+      "ctx.inject('callback', function(x) { return x * 2; });"
       "ctx.eval('callback(21)');"
       "ctx.eval('function add(a, b) { return a + b; }');"
-      "var add = ctx.getGlobal('add');"
+      "var add = ctx.extract('add');"
       "add(1, 2);"
       // NO dispose calls!
   );

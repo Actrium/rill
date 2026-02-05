@@ -82,48 +82,44 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ============================================
-# 1. Unit Tests (bun test)
+# 1. Unit Tests
 # ============================================
 if [[ "$RUN_UNIT" == true ]]; then
-  run_suite "Unit Tests (bun test)" "bun test"
+  run_suite "Unit Tests" "bun run test:unit"
 fi
 
 # ============================================
-# 2. Native Tests (QuickJS + JSC)
+# 2. Guest Bundle Tests
+# ============================================
+if [[ "$RUN_UNIT" == true ]]; then
+  if [[ -f "$ROOT_DIR/tests/guest-bundle/run-tests.sh" ]]; then
+    run_suite "Guest Bundle (build + verify)" "bash $ROOT_DIR/tests/guest-bundle/run-tests.sh"
+  fi
+fi
+
+# ============================================
+# 3. Native Tests
 # ============================================
 if [[ "$RUN_NATIVE" == true ]]; then
-  # QuickJS (cross-platform)
-  if [[ -f "$ROOT_DIR/native/quickjs/run-tests.sh" ]]; then
-    run_suite "Native: QuickJS Sandbox" "bash $ROOT_DIR/native/quickjs/run-tests.sh"
-  fi
-
-  # JSC (macOS only)
-  if [[ "$(uname)" == "Darwin" ]]; then
-    if [[ -f "$ROOT_DIR/native/jsc/run-tests.sh" ]]; then
-      run_suite "Native: JSC Sandbox" "bash $ROOT_DIR/native/jsc/run-tests.sh"
-    fi
-  else
-    skip_suite "Native: JSC Sandbox" "macOS only"
-  fi
+  run_suite "Native Tests (C++)" "bun run test:native"
 fi
 
 # ============================================
-# 3. Browser E2E Tests (Playwright)
+# 4. E2E: WASM Sandbox (Playwright)
 # ============================================
 if [[ "$RUN_E2E" == true ]]; then
-  # WASM E2E (Web)
-  if [[ -f "$ROOT_DIR/tests/e2e-wasm-sandbox/run-tests.sh" ]]; then
-    run_suite "E2E: Web (WASM Sandbox)" "bash $ROOT_DIR/tests/e2e-wasm-sandbox/run-tests.sh"
+  if [[ -f "$ROOT_DIR/tests/wasm-sandbox/run-tests.sh" ]]; then
+    run_suite "E2E: WASM Sandbox" "bash $ROOT_DIR/tests/wasm-sandbox/run-tests.sh"
   fi
 fi
 
 # ============================================
-# 4. React Native E2E (opt-in)
+# 5. React Native E2E (opt-in, requires Xcode)
 # ============================================
 if [[ "$RUN_RN" == true ]]; then
   if [[ "$(uname)" == "Darwin" ]]; then
-    if [[ -f "$ROOT_DIR/tests/rn-macos-e2e/run-tests.sh" ]]; then
-      run_suite "E2E: React Native macOS" "bash $ROOT_DIR/tests/rn-macos-e2e/run-tests.sh all"
+    if [[ -f "$ROOT_DIR/tests/rn-macos-bridgeless/run-tests.sh" ]]; then
+      run_suite "E2E: React Native macOS (Bridgeless)" "bash $ROOT_DIR/tests/rn-macos-bridgeless/run-tests.sh all"
     fi
   else
     skip_suite "E2E: React Native macOS" "macOS only"

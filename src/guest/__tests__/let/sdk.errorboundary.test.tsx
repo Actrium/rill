@@ -30,7 +30,7 @@ describe('RillErrorBoundary', () => {
   });
 
   afterEach(() => {
-    delete (globalThis as Record<string, unknown>).__sendEventToHost;
+    delete (globalThis as Record<string, unknown>).__rill_emitEvent;
   });
 
   test('should render children when no error', () => {
@@ -163,14 +163,14 @@ describe('RillErrorBoundary', () => {
     }
   });
 
-  test('should send error to host when __sendEventToHost is available', () => {
+  test('should send error to host when __rill_emitEvent is available', () => {
     const originalError = console.error;
     console.error = () => {};
 
     try {
       const sentEvents: Array<{ name: string; payload: unknown }> = [];
 
-      (globalThis as Record<string, unknown>).__sendEventToHost = (
+      (globalThis as Record<string, unknown>).__rill_emitEvent = (
         name: string,
         payload: unknown
       ) => {

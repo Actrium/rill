@@ -1,0 +1,268 @@
+// rill_protocol.fbs
+//
+// FlatBuffers Schema for Rill Binary Protocol
+// Used for evaluation against custom binary protocol
+//
+// To generate bindings:
+//   flatc --cpp --ts -o generated/ rill_protocol.fbs
+
+namespace rill.protocol.fb;
+
+// ============================================
+// Value Types
+// ============================================
+
+enum ValueType : byte {
+  Null = 0,
+  Undefined = 1,
+  BoolFalse = 2,
+  BoolTrue = 3,
+  Int32 = 4,
+  Float64 = 5,
+  String = 6,
+  Function = 7,
+  Object = 8,
+  Array = 9,
+  Date = 10,
+  Error = 11,
+  RegExp = 12,
+  Map = 13,
+  Set = 14,
+  Promise = 15
+}
+
+// ============================================
+// Value Union
+// ============================================
+
+// Primitive values
+table NullValue {}
+table UndefinedValue {}
+table BoolValue { value: bool; }
+table Int32Value { value: int; }
+table Float64Value { value: double; }
+table StringValue { value: string; }
+
+// Function reference
+table FunctionValue {
+  fn_id: string (required);
+  name: string;           // Optional: function name for DevTools
+  source_file: string;    // Optional: source file
+  source_line: int;       // Optional: source line
+}
+
+// Date as timestamp
+table DateValue {
+  timestamp: double;      // Milliseconds since epoch
+}
+
+// Error
+table ErrorValue {
+  name: string (required);
+  message: string (required);
+  stack: string;
+}
+
+// RegExp
+table RegExpValue {
+  source: string (required);
+  flags: string (required);
+}
+
+// Promise reference
+table PromiseValue {
+  promise_id: string (required);
+}
+
+// Forward declaration for recursive types
+table ObjectValue {
+  entries: [PropEntry];
+}
+
+table ArrayValue {
+  elements: [Value];
+}
+
+table MapValue {
+  entries: [MapEntry];
+}
+
+table SetValue {
+  values: [Value];
+}
+
+// Map entry (key-value pair)
+table MapEntry {
+  key: Value;
+  value: Value;
+}
+
+// Property entry
+table PropEntry {
+  key: string (required);
+  value: Value;
+}
+
+// Union of all value types
+union ValueUnion {
+  NullValue,
+  UndefinedValue,
+  BoolValue,
+  Int32Value,
+  Float64Value,
+  StringValue,
+  FunctionValue,
+  ObjectValue,
+  ArrayValue,
+  DateValue,
+  ErrorValue,
+  RegExpValue,
+  MapValue,
+  SetValue,
+  PromiseValue
+}
+
+table Value {
+  value: ValueUnion;
+}
+
+// ============================================
+// Operations
+// ============================================
+
+enum OpType : byte {
+  Create = 1,
+  Update = 2,
+  Delete = 3,
+  Append = 4,
+  Insert = 5,
+  Remove = 6,
+  Reorder = 7,
+  Text = 8,
+  RefCall = 9
+}
+
+// CREATE operation
+table CreateOp {
+  node_id: uint (key);
+  component_type: string (required);
+  props: [PropEntry];
+  timestamp: ulong;
+}
+
+// UPDATE operation
+table UpdateOp {
+  node_id: uint (key);
+  props: [PropEntry];
+  removed_props: [string];
+  timestamp: ulong;
+}
+
+// DELETE operation
+table DeleteOp {
+  node_id: uint (key);
+  timestamp: ulong;
+}
+
+// APPEND operation
+table AppendOp {
+  node_id: uint;
+  parent_id: uint;
+  child_id: uint;
+  timestamp: ulong;
+}
+
+// INSERT operation
+table InsertOp {
+  node_id: uint;
+  parent_id: uint;
+  child_id: uint;
+  index: ushort;
+  timestamp: ulong;
+}
+
+// REMOVE operation
+table RemoveOp {
+  node_id: uint;
+  parent_id: uint;
+  child_id: uint;
+  timestamp: ulong;
+}
+
+// REORDER operation
+table ReorderOp {
+  node_id: uint;
+  parent_id: uint;
+  child_ids: [uint];
+  timestamp: ulong;
+}
+
+// TEXT operation
+table TextOp {
+  node_id: uint (key);
+  text: string (required);
+  timestamp: ulong;
+}
+
+// REF_CALL operation
+table RefCallOp {
+  node_id: uint;
+  method: string (required);
+  call_id: string (required);
+  args: [Value];
+  timestamp: ulong;
+}
+
+// Operation union
+union OperationUnion {
+  CreateOp,
+  UpdateOp,
+  DeleteOp,
+  AppendOp,
+  InsertOp,
+  RemoveOp,
+  ReorderOp,
+  TextOp,
+  RefCallOp
+}
+
+table Operation {
+  op_type: OpType;
+  operation: OperationUnion;
+}
+
+// ============================================
+// Batch
+// ============================================
+
+table OperationBatch {
+  version: ushort = 1;
+  batch_id: uint;
+  operations: [Operation];
+}
+
+// Root type
+root_type OperationBatch;
+
+// File identifier for quick validation
+file_identifier "RILL";
+
+// ============================================
+// Notes on FlatBuffers vs Custom Protocol
+// ============================================
+//
+// Advantages of FlatBuffers:
+// - Generated code is type-safe and well-tested
+// - Zero-copy decoding built-in
+// - Schema evolution support
+// - Cross-platform consistency
+//
+// Disadvantages for Rill use case:
+// - No cross-batch string interning
+// - Larger encoding overhead (vtables)
+// - Union types add overhead
+//
+// The custom protocol (InstructionFormat.h) addresses:
+// - String intern table for cross-batch deduplication
+// - Minimal overhead for simple operations
+// - Direct memory layout control

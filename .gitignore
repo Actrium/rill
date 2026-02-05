@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+bun.lock
 
 # Build outputs
 dist/
@@ -10,12 +11,32 @@ native/quickjs/build/
 native/quickjs/build-wasm/
 native/jsc/build/
 
+# Android build artifacts
+android/.gradle/
+android/build/
+android/.cxx/
+**/.cxx/
+examples/*/android/.gradle/
+examples/*/android/build/
+examples/*/android/app/build/
+examples/*/android/local.properties
+
 # Test project artifacts
 tests/*/macos/build/
 tests/*/macos/.cocoapods/
+tests/*/macos/Pods/
+tests/*/macos/Podfile.lock
+tests/*/macos/.xcode.env
+tests/*/macos/.xcode.env.local
 tests/*/package-lock.json
 tests/*/.bundle-cache/
 tests/*/macos/macos/
+
+# iOS project artifacts
+examples/*/.xcode.env
+examples/*/.xcode.env.local
+examples/*/Podfile.lock
+examples/*/Pods/
 
 # IDE
 .idea/

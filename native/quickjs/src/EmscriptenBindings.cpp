@@ -62,14 +62,14 @@ public:
      * @param name Variable name
      * @param valueJSON Value as JSON string
      */
-    void setGlobal(const std::string& name, const std::string& valueJSON) {
+    void inject(const std::string& name, const std::string& valueJSON) {
         try {
             // Parse JSON to JSI Value
             auto value = parseJSON(valueJSON);
             runtime_->global().setProperty(*runtime_, name.c_str(), value);
         } catch (const std::exception& e) {
             // Log error
-            fprintf(stderr, "setGlobal failed: %s\n", e.what());
+            fprintf(stderr, "inject failed: %s\n", e.what());
         }
     }
 
@@ -79,7 +79,7 @@ public:
      * @param name Variable name
      * @return Value as JSON string
      */
-    std::string getGlobal(const std::string& name) {
+    std::string extract(const std::string& name) {
         try {
             auto value = runtime_->global().getProperty(*runtime_, name.c_str());
             return valueToJSON(value);
@@ -95,7 +95,7 @@ public:
      * @param ptr Pointer to data in WASM linear memory
      * @param length Data length in bytes
      */
-    void setGlobalArrayBuffer(const std::string& name, uintptr_t ptr, size_t length) {
+    void injectArrayBuffer(const std::string& name, uintptr_t ptr, size_t length) {
         try {
             // Create a MutableBuffer that wraps the WASM memory
             class WASMBuffer : public MutableBuffer {
@@ -126,7 +126,7 @@ public:
             // Set as global
             runtime_->global().setProperty(*runtime_, name.c_str(), std::move(arrayBuffer));
         } catch (const std::exception& e) {
-            fprintf(stderr, "setGlobalArrayBuffer failed: %s\n", e.what());
+            fprintf(stderr, "injectArrayBuffer failed: %s\n", e.what());
         }
     }
 
@@ -138,7 +138,7 @@ public:
      * @param maxLength Maximum bytes to copy
      * @return Actual bytes copied, or 0 on error
      */
-    size_t getGlobalArrayBuffer(const std::string& name, uintptr_t ptr, size_t maxLength) {
+    size_t extractArrayBuffer(const std::string& name, uintptr_t ptr, size_t maxLength) {
         try {
             auto value = runtime_->global().getProperty(*runtime_, name.c_str());
 
@@ -165,7 +165,7 @@ public:
 
             return copySize;
         } catch (const std::exception& e) {
-            fprintf(stderr, "getGlobalArrayBuffer failed: %s\n", e.what());
+            fprintf(stderr, "extractArrayBuffer failed: %s\n", e.what());
             return 0;
         }
     }
@@ -176,7 +176,7 @@ public:
      * @param name Variable name
      * @return Size in bytes, or 0 if not an ArrayBuffer
      */
-    size_t getGlobalArrayBufferSize(const std::string& name) {
+    size_t extractArrayBufferSize(const std::string& name) {
         try {
             auto value = runtime_->global().getProperty(*runtime_, name.c_str());
 
@@ -193,7 +193,7 @@ public:
             auto arrayBuffer = obj.getArrayBuffer(*runtime_);
             return arrayBuffer.size(*runtime_);
         } catch (const std::exception& e) {
-            fprintf(stderr, "getGlobalArrayBufferSize failed: %s\n", e.what());
+            fprintf(stderr, "extractArrayBufferSize failed: %s\n", e.what());
             return 0;
         }
     }
@@ -267,9 +267,9 @@ EMSCRIPTEN_BINDINGS(quickjs_sandbox) {
     class_<QuickJSWASMRuntime>("QuickJSRuntime")
         .constructor<>()
         .function("eval", &QuickJSWASMRuntime::eval)
-        .function("setGlobal", &QuickJSWASMRuntime::setGlobal)
-        .function("getGlobal", &QuickJSWASMRuntime::getGlobal)
-        .function("setGlobalArrayBuffer", &QuickJSWASMRuntime::setGlobalArrayBuffer)
-        .function("getGlobalArrayBuffer", &QuickJSWASMRuntime::getGlobalArrayBuffer)
-        .function("getGlobalArrayBufferSize", &QuickJSWASMRuntime::getGlobalArrayBufferSize);
+        .function("inject", &QuickJSWASMRuntime::inject)
+        .function("extract", &QuickJSWASMRuntime::extract)
+        .function("injectArrayBuffer", &QuickJSWASMRuntime::injectArrayBuffer)
+        .function("extractArrayBuffer", &QuickJSWASMRuntime::extractArrayBuffer)
+        .function("extractArrayBufferSize", &QuickJSWASMRuntime::extractArrayBufferSize);
 }

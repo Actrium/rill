@@ -43,7 +43,7 @@ describe('E2E Memory Leak: Function Callbacks', () => {
             {
               testID: 'button',
               onPress: () => {
-                globalThis.__sendEventToHost('CLICK', { count });
+                globalThis.__rill_emitEvent('CLICK', { count });
                 setCount(count + 1);
               }
             },
@@ -52,7 +52,7 @@ describe('E2E Memory Leak: Function Callbacks', () => {
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -93,24 +93,24 @@ describe('E2E Memory Leak: Function Callbacks', () => {
           'View',
           {
             testID: 'view',
-            onLayout: () => globalThis.__sendEventToHost('LAYOUT'),
-            onTouchStart: () => globalThis.__sendEventToHost('TOUCH_START'),
-            onTouchEnd: () => globalThis.__sendEventToHost('TOUCH_END'),
+            onLayout: () => globalThis.__rill_emitEvent('LAYOUT'),
+            onTouchStart: () => globalThis.__rill_emitEvent('TOUCH_START'),
+            onTouchEnd: () => globalThis.__rill_emitEvent('TOUCH_END'),
           },
           React.createElement(
             'TouchableOpacity',
             {
               testID: 'button',
               onPress: () => setCount(count + 1),
-              onPressIn: () => globalThis.__sendEventToHost('PRESS_IN'),
-              onPressOut: () => globalThis.__sendEventToHost('PRESS_OUT'),
+              onPressIn: () => globalThis.__rill_emitEvent('PRESS_IN'),
+              onPressOut: () => globalThis.__rill_emitEvent('PRESS_OUT'),
             },
             React.createElement('Text', {}, 'Count: ' + count)
           )
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -149,18 +149,18 @@ describe('E2E Memory Leak: Function Callbacks', () => {
             'TouchableOpacity',
             {
               testID: 'button',
-              onPress: () => globalThis.__sendEventToHost('CLICK')
+              onPress: () => globalThis.__rill_emitEvent('CLICK')
             },
             React.createElement('Text', {}, 'Button')
           )
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
 
       // Expose unmount
       globalThis.__unmountApp = () => {
-        unmount(globalThis.__sendToHost);
+        unmount(globalThis.__rill_sendBatch);
       };
     `;
 
@@ -172,7 +172,7 @@ describe('E2E Memory Leak: Function Callbacks', () => {
     expect(initialSize).toBeGreaterThan(0);
 
     // Unmount the app
-    await ctx.engine.context?.getGlobal('__unmountApp')?.();
+    await ctx.engine.context?.extract('__unmountApp')?.();
     await wait(100);
 
     const finalSize = ctx.engine.guestCallbackCount;
@@ -197,12 +197,12 @@ describe('E2E Memory Leak: Function Callbacks', () => {
           {
             testID: 'view',
             callbacks: {
-              onSuccess: () => globalThis.__sendEventToHost('SUCCESS'),
-              onError: (err) => globalThis.__sendEventToHost('ERROR', err),
+              onSuccess: () => globalThis.__rill_emitEvent('SUCCESS'),
+              onError: (err) => globalThis.__rill_emitEvent('ERROR', err),
             },
             handlers: [
-              () => globalThis.__sendEventToHost('HANDLER_0'),
-              () => globalThis.__sendEventToHost('HANDLER_1'),
+              () => globalThis.__rill_emitEvent('HANDLER_0'),
+              () => globalThis.__rill_emitEvent('HANDLER_1'),
             ]
           },
           React.createElement(
@@ -216,7 +216,7 @@ describe('E2E Memory Leak: Function Callbacks', () => {
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -280,7 +280,7 @@ describe('E2E Memory Leak: List Rendering', () => {
               {
                 key: item,
                 testID: 'item-' + item,
-                onPress: () => globalThis.__sendEventToHost('ITEM_CLICK', { item })
+                onPress: () => globalThis.__rill_emitEvent('ITEM_CLICK', { item })
               },
               React.createElement('Text', {}, 'Item ' + item)
             )
@@ -288,7 +288,7 @@ describe('E2E Memory Leak: List Rendering', () => {
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -340,7 +340,7 @@ describe('E2E Memory Leak: List Rendering', () => {
               {
                 key: item,
                 testID: 'item-' + item,
-                onPress: () => globalThis.__sendEventToHost('ITEM_CLICK', { item })
+                onPress: () => globalThis.__rill_emitEvent('ITEM_CLICK', { item })
               },
               React.createElement('Text', {}, 'Item ' + item)
             )
@@ -348,7 +348,7 @@ describe('E2E Memory Leak: List Rendering', () => {
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -395,7 +395,7 @@ describe('E2E Memory Leak: Edge Cases', () => {
           'TouchableOpacity',
           {
             testID: 'component-a',
-            onPress: () => globalThis.__sendEventToHost('A_PRESSED')
+            onPress: () => globalThis.__rill_emitEvent('A_PRESSED')
           },
           React.createElement('Text', {}, 'Component A')
         );
@@ -406,7 +406,7 @@ describe('E2E Memory Leak: Edge Cases', () => {
           'TouchableOpacity',
           {
             testID: 'component-b',
-            onPress: () => globalThis.__sendEventToHost('B_PRESSED')
+            onPress: () => globalThis.__rill_emitEvent('B_PRESSED')
           },
           React.createElement('Text', {}, 'Component B')
         );
@@ -432,7 +432,7 @@ describe('E2E Memory Leak: Edge Cases', () => {
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);

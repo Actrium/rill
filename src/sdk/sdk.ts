@@ -5,6 +5,7 @@
  * Zero runtime dependencies - all implementations injected by reconciler at runtime
  */
 
+import type { ReviewedUnknown } from '../shared';
 import type {
   ImageSource,
   LayoutEvent,
@@ -35,11 +36,14 @@ export type ComponentType<P = object> =
 // ============ Runtime React hooks accessor ============
 
 interface ReactHooks {
-  useEffect: (effect: () => undefined | (() => void), deps?: unknown[]) => void;
+  useEffect: (effect: () => undefined | (() => void), deps?: ReviewedUnknown[]) => void;
   useRef: <T>(initial: T) => { current: T };
   useState: <T>(initial: T | (() => T)) => [T, (value: T | ((prev: T) => T)) => void];
-  useMemo: <T>(factory: () => T, deps: unknown[]) => T;
-  useCallback: <T extends (...args: unknown[]) => unknown>(callback: T, deps: unknown[]) => T;
+  useMemo: <T>(factory: () => T, deps: ReviewedUnknown[]) => T;
+  useCallback: <T extends (...args: ReviewedUnknown[]) => ReviewedUnknown>(
+    callback: T,
+    deps: ReviewedUnknown[]
+  ) => T;
 }
 
 /**
@@ -55,7 +59,7 @@ function getReactHooks(): ReactHooks {
 
   // Fallback: hooks not available (will fail at runtime if used)
   const throwUnavailable = (hook: string) => () => {
-    throw new Error(`[rill/sdk] ${hook} not available. Ensure running in rill sandbox.`);
+    throw new Error(`[rill/guest] ${hook} not available. Ensure running in rill sandbox.`);
   };
   return {
     useEffect: throwUnavailable('useEffect'),
@@ -127,7 +131,10 @@ function getAPIs() {
   // Sandbox stubs
   const stubs = {
     // Pure JS
-    StyleSheet: { create: <T extends object>(styles: T): T => styles, flatten: (s: unknown) => s },
+    StyleSheet: {
+      create: <T extends object>(styles: T): T => styles,
+      flatten: (s: ReviewedUnknown): ReviewedUnknown => s,
+    },
     Easing: {
       linear: (t: number) => t,
       ease: (t: number) => t,
@@ -461,13 +468,13 @@ export function useHostEvent<T = unknown>(eventName: string, callback: (payload:
 
   useEffect(() => {
     const g = globalThis as Record<string, unknown>;
-    if ('__useHostEvent' in globalThis) {
+    if ('__rill_onHostEvent' in globalThis) {
       // Create stable callback wrapper that always calls the latest callback
       const stableCallback = (payload: T) => callbackRef.current(payload);
 
       // Subscribe and get unsubscribe function
       const unsubscribe = (
-        g.__useHostEvent as (name: string, cb: (payload: T) => void) => () => void
+        g.__rill_onHostEvent as (name: string, cb: (payload: T) => void) => () => void
       )(eventName, stableCallback);
 
       // React automatically calls this cleanup function when component unmounts
@@ -491,8 +498,8 @@ export function useHostEvent<T = unknown>(eventName: string, callback: (payload:
 export function useConfig<T = Record<string, unknown>>(): T {
   // Actual implementation injected by reconciler at runtime
   const g = globalThis as Record<string, unknown>;
-  if ('__getConfig' in globalThis) {
-    return (g.__getConfig as () => T)();
+  if ('__rill_getConfig' in globalThis) {
+    return (g.__rill_getConfig as () => T)();
   }
   return {} as T;
 }
@@ -508,11 +515,11 @@ export function useConfig<T = Record<string, unknown>>(): T {
  * sendToHost('ANALYTICS', { action: 'click', target: 'button' });
  * ```
  */
-export function useSendToHost(): (eventName: string, payload?: unknown) => void {
+export function useSendToHost(): (eventName: string, payload?: ReviewedUnknown) => void {
   // Actual implementation injected by reconciler at runtime
   const g = globalThis as Record<string, unknown>;
-  if ('__sendEventToHost' in globalThis) {
-    return g.__sendEventToHost as (eventName: string, payload?: unknown) => void;
+  if ('__rill_emitEvent' in globalThis) {
+    return g.__rill_emitEvent as (eventName: string, payload?: ReviewedUnknown) => void;
   }
   return () => {
     console.warn('[rill] sendToHost is not available outside sandbox');
@@ -523,7 +530,7 @@ export function useSendToHost(): (eventName: string, payload?: unknown) => void 
 
 /** Pending call entry for tracking async method invocations */
 interface PendingCall {
-  resolve: (value: unknown) => void;
+  resolve: (value: ReviewedUnknown) => void;
   reject: (error: Error) => void;
   timeoutId: ReturnType<typeof setTimeout>;
 }
@@ -532,7 +539,7 @@ interface PendingCall {
 interface RefMethodResult {
   refId: number;
   callId: string;
-  result?: unknown;
+  result?: ReviewedUnknown;
   error?: { message: string; name?: string; stack?: string };
 }
 
@@ -551,7 +558,7 @@ const DEFAULT_REMOTE_REF_TIMEOUT = 4000;
  *
  * @example
  * ```tsx
- * import { useRemoteRef, TextInput, TextInputRef } from 'rill/sdk';
+ * import { useRemoteRef, TextInput, TextInputRef } from 'rill/guest';
  *
  * function MyComponent() {
  *   const [inputRef, remoteInput] = useRemoteRef<TextInputRef>();
@@ -602,7 +609,7 @@ export function useRemoteRef<T = unknown>(options?: {
   // Listen for REF_METHOD_RESULT events from Host
   useEffect(() => {
     const g = globalThis as Record<string, unknown>;
-    if (!('__useHostEvent' in g)) {
+    if (!('__rill_onHostEvent' in g)) {
       return undefined;
     }
 
@@ -634,7 +641,7 @@ export function useRemoteRef<T = unknown>(options?: {
 
     // Subscribe to __REF_RESULT__ events
     const unsubscribe = (
-      g.__useHostEvent as (name: string, cb: (payload: RefMethodResult) => void) => () => void
+      g.__rill_onHostEvent as (name: string, cb: (payload: RefMethodResult) => void) => () => void
     )('__REF_RESULT__', handleResult);
 
     return unsubscribe;
@@ -671,15 +678,15 @@ export function useRemoteRef<T = unknown>(options?: {
 
         // Store pending call
         pendingCallsRef.current.set(callId, {
-          resolve: resolve as (value: unknown) => void,
+          resolve: resolve as PendingCall['resolve'],
           reject,
           timeoutId,
         });
 
         // Send REF_CALL operation to Host
         const g = globalThis as Record<string, unknown>;
-        if ('__sendOperation' in g) {
-          const sendOp = g.__sendOperation as (op: unknown) => void;
+        if ('__rill_sendOperation' in g) {
+          const sendOp = g.__rill_sendOperation as (op: ReviewedUnknown) => void;
           sendOp({
             op: 'REF_CALL',
             refId: nodeId,
@@ -691,7 +698,7 @@ export function useRemoteRef<T = unknown>(options?: {
           // No operation channel available
           clearTimeout(timeoutId);
           pendingCallsRef.current.delete(callId);
-          reject(new Error('[rill/sdk] __sendOperation not available'));
+          reject(new Error('[rill/guest] __rill_sendOperation not available'));
         }
       });
     };
@@ -748,7 +755,7 @@ interface RillErrorBoundaryState {
  *
  * @example
  * ```tsx
- * import { RillErrorBoundary, View, Text } from 'rill/sdk';
+ * import { RillErrorBoundary, View, Text } from 'rill/guest';
  *
  * function App() {
  *   return (
@@ -806,9 +813,9 @@ export class RillErrorBoundary extends (React.Component as unknown as new (
 
     // Also send to host if sendToHost is available
     const g = globalThis as Record<string, unknown>;
-    if ('__sendEventToHost' in g) {
+    if ('__rill_emitEvent' in g) {
       // Reason: Error payload can be any serializable type
-      const sendToHost = g.__sendEventToHost as (name: string, payload: unknown) => void;
+      const sendToHost = g.__rill_emitEvent as (name: string, payload: unknown) => void;
       sendToHost('RENDER_ERROR', {
         message: error.message,
         stack: error.stack,

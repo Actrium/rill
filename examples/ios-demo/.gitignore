@@ -1,0 +1,8 @@
+Pods/
+node_modules/
+build/
+*.xcworkspace/
+DerivedData/
+package-lock.json
+.rill_pod_cache
+*.jsbundle

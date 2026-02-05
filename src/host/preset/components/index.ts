@@ -2,43 +2,43 @@
  * Default component exports
  */
 
-export type { ActivityIndicatorProps } from './ActivityIndicator';
-export { ActivityIndicator } from './ActivityIndicator';
-export type { ButtonProps } from './Button';
-export { Button } from './Button';
-export type { ClickableViewProps } from './ClickableView';
-export { ClickableView } from './ClickableView';
-export type { FlatListProps } from './FlatList';
-export { FlatList } from './FlatList';
-export type { ImageProps, ImageSource } from './Image';
-export { Image } from './Image';
-export type { ScrollEvent, ScrollViewProps } from './ScrollView';
-export { ScrollView } from './ScrollView';
-export type { SwitchProps } from './Switch';
-export { Switch } from './Switch';
-export type { TextProps } from './Text';
-export { Text } from './Text';
-export type { TextInputProps } from './TextInput';
-export { TextInput } from './TextInput';
-export type { TouchableOpacityProps } from './TouchableOpacity';
-export { TouchableOpacity } from './TouchableOpacity';
-export type { ViewProps } from './View';
-export { View } from './View';
+export type { ActivityIndicatorProps } from './activity-indicator';
+export { ActivityIndicator } from './activity-indicator';
+export type { ButtonProps } from './button';
+export { Button } from './button';
+export type { ClickableViewProps } from './clickable-view';
+export { ClickableView } from './clickable-view';
+export type { FlatListProps } from './flat-list';
+export { FlatList } from './flat-list';
+export type { ImageProps, ImageSource } from './image';
+export { Image } from './image';
+export type { ScrollEvent, ScrollViewProps } from './scroll-view';
+export { ScrollView } from './scroll-view';
+export type { SwitchProps } from './switch';
+export { Switch } from './switch';
+export type { TextProps } from './text';
+export { Text } from './text';
+export type { TextInputProps } from './text-input';
+export { TextInput } from './text-input';
+export type { TouchableOpacityProps } from './touchable-opacity';
+export { TouchableOpacity } from './touchable-opacity';
+export type { ViewProps } from './view';
+export { View } from './view';
 
-import { ActivityIndicator } from './ActivityIndicator';
-import { Button } from './Button';
-import { FlatList } from './FlatList';
-import { Image } from './Image';
-import { ScrollView } from './ScrollView';
-import { Switch } from './Switch';
-import { Text } from './Text';
-import { TextInput } from './TextInput';
-import { TouchableOpacity } from './TouchableOpacity';
+import { ActivityIndicator } from './activity-indicator';
+import { Button } from './button';
+import { FlatList } from './flat-list';
+import { Image } from './image';
+import { ScrollView } from './scroll-view';
+import { Switch } from './switch';
+import { Text } from './text';
+import { TextInput } from './text-input';
+import { TouchableOpacity } from './touchable-opacity';
 /**
  * Default component mapping
  * For registering with Engine
  */
-import { View } from './View';
+import { View } from './view';
 
 export const DefaultComponents = {
   View,

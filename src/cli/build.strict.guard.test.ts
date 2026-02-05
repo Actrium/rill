@@ -25,7 +25,7 @@ describe('Strict Guard - violation cases', () => {
 
     await expect(
       analyze(file('guard-lodash.js'), {
-        whitelist: ['react', 'react-native', 'react/jsx-runtime', 'rill/sdk'],
+        whitelist: ['react', 'react-native', 'react/jsx-runtime', 'rill/guest'],
         failOnViolation: true,
         treatEvalAsViolation: true,
         treatDynamicNonLiteralAsViolation: true,
@@ -35,11 +35,11 @@ describe('Strict Guard - violation cases', () => {
 
   it('should pass when bundle only contains whitelisted deps', async () => {
     const { analyze } = await import('./build');
-    fs.writeFileSync(file('guard-ok.js'), "require('react'); require('rill/sdk');");
+    fs.writeFileSync(file('guard-ok.js'), "require('react'); require('rill/guest');");
     const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 
     await analyze(file('guard-ok.js'), {
-      whitelist: ['react', 'react-native', 'react/jsx-runtime', 'rill/sdk'],
+      whitelist: ['react', 'react-native', 'react/jsx-runtime', 'rill/guest'],
       failOnViolation: true,
     });
 

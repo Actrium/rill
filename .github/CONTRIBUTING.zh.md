@@ -101,9 +101,8 @@ rill/
 │   ├── quickjs/        # QuickJS 沙箱 (跨平台)
 │   └── platform/       # React Native 集成
 ├── tests/
-│   ├── e2e-sandbox-web/   # Web Worker E2E 测试
-│   ├── e2e-wasm-sandbox/  # WASM 沙箱 E2E 测试
-│   └── rn-macos-e2e/      # React Native macOS E2E 测试
+│   ├── wasm-sandbox/           # WASM 沙箱 E2E 测试
+│   └── rn-macos-bridgeless/    # React Native macOS E2E 测试 (Bridgeless)
 └── docs/               # 文档
 ```
 

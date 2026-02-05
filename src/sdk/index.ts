@@ -1,5 +1,5 @@
 /**
- * rill/sdk
+ * rill/guest
  *
  * Guest-side SDK for rill - runs inside sandbox
  * Provides virtual components, hooks for Guest development

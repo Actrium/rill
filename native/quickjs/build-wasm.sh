@@ -14,7 +14,7 @@ set -e
 BUILD_TYPE="${1:-release}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/build-wasm"
-OUTPUT_DIR="${SCRIPT_DIR}/../../src/sandbox/wasm"
+OUTPUT_DIR="${SCRIPT_DIR}/../../src/host/sandbox/wasm"
 
 echo "🚀 Building QuickJS Sandbox for WebAssembly"
 echo "   Build type: ${BUILD_TYPE}"
@@ -61,16 +61,18 @@ cmake --build . --config ${BUILD_TYPE} -j$(nproc 2>/dev/null || sysctl -n hw.ncp
 # Copy output
 echo "📋 Copying output files..."
 mkdir -p "${OUTPUT_DIR}"
-cp -v quickjs_sandbox.js "${OUTPUT_DIR}/"
-cp -v quickjs_sandbox.wasm "${OUTPUT_DIR}/"
+cp -v quickjs_sandbox.js "${OUTPUT_DIR}/quickjs-sandbox.js"
+cp -v quickjs_sandbox.wasm "${OUTPUT_DIR}/quickjs-sandbox.wasm"
+
+# Align runtime file naming with repo conventions (kebab-case)
+perl -pi -e 's/quickjs_sandbox\\.wasm/quickjs-sandbox.wasm/g' "${OUTPUT_DIR}/quickjs-sandbox.js"
 
 # Report size
 echo ""
 echo "✅ Build complete!"
-echo "   WASM size: $(du -h "${OUTPUT_DIR}/quickjs_sandbox.wasm" | cut -f1)"
-echo "   JS size:   $(du -h "${OUTPUT_DIR}/quickjs_sandbox.js" | cut -f1)"
+echo "   WASM size: $(du -h "${OUTPUT_DIR}/quickjs-sandbox.wasm" | cut -f1)"
+echo "   JS size:   $(du -h "${OUTPUT_DIR}/quickjs-sandbox.js" | cut -f1)"
 echo ""
 echo "📍 Output location: ${OUTPUT_DIR}"
 echo ""
-echo "🎉 Ready to use! Import with:"
-echo "   import { QuickJSNativeWASMProvider } from '@rill/core/sandbox/providers'"
+echo "🎉 Ready to use! (internal)"

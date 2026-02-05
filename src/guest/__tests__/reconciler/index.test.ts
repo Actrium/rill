@@ -85,32 +85,32 @@ describe('CallbackRegistry', () => {
     });
   });
 
-  describe('remove', () => {
-    it('should remove a registered callback', () => {
+  describe('release', () => {
+    it('should release a registered callback (refcount → 0 removes it)', () => {
       const fn = mock();
       const fnId = registry.register(fn);
 
       expect(registry.size).toBe(1);
 
-      registry.remove(fnId);
+      registry.release(fnId);
 
       expect(registry.size).toBe(0);
     });
 
-    it('should not throw when removing non-existent callback', () => {
-      expect(() => registry.remove('non_existent')).not.toThrow();
+    it('should not throw when releasing non-existent callback', () => {
+      expect(() => registry.release('non_existent')).not.toThrow();
     });
-  });
 
-  describe('removeAll', () => {
-    it('should remove multiple callbacks', () => {
-      const ids = [registry.register(mock()), registry.register(mock()), registry.register(mock())];
+    it('should respect retain/release reference counting', () => {
+      const fn = mock();
+      const fnId = registry.register(fn); // refcount = 1
 
-      expect(registry.size).toBe(3);
-
-      registry.removeAll(ids.slice(0, 2));
-
+      registry.retain(fnId); // refcount = 2
+      registry.release(fnId); // refcount = 1
       expect(registry.size).toBe(1);
+
+      registry.release(fnId); // refcount = 0 → removed
+      expect(registry.size).toBe(0);
     });
   });
 
@@ -139,7 +139,8 @@ describe('OperationCollector', () => {
   beforeEach(() => {
     collector = new OperationCollector();
     receivedBatches = [];
-    sendToHost = mock((batch: OperationBatch) => {
+    sendToHost = mock((raw: OperationBatch | string) => {
+      const batch = typeof raw === 'string' ? JSON.parse(raw) : raw;
       receivedBatches.push(batch);
     });
   });
@@ -211,7 +212,8 @@ describe('createReconciler', () => {
 
   beforeEach(() => {
     receivedBatches = [];
-    sendToHost = mock((batch: OperationBatch) => {
+    sendToHost = mock((raw: OperationBatch | string) => {
+      const batch = typeof raw === 'string' ? JSON.parse(raw) : raw;
       receivedBatches.push(batch);
     });
   });
@@ -242,7 +244,8 @@ describe('Props Serialization', () => {
 
   beforeEach(() => {
     receivedBatches = [];
-    sendToHost = mock((batch: OperationBatch) => {
+    sendToHost = mock((raw: OperationBatch | string) => {
+      const batch = typeof raw === 'string' ? JSON.parse(raw) : raw;
       receivedBatches.push(batch);
     });
     reconcilerInstance = createReconciler(sendToHost, new CallbackRegistry());
@@ -381,7 +384,8 @@ describe('Operation Types', () => {
 
   beforeEach(() => {
     receivedBatches = [];
-    sendToHost = mock((batch: OperationBatch) => {
+    sendToHost = mock((raw: OperationBatch | string) => {
+      const batch = typeof raw === 'string' ? JSON.parse(raw) : raw;
       receivedBatches.push(batch);
     });
     reconcilerInstance = createReconciler(sendToHost, new CallbackRegistry());
@@ -582,7 +586,8 @@ describe('Batch Updates', () => {
 
   beforeEach(() => {
     receivedBatches = [];
-    sendToHost = mock((batch: OperationBatch) => {
+    sendToHost = mock((raw: OperationBatch | string) => {
+      const batch = typeof raw === 'string' ? JSON.parse(raw) : raw;
       receivedBatches.push(batch);
     });
     reconcilerInstance = createReconciler(sendToHost, new CallbackRegistry());
@@ -632,13 +637,33 @@ describe('Batch Updates', () => {
 
 import * as React from 'react';
 
+/**
+ * Poll until a condition is true, with a timeout.
+ * Used instead of fixed setTimeout delays which are unreliable
+ * under CPU contention in parallel test execution.
+ */
+async function waitForCondition(
+  condition: () => boolean,
+  timeoutMs = 5000,
+  intervalMs = 10
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) {
+      throw new Error(`waitForCondition timed out after ${timeoutMs}ms`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
 describe('React Integration - Fiber Lifecycle', () => {
   let sendToHost: SendToHost;
   let receivedBatches: OperationBatch[];
 
   beforeEach(() => {
     receivedBatches = [];
-    sendToHost = mock((batch: OperationBatch) => {
+    sendToHost = mock((raw: OperationBatch | string) => {
+      const batch = typeof raw === 'string' ? JSON.parse(raw) : raw;
       receivedBatches.push(batch);
     });
   });
@@ -658,7 +683,7 @@ describe('React Integration - Fiber Lifecycle', () => {
     render(element, sendToHost);
 
     // Wait for React to flush
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await waitForCondition(() => receivedBatches.length > 0);
 
     expect(receivedBatches.length).toBeGreaterThan(0);
     const ops = receivedBatches[0].operations;
@@ -690,7 +715,10 @@ describe('React Integration - Fiber Lifecycle', () => {
     );
 
     render(element, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitForCondition(() => {
+      const allOps = receivedBatches.flatMap((batch) => batch.operations);
+      return allOps.filter((op) => op.op === 'CREATE').length >= 3;
+    });
 
     expect(receivedBatches.length).toBeGreaterThan(0);
 
@@ -708,7 +736,7 @@ describe('React Integration - Fiber Lifecycle', () => {
     const element = React.createElement('View', { onPress });
 
     render(element, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitForCondition(() => receivedBatches.length > 0);
 
     // Test passes if we got any batches (React reconciler executed)
     // Even if empty, the test coverage goal is achieved
@@ -718,16 +746,24 @@ describe('React Integration - Fiber Lifecycle', () => {
   it('should handle component updates', async () => {
     const element1 = React.createElement('View', { testID: 'v1' });
     render(element1, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await waitForCondition(() => receivedBatches.length > 0);
 
-    receivedBatches = []; // Clear batches
+    const batchCountAfterFirstRender = receivedBatches.length;
 
     const element2 = React.createElement('View', { testID: 'v2' });
     render(element2, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 0));
 
-    // Should receive UPDATE operation
-    const updateOps = receivedBatches
+    // Wait for UPDATE operations to appear in new batches
+    await waitForCondition(() => {
+      const newBatches = receivedBatches.slice(batchCountAfterFirstRender);
+      return newBatches.some((b) =>
+        b.operations.some((op) => op.op === 'UPDATE')
+      );
+    });
+
+    // Should receive UPDATE operation in batches after the first render
+    const newBatches = receivedBatches.slice(batchCountAfterFirstRender);
+    const updateOps = newBatches
       .flatMap((b) => b.operations)
       .filter((op) => op.op === 'UPDATE');
     expect(updateOps.length).toBeGreaterThan(0);
@@ -739,7 +775,7 @@ describe('React Integration - Fiber Lifecycle', () => {
     });
 
     render(element, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitForCondition(() => receivedBatches.length > 0);
 
     // Test coverage achieved by invoking render
     expect(receivedBatches.length).toBeGreaterThanOrEqual(0);
@@ -754,7 +790,7 @@ describe('React Integration - Fiber Lifecycle', () => {
     });
 
     render(element, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitForCondition(() => receivedBatches.length > 0);
 
     // Test coverage achieved
     expect(receivedBatches.length).toBeGreaterThanOrEqual(0);
@@ -776,7 +812,10 @@ describe('React Integration - Fiber Lifecycle', () => {
     const element = React.createElement('TouchableOpacity', { onPress });
 
     render(element, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitForCondition(() => {
+      const allOps = receivedBatches.flatMap((b: OperationBatch) => b.operations || []);
+      return allOps.some((op) => op.op === 'CREATE');
+    });
 
     // Verify that a batch was sent with operations
     expect(receivedBatches.length).toBeGreaterThan(0);
@@ -790,7 +829,7 @@ describe('React Integration - Fiber Lifecycle', () => {
 
     // Clean up
     unmount(sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 50));
   });
 
   it('should handle multiple children correctly', async () => {
@@ -803,7 +842,7 @@ describe('React Integration - Fiber Lifecycle', () => {
     );
 
     render(element, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitForCondition(() => receivedBatches.length > 0);
 
     // Test coverage achieved by invoking render with multiple children
     expect(receivedBatches.length).toBeGreaterThanOrEqual(0);
@@ -821,7 +860,7 @@ describe('React Integration - Fiber Lifecycle', () => {
 
     const element = React.createElement(Counter);
     render(element, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitForCondition(() => receivedBatches.length > 0);
 
     // Check if we have operations (component may not trigger removal in this simple case)
     expect(receivedBatches.length).toBeGreaterThan(0);
@@ -842,7 +881,7 @@ describe('React Integration - Fiber Lifecycle', () => {
 
     const element = React.createElement(List);
     render(element, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForCondition(() => receivedBatches.length > 0);
 
     // Should have some operations
     expect(receivedBatches.length).toBeGreaterThan(0);
@@ -858,7 +897,8 @@ describe('HostConfig Methods - Direct Testing', () => {
 
   beforeEach(() => {
     receivedBatches = [];
-    sendToHost = mock((batch: OperationBatch) => {
+    sendToHost = mock((raw: OperationBatch | string) => {
+      const batch = typeof raw === 'string' ? JSON.parse(raw) : raw;
       receivedBatches.push(batch);
     });
     reconcilerInstance = createReconciler(sendToHost, new CallbackRegistry());
@@ -986,7 +1026,8 @@ describe('HostConfig appendChild/insertBefore/removeChild Coverage', () => {
 
   beforeEach(() => {
     receivedBatches = [];
-    sendToHost = mock((batch: OperationBatch) => {
+    sendToHost = mock((raw: OperationBatch | string) => {
+      const batch = typeof raw === 'string' ? JSON.parse(raw) : raw;
       receivedBatches.push(batch);
     });
   });
@@ -1014,7 +1055,7 @@ describe('HostConfig appendChild/insertBefore/removeChild Coverage', () => {
 
     const element = React.createElement(Parent);
     render(element, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForCondition(() => receivedBatches.length > 0);
 
     // Should have triggered some operations
     expect(receivedBatches.length).toBeGreaterThan(0);
@@ -1038,12 +1079,22 @@ describe('HostConfig appendChild/insertBefore/removeChild Coverage', () => {
 
     const element = React.createElement(ReorderList);
     render(element, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // Wait for both initial render AND reorder ops to arrive
+    // Initial render produces CREATE/APPEND; reorder produces INSERT/UPDATE
+    await waitForCondition(() => {
+      const allOps = receivedBatches.flatMap((b) => b.operations);
+      const hasCreate = allOps.some((op) => op.op === 'CREATE');
+      const hasInsertOrUpdate = allOps.some(
+        (op) => op.op === 'INSERT' || op.op === 'UPDATE' || op.op === 'REORDER'
+      );
+      return hasCreate && hasInsertOrUpdate;
+    });
 
     // Should have operations
     expect(receivedBatches.length).toBeGreaterThan(0);
 
-    // Check for INSERT operations (from reordering)
+    // Check for INSERT/UPDATE operations (from reordering)
     const allOps = receivedBatches.flatMap((b) => b.operations);
     const hasInsertOrUpdate = allOps.some(
       (op) => op.op === 'INSERT' || op.op === 'UPDATE' || op.op === 'APPEND'
@@ -1069,7 +1120,7 @@ describe('HostConfig appendChild/insertBefore/removeChild Coverage', () => {
 
     const element = React.createElement(ConditionalRender);
     render(element, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForCondition(() => receivedBatches.length > 0);
 
     // Should have operations
     expect(receivedBatches.length).toBeGreaterThan(0);
@@ -1094,7 +1145,7 @@ describe('HostConfig appendChild/insertBefore/removeChild Coverage', () => {
 
     const element = React.createElement(EdgeCaseInsert);
     render(element, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForCondition(() => receivedBatches.length > 0);
 
     expect(receivedBatches.length).toBeGreaterThan(0);
   });
@@ -1105,8 +1156,8 @@ describe('HostConfig appendChild/insertBefore/removeChild Coverage', () => {
       const [count, setCount] = React.useState(0);
 
       React.useEffect(() => {
-        setTimeout(() => setCount(1), 5);
-        setTimeout(() => setCount(2), 10);
+        setTimeout(() => setCount(1), 10);
+        setTimeout(() => setCount(2), 30);
       }, []);
 
       return React.createElement(
@@ -1119,7 +1170,7 @@ describe('HostConfig appendChild/insertBefore/removeChild Coverage', () => {
 
     const element = React.createElement(RemoveEdgeCase);
     render(element, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await waitForCondition(() => receivedBatches.length > 0);
 
     expect(receivedBatches.length).toBeGreaterThan(0);
   });
@@ -1130,11 +1181,12 @@ describe('HostConfig appendChild/insertBefore/removeChild Coverage', () => {
     const element2 = React.createElement('View', { testID: '2' });
 
     render(element1, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitForCondition(() => receivedBatches.length > 0);
 
     // Render different element (triggers container operations)
     render(element2, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    const batchCountBefore = receivedBatches.length;
+    await waitForCondition(() => receivedBatches.length > batchCountBefore);
 
     expect(receivedBatches.length).toBeGreaterThan(0);
   });
@@ -1157,7 +1209,7 @@ describe('HostConfig appendChild/insertBefore/removeChild Coverage', () => {
 
     const element = React.createElement(MultiRoot);
     render(element, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForCondition(() => receivedBatches.length > 0);
 
     expect(receivedBatches.length).toBeGreaterThan(0);
   });
@@ -1171,7 +1223,8 @@ describe('Text Update Coverage', () => {
 
   beforeEach(() => {
     receivedBatches = [];
-    sendToHost = mock((batch: OperationBatch) => {
+    sendToHost = mock((raw: OperationBatch | string) => {
+      const batch = typeof raw === 'string' ? JSON.parse(raw) : raw;
       receivedBatches.push(batch);
     });
   });
@@ -1186,7 +1239,7 @@ describe('Text Update Coverage', () => {
       const [text, setText] = React.useState('initial');
 
       React.useEffect(() => {
-        setTimeout(() => setText('updated'), 5);
+        setTimeout(() => setText('updated'), 10);
       }, []);
 
       // Use a raw text node, not wrapped in Text component
@@ -1196,13 +1249,17 @@ describe('Text Update Coverage', () => {
     const element = React.createElement(TextComponent);
     render(element, sendToHost);
 
-    await new Promise((resolve) => setTimeout(resolve, 20));
-
-    // Should have UPDATE operations for text changes
-    const hasUpdate = receivedBatches.some((batch) =>
-      batch.operations.some((op) => op.op === 'UPDATE')
+    await waitForCondition(() =>
+      receivedBatches.some((batch) =>
+        batch.operations.some((op) => op.op === 'UPDATE' || op.op === 'TEXT')
+      )
     );
-    expect(hasUpdate).toBe(true);
+
+    // Should have UPDATE or TEXT operations for text changes
+    const hasTextUpdate = receivedBatches.some((batch) =>
+      batch.operations.some((op) => op.op === 'UPDATE' || op.op === 'TEXT')
+    );
+    expect(hasTextUpdate).toBe(true);
   });
 });
 
@@ -1214,7 +1271,8 @@ describe('unmountAll', () => {
 
   beforeEach(() => {
     receivedBatches = [];
-    sendToHost = mock((batch: OperationBatch) => {
+    sendToHost = mock((raw: OperationBatch | string) => {
+      const batch = typeof raw === 'string' ? JSON.parse(raw) : raw;
       receivedBatches.push(batch);
     });
   });
@@ -1231,7 +1289,7 @@ describe('unmountAll', () => {
     const element = React.createElement('View', { key: 'test' });
     render(element, sendToHost);
 
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitForCondition(() => receivedBatches.length > 0);
 
     // Call unmountAll
     unmountAll();
@@ -1257,7 +1315,8 @@ describe('Container insertInContainerBefore Coverage', () => {
 
   beforeEach(() => {
     receivedBatches = [];
-    sendToHost = mock((batch: OperationBatch) => {
+    sendToHost = mock((raw: OperationBatch | string) => {
+      const batch = typeof raw === 'string' ? JSON.parse(raw) : raw;
       receivedBatches.push(batch);
     });
   });
@@ -1286,7 +1345,7 @@ describe('Container insertInContainerBefore Coverage', () => {
     const element = React.createElement(FragmentTest);
     render(element, sendToHost);
 
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForCondition(() => receivedBatches.length > 0);
 
     // Should have operations for the render
     expect(receivedBatches.length).toBeGreaterThan(0);
@@ -1321,7 +1380,7 @@ describe('Container insertInContainerBefore Coverage', () => {
     const element = React.createElement(EdgeCase);
     render(element, sendToHost);
 
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    await waitForCondition(() => receivedBatches.length > 0);
 
     expect(receivedBatches.length).toBeGreaterThan(0);
   });
@@ -1335,7 +1394,8 @@ describe('prepareUpdate', () => {
 
   beforeEach(() => {
     receivedBatches = [];
-    sendToHost = mock((batch: OperationBatch) => {
+    sendToHost = mock((raw: OperationBatch | string) => {
+      const batch = typeof raw === 'string' ? JSON.parse(raw) : raw;
       receivedBatches.push(batch);
     });
   });
@@ -1351,7 +1411,7 @@ describe('prepareUpdate', () => {
 
       React.useEffect(() => {
         // Change props to trigger prepareUpdate
-        setTimeout(() => setColor('blue'), 5);
+        setTimeout(() => setColor('blue'), 10);
       }, []);
 
       return React.createElement('View', { style: { backgroundColor: color } });
@@ -1360,7 +1420,11 @@ describe('prepareUpdate', () => {
     const element = React.createElement(PropsChanger);
     render(element, sendToHost);
 
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForCondition(() =>
+      receivedBatches.some((batch) =>
+        batch.operations.some((op) => op.op === 'UPDATE')
+      )
+    );
 
     // Should have UPDATE operations since props changed
     const hasUpdate = receivedBatches.some((batch) =>
@@ -1388,7 +1452,11 @@ describe('prepareUpdate', () => {
     const element = React.createElement(StaticProps);
     render(element, sendToHost);
 
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForCondition(() =>
+      receivedBatches.some((batch) =>
+        batch.operations.some((op) => op.op === 'CREATE')
+      )
+    );
 
     // Should have CREATE but may or may not have UPDATE depending on React's optimization
     const hasCreate = receivedBatches.some((batch) =>
@@ -1413,7 +1481,7 @@ describe('prepareUpdate', () => {
     const element = React.createElement(DifferentRefs);
     render(element, sendToHost);
 
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForCondition(() => receivedBatches.length > 0);
 
     // Should trigger UPDATE since object reference changed
     expect(receivedBatches.length).toBeGreaterThan(0);
@@ -1428,7 +1496,8 @@ describe('Guest component type markers', () => {
 
   beforeEach(() => {
     receivedBatches = [];
-    sendToHost = mock((batch: OperationBatch) => {
+    sendToHost = mock((raw: OperationBatch | string) => {
+      const batch = typeof raw === 'string' ? JSON.parse(raw) : raw;
       receivedBatches.push(batch);
     });
   });
@@ -1492,7 +1561,7 @@ describe('Guest component type markers', () => {
     };
 
     render(rootEl, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForCondition(() => receivedBatches.length > 0);
 
     const ops = receivedBatches.flatMap((b) => b.operations);
     const createdTypes = ops
@@ -1556,7 +1625,7 @@ describe('Guest component type markers', () => {
     };
 
     render(rootEl, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForCondition(() => receivedBatches.length > 0);
 
     expect(observedChildMarker).toBe('__rill_react_element__');
 
@@ -1685,7 +1754,10 @@ describe('Guest component type markers', () => {
     };
 
     render(rootEl, sendToHost);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForCondition(() => {
+      const ops = receivedBatches.flatMap((b) => b.operations);
+      return ops.filter((op) => op.op === 'CREATE').length >= 2;
+    });
 
     const ops = receivedBatches.flatMap((b) => b.operations);
     const created = ops.filter((op) => op.op === 'CREATE') as Array<

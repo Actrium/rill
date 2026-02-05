@@ -5,22 +5,22 @@
  * Build script compiles this into a single bundle that is eval'd once.
  *
  * Import order is critical:
- * 1. init.ts - Sets up __RILL_GUEST_ENV__ and __callbacks FIRST
+ * 1. init.ts - Sets up __RILL_GUEST_ENV__ and __rill.callbacks FIRST
  * 2. globals-setup.ts - Sets up console and runtime helpers
  * 3. react-global.ts - Exposes React/JSX runtimes on globalThis
- * 4. sdk - Exposes rill/sdk as globalThis.RillSDK
+ * 4. sdk - Exposes rill/guest as globalThis.RillGuest
  * 5. reconciler - RillReconciler (uses React)
  *
  * Output:
  * - globalThis.React - React API
  * - globalThis.ReactJSXRuntime - JSX runtime for modern transform
  * - globalThis.ReactJSXDevRuntime - JSX dev runtime
- * - globalThis.RillSDK - rill/sdk module exports (for externalized guest bundles)
+ * - globalThis.RillGuest - rill/guest module exports (for externalized guest bundles)
  * - globalThis.RillReconciler - Reconciler API (render, unmount, etc.)
  * - globalThis.__REACT_SHIM__ - Marker that shims are loaded
  * - globalThis.console - Console object (wraps Host callbacks)
- * - globalThis.__useHostEvent - Subscribe to Host events
- * - globalThis.__handleHostEvent - Called by Host to dispatch events
+ * - globalThis.__rill_onHostEvent - Subscribe to Host events
+ * - globalThis.__rill.dispatchEvent - Called by Host to dispatch events
  */
 
 // ============================================
@@ -39,11 +39,11 @@ import './runtime/globals-setup';
 import './runtime/react-global';
 
 // ============================================
-// 4. Guest SDK (rill/sdk)
+// 4. Guest SDK (rill/guest)
 // ============================================
-import * as RillSDK from '../sdk';
+import * as RillGuestModule from '../sdk';
 
-(globalThis as Record<string, unknown>).RillSDK = RillSDK;
+(globalThis as Record<string, unknown>).RillGuest = RillGuestModule;
 
 // ============================================
 // 5. Reconciler
@@ -82,8 +82,8 @@ if ((globalThis as Record<string, unknown>).__RILL_DEBUG__) {
     typeof (globalThis as Record<string, unknown>).ReactJSXRuntime
   );
   console.log(
-    '[rill:guest-bundle] - RillSDK:',
-    typeof (globalThis as Record<string, unknown>).RillSDK
+    '[rill:guest-bundle] - RillGuest:',
+    typeof (globalThis as Record<string, unknown>).RillGuest
   );
   console.log(
     '[rill:guest-bundle] - RillReconciler:',

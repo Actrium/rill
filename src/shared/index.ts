@@ -21,7 +21,7 @@ export {
 export {
   CallbackRegistry as CallbackRegistryImpl,
   globalCallbackRegistry,
-} from './CallbackRegistry';
+} from './callback-registry';
 // Serialization utilities (共享序列化工具)
 export {
   createDecoder,
@@ -31,12 +31,11 @@ export {
 } from './serialization';
 // TypeRules 系统
 export {
+  type CodecCallbacks,
   DEFAULT_TYPE_RULES,
   type TransportStrategy,
   type TypeRule,
-  type TypeRuleContext,
-} from './TypeRules';
-// 类型定义
+} from './type-rules';
 export type {
   AppendOperation,
   BaseOperation,
@@ -53,8 +52,6 @@ export type {
   DestroyMessage,
   HostEventMessage,
   HostMessage,
-  // 消息类型
-  HostMessageType,
   InsertOperation,
   // JSI 类型
   JSIPrimitive,
@@ -72,6 +69,7 @@ export type {
   ReorderOperation,
   // 需要 Bridge 处理的类型
   RequiresBridge,
+  ReviewedUnknown,
   SendToHost,
   SerializedCreateOperation,
   SerializedDate,
@@ -97,8 +95,10 @@ export type {
   TextOperation,
   UpdateOperation,
 } from './types';
+// 类型定义
 // Type Guards
 export {
+  HostMsg,
   isJSIPrimitive,
   isSerializedDate,
   isSerializedError,

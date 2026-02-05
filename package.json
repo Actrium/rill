@@ -2,7 +2,7 @@
   "name": "rill",
   "version": "0.1.0",
   "repository": "https://github.com/GoAskAway/rill.git",
-  "main": "./src/host/index.ts",
+  "main": "./src/index.ts",
   "devDependencies": {
     "@babel/core": "^7.28.5",
     "@babel/preset-env": "^7.28.6",
@@ -29,17 +29,15 @@
     "react-native-web": ">=0.19.0"
   },
   "exports": {
-    ".": "./src/host/index.ts",
-    "./sdk": "./src/sdk/index.ts",
+    ".": "./src/index.ts",
+    "./host": "./src/host/index.ts",
+    "./guest": "./src/sdk/index.ts",
     "./host/preset": "./src/host/preset/index.ts",
-    "./sandbox": "./src/sandbox/index.ts",
-    "./sandbox/native": "./src/sandbox/native/index.ts",
-    "./sandbox/web": "./src/sandbox/web/index.ts",
     "./devtools": "./src/devtools/index.ts",
     "./cli": "./src/cli/index.ts"
   },
   "bin": {
-    "rill": "./src/cli/index.ts"
+    "rill": "./src/cli/bin.ts"
   },
   "description": "A lightweight, headless, sandboxed dynamic UI rendering engine for React Native",
   "engines": {
@@ -49,7 +47,11 @@
   "files": [
     "src",
     "native",
+    "android",
+    "scripts/rill_postinstall.js",
+    "scripts/rill_post_install.rb",
     "react-native.config.js",
+    "RillSandboxNative.podspec",
     "README.md",
     "LICENSE"
   ],
@@ -64,23 +66,30 @@
     }
   },
   "scripts": {
-    "test": "bun test",
-    "test:native": "bash native/quickjs/run-tests.sh && bash native/jsc/run-tests.sh",
-    "test:wasm": "bun tests/e2e-wasm-sandbox/run.ts",
-    "test:macos:jsc-jsc": "bash tests/rn-macos-e2e/run-tests.sh jsc-jsc",
-    "test:macos:jsc-quickjs": "bash tests/rn-macos-e2e/run-tests.sh jsc-quickjs",
-    "test:macos:hermes-jsc": "bash tests/rn-macos-e2e/run-tests.sh hermes-jsc",
-    "test:macos:hermes-quickjs": "bash tests/rn-macos-e2e/run-tests.sh hermes-quickjs",
-    "test:macos:hermes-hermes": "bash tests/rn-macos-e2e/run-tests.sh hermes-hermes",
-    "test:macos": "bash tests/rn-macos-e2e/run-tests.sh all",
-    "test:all": "bash scripts/run-all-tests.sh --with-rn",
+    "postinstall": "node scripts/rill_postinstall.js",
+    "test": "bash scripts/run-all-tests.sh --with-rn",
+    "test:unit": "bun test",
+    "test:native": "bash native/core/run-tests.sh && bash native/quickjs/run-tests.sh && bash native/jsc/run-tests.sh",
+    "test:bundle": "bash tests/guest-bundle/run-tests.sh",
+    "test:e2e:wasm": "bun tests/wasm-sandbox/run.ts",
+    "test:e2e:rn": "bash tests/rn-macos-bridgeless/run-tests.sh all",
+    "test:e2e:rn:jsc-jsc": "bash tests/rn-macos-bridgeless/run-tests.sh jsc-jsc",
+    "test:e2e:rn:jsc-quickjs": "bash tests/rn-macos-bridgeless/run-tests.sh jsc-quickjs",
+    "test:e2e:rn:hermes-jsc": "bash tests/rn-macos-bridgeless/run-tests.sh hermes-jsc",
+    "test:e2e:rn:hermes-quickjs": "bash tests/rn-macos-bridgeless/run-tests.sh hermes-quickjs",
+    "test:e2e:rn:hermes-hermes": "bash tests/rn-macos-bridgeless/run-tests.sh hermes-hermes",
+    "test:ci": "bash scripts/run-all-tests.sh",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
     "format:check": "biome format .",
-    "typecheck": "bun tsc --noEmit",
+    "check:types": "bun tsc --noEmit",
     "check:unknown": "bun scripts/check-unknown.ts",
-    "precommit": "bun check:unknown && bun typecheck && bun lint && bun test"
+    "check:build:apple": "bash scripts/check-apple-build.sh",
+    "preflight": "bun run check:unknown && bun run check:types && bun run lint && bun run test:unit"
   },
-  "types": "./src/host/index.ts"
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@babel/runtime": "^7.28.6"
+  }
 }

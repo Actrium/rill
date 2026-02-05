@@ -1,14 +1,13 @@
 import { describe, expect, it } from 'bun:test';
 import vm from 'node:vm';
-import { VMProvider } from '../../../sandbox/index';
+import { VMProvider } from '../../sandbox/index';
 import { Engine } from '../../engine';
 
 // These tests are specific to the VMProvider and should only run in a Node.js/Bun environment.
 describe.skipIf(!vm)('VMProvider', () => {
   it('should interrupt a dead-loop with a timeout', async () => {
-    const provider = new VMProvider({ timeout: 100 });
     const engine = new Engine({
-      provider: provider, // Fixed: use 'provider' not 'quickjs'
+      sandbox: 'vm',
       debug: false,
       timeout: 100,
     });
@@ -35,8 +34,8 @@ describe.skipIf(!vm)('VMProvider', () => {
     const context = runtime.createContext();
 
     // Set up context state
-    context.setGlobal('testVar', 123);
-    expect(context.getGlobal('testVar')).toBe(123);
+    context.inject('testVar', 123);
+    expect(context.extract('testVar')).toBe(123);
 
     // Dispose context
     context.dispose();
@@ -54,7 +53,7 @@ describe.skipIf(!vm)('VMProvider', () => {
     const context = runtime.createContext();
 
     // Set a global
-    context.setGlobal('myVar', 42);
+    context.inject('myVar', 42);
 
     // Eval code that uses the global
     const result = context.eval('myVar + 8');

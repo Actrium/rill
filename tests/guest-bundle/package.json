@@ -1,0 +1,17 @@
+{
+  "name": "rill-test-guest-bundle",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "bun ../../src/cli/bin.ts build src/index.tsx -o dist/bundle.js",
+    "build:dev": "bun ../../src/cli/bin.ts build src/index.tsx -o dist/bundle.js --no-minify --sourcemap"
+  },
+  "dependencies": {
+    "rill": "link:../../",
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "typescript": "^5.3.0"
+  }
+}

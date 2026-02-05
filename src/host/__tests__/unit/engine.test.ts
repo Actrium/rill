@@ -5,7 +5,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import React from 'react';
 import { Engine } from '../../engine';
-import { createMockJSEngineProvider } from '../test-utils';
 
 // Mock components
 const MockView: React.FC<{ children?: React.ReactNode }> = ({ children }) =>
@@ -22,7 +21,7 @@ describe('Engine', () => {
   let engine: Engine;
 
   beforeEach(() => {
-    engine = new Engine({ quickjs: createMockJSEngineProvider() });
+    engine = new Engine({ sandbox: 'vm'});
     mockFetch.mockReset();
   });
 
@@ -32,7 +31,7 @@ describe('Engine', () => {
 
   describe('constructor', () => {
     it('should create engine with default options', () => {
-      const e = new Engine({ quickjs: createMockJSEngineProvider() });
+      const e = new Engine({ sandbox: 'vm'});
       expect(e.isLoaded).toBe(false);
       expect(e.isDestroyed).toBe(false);
       e.destroy();
@@ -46,7 +45,7 @@ describe('Engine', () => {
       };
 
       const e = new Engine({
-        quickjs: createMockJSEngineProvider(),
+        sandbox: 'vm',
         timeout: 10000,
         debug: false,
         logger: customLogger,
@@ -106,7 +105,7 @@ describe('Engine', () => {
 
     it('should pass initial props as config', async () => {
       const bundleCode = `
-        const config = __getConfig();
+        const config = __rill_getConfig();
         console.log(config.theme);
       `;
 
@@ -129,15 +128,17 @@ describe('Engine', () => {
     it('should throw error when loading twice', async () => {
       await engine.loadBundle('console.log("first")');
 
-      await expect(engine.loadBundle('console.log("second")')).rejects.toThrow(
+      // Guard check throws synchronously before any async path
+      expect(() => engine.loadBundle('console.log("second")')).toThrow(
         'Engine already loaded a Guest'
       );
     });
 
-    it('should throw error when destroyed', async () => {
+    it('should throw error when destroyed', () => {
       engine.destroy();
 
-      await expect(engine.loadBundle('console.log("test")')).rejects.toThrow(
+      // Guard check throws synchronously before any async path
+      expect(() => engine.loadBundle('console.log("test")')).toThrow(
         'Engine has been destroyed'
       );
     });
@@ -203,19 +204,15 @@ describe('Engine', () => {
 
   describe('createReceiver', () => {
     it('should create and return receiver', () => {
-      const onUpdate = mock();
-      const receiver = engine.createReceiver(onUpdate);
+      const receiver = engine.createReceiver();
 
       expect(receiver).toBeDefined();
       expect(engine.getReceiver()).toBe(receiver);
     });
 
     it('should replace existing receiver', () => {
-      const onUpdate1 = mock();
-      const onUpdate2 = mock();
-
-      const receiver1 = engine.createReceiver(onUpdate1);
-      const receiver2 = engine.createReceiver(onUpdate2);
+      const receiver1 = engine.createReceiver();
+      const receiver2 = engine.createReceiver();
 
       expect(engine.getReceiver()).toBe(receiver2);
       expect(engine.getReceiver()).not.toBe(receiver1);
@@ -228,7 +225,7 @@ describe('Engine', () => {
     });
 
     it('should return receiver after createReceiver', () => {
-      engine.createReceiver(mock());
+      engine.createReceiver();
       expect(engine.getReceiver()).not.toBeNull();
     });
   });
@@ -296,7 +293,7 @@ describe('Engine', () => {
     });
 
     it('should clear receiver', () => {
-      engine.createReceiver(mock());
+      engine.createReceiver();
       expect(engine.getReceiver()).not.toBeNull();
 
       engine.destroy();
@@ -360,7 +357,7 @@ describe('Engine Polyfills', () => {
   const mockLogger = { log: mock(), warn: mock(), error: mock() };
 
   beforeEach(() => {
-    engine = new Engine({ quickjs: createMockJSEngineProvider(), debug: true, logger: mockLogger });
+    engine = new Engine({ sandbox: 'vm', debug: true, logger: mockLogger });
   });
 
   afterEach(() => {
@@ -423,17 +420,17 @@ describe('Engine Runtime API', () => {
   let engine: Engine;
 
   beforeEach(() => {
-    engine = new Engine({ quickjs: createMockJSEngineProvider() });
+    engine = new Engine({ sandbox: 'vm'});
   });
 
   afterEach(() => {
     engine.destroy();
   });
 
-  it('should provide __getConfig API', async () => {
+  it('should provide __rill_getConfig API', async () => {
     await engine.loadBundle(
       `
-      const config = __getConfig();
+      const config = __rill_getConfig();
       console.log(config.theme);
     `,
       { theme: 'dark' }
@@ -442,11 +439,11 @@ describe('Engine Runtime API', () => {
     expect(engine.isLoaded).toBe(true);
   });
 
-  it('should provide __sendToHost API', async () => {
-    const _receiver = engine.createReceiver(mock());
+  it('should provide __rill_sendBatch API', async () => {
+    const _receiver = engine.createReceiver();
 
     await engine.loadBundle(`
-      __sendToHost({
+      __rill_sendBatch({
         version: 1,
         batchId: 1,
         operations: []
@@ -462,7 +459,7 @@ describe('Engine Error Handling', () => {
   let errorHandler: ReturnType<typeof mock>;
 
   beforeEach(() => {
-    engine = new Engine({ quickjs: createMockJSEngineProvider() });
+    engine = new Engine({ sandbox: 'vm'});
     errorHandler = mock();
     engine.on('error', errorHandler);
   });

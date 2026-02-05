@@ -24,8 +24,6 @@ export type {
   DestroyMessage,
   HostEventMessage,
   HostMessage,
-  // 消息类型
-  HostMessageType,
   InsertOperation,
   Operation,
   OperationBatch,
@@ -51,11 +49,7 @@ export type {
   TextOperation,
   UpdateOperation,
 } from '../shared';
-
-export {
-  isSerializedFunction,
-  operationHasProps,
-} from '../shared';
+export { HostMsg, isSerializedFunction, operationHasProps } from '../shared';
 
 // Import for local use in this file
 import type { BridgeValueObject as _BridgeValueObject } from '../shared';
@@ -172,7 +166,7 @@ export type {
 // EngineView Interface
 // ============================================
 
-import type { Engine } from './Engine';
+import type { Engine } from './engine';
 
 /**
  * Core EngineView props interface

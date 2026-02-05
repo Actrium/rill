@@ -11,7 +11,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { Engine } from '../../engine';
 import type { Receiver } from '../../receiver';
-import { createMockJSEngineProvider } from '../test-utils';
 import {
   expectEventReceived,
   expectFunctionProp,
@@ -46,7 +45,7 @@ export function createTestContext(): TestContext {
   // Create engine with mock JS engine provider
   // Use silent logger to prevent expected error logs from cluttering test output
   const engine = new Engine({
-    quickjs: createMockJSEngineProvider(),
+    sandbox: 'vm',
     debug: false,
     logger: {
       log: () => {}, // Silent in tests
@@ -91,7 +90,7 @@ export function createTestContext(): TestContext {
   };
 
   // Create receiver
-  const receiver = engine.createReceiver(() => {});
+  const receiver = engine.createReceiver();
 
   return { engine, receiver, events, consoleOutput };
 }
@@ -135,7 +134,7 @@ describe('E2E Test Infrastructure', () => {
 
   it('should capture events from guest', async () => {
     const guestCode = `
-      globalThis.__sendEventToHost('TEST_EVENT', { value: 123 });
+      globalThis.__rill_emitEvent('TEST_EVENT', { value: 123 });
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -205,7 +204,7 @@ describe('E2E Test Helpers Integration', () => {
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -241,7 +240,7 @@ describe('E2E Test Helpers Integration', () => {
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -264,13 +263,13 @@ describe('E2E Test Helpers Integration', () => {
           'TouchableOpacity',
           {
             testID: 'button',
-            onPress: () => globalThis.__sendEventToHost('PRESS')
+            onPress: () => globalThis.__rill_emitEvent('PRESS')
           },
           React.createElement('Text', {}, 'Click Me')
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);

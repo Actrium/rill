@@ -14,8 +14,8 @@ type ReactElement = any;
 import React from 'react';
 import type { GuestElement } from '../../../sdk/types';
 import { isGuestReactElement } from '../../../sdk/types';
-import type { SerializedValue } from '../../../shared';
-import { serializeProps } from './guest-encoder';
+import type { ReviewedUnknown, SerializedValue } from '../../../shared';
+import { deserializeProps, serializeProps } from './guest-encoder';
 
 // ============================================
 // Type Definitions
@@ -38,10 +38,10 @@ interface GuestElementRuntime {
   __rillTypeMarker?: string;
   __rillFragmentType?: string;
   $$typeof?: symbol;
-  type?: unknown;
+  type?: ReviewedUnknown;
   props?: Record<string, unknown>;
   key?: React.Key | null;
-  ref?: unknown;
+  ref?: ReviewedUnknown;
 }
 
 /**
@@ -85,6 +85,12 @@ const componentTypeIdByFn = new WeakMap<Function, string>();
 const componentTypeFnById = new Map<string, Function>();
 const componentTypeOwnerById = new Map<string, string>();
 let componentTypeCounter = 0;
+
+// PERF: No console calls in render hot path!
+// In XPC ViewBridge + JSC sandbox, ANY console call (log/warn/error) triggers
+// JSI value conversion that traverses React fiber circular references.
+// React DEV mode also patches console to inject component stacks (with fiber refs).
+// Result: each console call costs 100-500ms due to millions of circular ref traversals.
 
 export function registerComponentType(fn: unknown, ownerId = 'global'): string | null {
   if (typeof fn !== 'function') return null;
@@ -135,17 +141,16 @@ function getOrCreateWrappedComponent(
         hookIdRef.current = `inst_${hookInstancePrefix}_${++hookInstanceCounter}`;
       }
       try {
-        // Note: originalType may be a JSI-bridged sandbox function (e.g., JSC Sandbox).
-        // Passing Host ReactElement (with Fiber/circular refs) as props back to sandbox
-        // can trigger massive `[JSCSandbox] Exception` or system kill.
-        // Do shallow copy to avoid sending objects with prototypes/internal fields to sandbox.
-        // Note: Function props are already serialized in transformGuestElement before reaching here
-        // Reason: Props type unknown until runtime shallow copy and field injection
-        const safeProps: unknown =
-          props && typeof props === 'object' ? { ...(props as Record<string, unknown>) } : {};
-        if (safeProps && typeof safeProps === 'object') {
-          (safeProps as Record<string, unknown>).__rillHookInstanceId = hookIdRef.current;
-        }
+        // Props arrive serialized (function markers from transformGuestElement's serializeProps).
+        // Deserialize to restore callable proxies so Guest components can call prop functions.
+        // Both sandbox wrapper and Guest component run in the same JSC runtime,
+        // so the lightweight proxies invoke directly via globalCallbackRegistry.
+        const rawProps =
+          props && typeof props === 'object' ? (props as Record<string, unknown>) : {};
+        const deserialized = deserializeProps(rawProps);
+        // Always shallow-copy to avoid mutating the original (React may freeze props)
+        const safeProps = deserialized === rawProps ? { ...rawProps } : deserialized;
+        safeProps.__rillHookInstanceId = hookIdRef.current;
 
         // Set current instance ID for shims' hooks to use per-instance state
         // This enables multiple component instances to have separate hook state
@@ -155,22 +160,21 @@ function getOrCreateWrappedComponent(
 
         try {
           const result = originalType(safeProps);
-          // Debug: log what the sandbox function returned
-          const resultType = typeof result;
-          const resultKeys =
-            result && typeof result === 'object' ? Object.keys(result).slice(0, 10) : null;
-          const resultMarker = result?.__rillTypeMarker;
-          const resultElType = result?.type;
-          console.log(
-            `[rill:wrap] sandbox fn returned | type=${resultType} | marker=${String(resultMarker)} | elType=${String(resultElType)} | keys=${resultKeys?.join(',') ?? 'null'}`
-          );
           return transformGuestElement(result);
         } finally {
           // Restore previous instance ID (for nested component calls)
           globalState.__rillCurrentInstanceId = prevInstanceId;
         }
       } catch (err) {
-        console.error('[rill:reconciler] component render error', err);
+        // Surface error as simple strings to avoid JSI circular ref traversal
+        const msg = err instanceof Error ? err.message : String(err);
+        const stack = err instanceof Error ? (err.stack ?? '') : '';
+        console.error(`[rill:reconciler] render error in ${displayName ?? 'unknown'}: ${msg}`);
+        if (stack) console.error(`[rill:reconciler] stack: ${stack}`);
+        // Store on globalThis for Host-side inspection
+        const g = globalThis as Record<string, unknown>;
+        if (!g.__rillRenderErrors) g.__rillRenderErrors = [];
+        (g.__rillRenderErrors as string[]).push(`${displayName ?? 'unknown'}: ${msg}`);
         return null;
       }
     },
@@ -236,25 +240,6 @@ export function transformGuestElement(
   }
 
   const el = element as GuestElementRuntime;
-  try {
-    const marker = el.__rillTypeMarker;
-    const typeVal = el.type;
-    const typeType = typeof typeVal;
-    const propsKeys = el.props ? Object.keys(el.props) : null;
-    const globalState = globalThis as Record<string, unknown>;
-    if (globalState.__RILL_RECONCILER_DEBUG__) {
-      // Only log first 20 transforms to avoid spam
-      const counter = (globalState.__TRANSFORM_LOG_COUNT as number | undefined) || 0;
-      if (counter < 20) {
-        globalState.__TRANSFORM_LOG_COUNT = counter + 1;
-        console.log(
-          `[rill:reconciler] transform element | marker=${String(marker)} | typeType=${typeType} | type=${String(typeVal)} | propsKeys=${propsKeys ? propsKeys.join(',') : 'null'}`
-        );
-      }
-    }
-  } catch {
-    // ignore logging failures
-  }
 
   // Check if this is a Rill Guest element using the string marker
   // This marker survives JSI serialization while Symbols don't
@@ -285,13 +270,18 @@ export function transformGuestElement(
   const looksLikeElement =
     !isRillElement && !hasSymbolType && Object.hasOwn(el, 'type') && Object.hasOwn(el, 'props');
 
-  if (looksLikeElement) {
-    console.error(
-      `[rill:reconciler] missing markers, treating as element | typeType=${typeof el.type} | propsKeys=${
-        el.props ? Object.keys(el.props as Record<string, unknown>).join(',') : 'null'
-      }`
+  // DEBUG: log element being processed
+  const elType = typeof el.type === 'string' ? el.type : 'non-string';
+  if (elType === 'TouchableOpacity') {
+    const propKeys = el.props ? Object.keys(el.props as Record<string, unknown>) : [];
+    const hasOnPress = el.props && 'onPress' in (el.props as Record<string, unknown>);
+    console.log(
+      `[rill:transform] TouchableOpacity | isRillElement=${isRillElement} | looksLikeElement=${looksLikeElement} | propKeys=${propKeys.join(',')} | hasOnPress=${hasOnPress}`
     );
   }
+
+  // Note: looksLikeElement fires when elements lose markers across JSI bridge.
+  // No console output here — see PERF comment at top of file.
 
   if (!isRillElement && !hasSymbolType && !looksLikeElement) {
     // Not a React element, return as-is
@@ -304,7 +294,7 @@ export function transformGuestElement(
     (typeof el.type === 'symbol' && (el.type as symbol).description === 'react.fragment');
 
   // Transform the element type
-  let transformedType: unknown = el.type;
+  let transformedType: ReviewedUnknown = el.type;
   if (isFragment) {
     transformedType = REACT_FRAGMENT_TYPE;
   } else if (isComponentTypeRef(transformedType)) {
@@ -325,25 +315,8 @@ export function transformGuestElement(
     const nestedType = typeObj.type;
     const renderType = typeObj.render;
     const defaultType = typeObj.default;
-    const typeKeys = Object.keys(typeObj);
-    const ownKeys = Reflect.ownKeys(typeObj).map((k) => String(k));
-    const symbolType = typeObj.$$typeof;
     const displayName = typeObj.displayName;
-    const protoName = Object.getPrototypeOf(typeObj)?.constructor?.name ?? 'null';
-    const typeTag = Object.prototype.toString.call(typeObj);
-    const isCallable =
-      typeof typeObj === 'function' ||
-      typeObj instanceof Function ||
-      typeof typeObj.call === 'function';
-    console.error(
-      `[rill:reconciler] type is object, attempting unwrap | keys=${typeKeys.join(
-        ','
-      )} | ownKeys=${ownKeys.join(',')} | $$typeof=${String(symbolType)} | nestedType=${String(
-        nestedType
-      )} | renderType=${String(renderType)} | defaultType=${String(defaultType)} | displayName=${String(
-        displayName
-      )} | proto=${protoName} | tag=${typeTag} | callable=${isCallable}`
-    );
+    // No console output here — see PERF comment at top of file.
     const panelId =
       typeof displayName === 'string' && displayName.toLowerCase().includes('panel.')
         ? displayName.toLowerCase().includes('left')
@@ -388,6 +361,9 @@ export function transformGuestElement(
 
   // Serialize props for Guest components (sandbox wrappers)
   // TypeRules automatically handle function → { __type: 'function', __fnId }
+  // This early serialization ensures function markers survive the JSI boundary.
+  // The sandbox wrapper then deserializes markers back to lightweight callable proxies
+  // so Guest components can call prop functions directly (e.g., onSubmit(...)).
   if (props && isSandboxWrapper) {
     const { children, ...restProps } = props;
     const serialized = serializeProps(restProps);

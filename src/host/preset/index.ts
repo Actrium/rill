@@ -7,20 +7,10 @@
  * For web builds, configure bundler alias: 'react-native' → 'react-native-web'
  */
 
-// Re-export runtime types for convenience
-export type {
-  ComponentMap,
-  ComponentRegistry,
-  ComponentType,
-  Engine,
-  EngineOptions,
-} from '..';
-// Default components
 export type {
   ActivityIndicatorProps,
   ButtonProps,
   ClickableViewProps,
-  DefaultComponentName,
   FlatListProps,
   ImageProps,
   ImageSource,
@@ -32,6 +22,7 @@ export type {
   TouchableOpacityProps,
   ViewProps,
 } from './components';
+// Re-export individual components and their prop types
 export {
   ActivityIndicator,
   Button,
@@ -47,5 +38,5 @@ export {
   View,
 } from './components';
 // EngineView component
-export type { EngineViewProps } from './EngineView';
-export { EngineView } from './EngineView';
+export type { EngineViewProps } from './engine-view';
+export { EngineView } from './engine-view';

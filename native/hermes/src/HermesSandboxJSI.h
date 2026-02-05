@@ -15,8 +15,8 @@ using namespace facebook;
  *
  * Exposed to JS as a HostObject with SYNCHRONOUS methods:
  * - eval(code: string): unknown
- * - setGlobal(name: string, value: unknown): void
- * - getGlobal(name: string): unknown
+ * - inject(name: string, value: unknown): void
+ * - extract(name: string): unknown
  * - dispose(): void
  */
 class HermesSandboxContext : public jsi::HostObject {
@@ -31,9 +31,9 @@ public:
 
   jsi::Value eval(jsi::Runtime &rt, const std::string &code);
   jsi::Value evalBytecode(jsi::Runtime &rt, const uint8_t *bytecode, size_t size);
-  void setGlobal(jsi::Runtime &rt, const std::string &name,
+  void inject(jsi::Runtime &rt, const std::string &name,
                  const jsi::Value &value);
-  jsi::Value getGlobal(jsi::Runtime &rt, const std::string &name);
+  jsi::Value extract(jsi::Runtime &rt, const std::string &name);
   void dispose();
 
   bool isDisposed() const { return disposed_; }
@@ -47,6 +47,10 @@ private:
   // Callback storage for host functions wrapped in sandbox
   std::unordered_map<std::string, std::shared_ptr<jsi::Function>> callbacks_;
   int callbackCounter_ = 0;
+  
+  // Cache for sandbox wrappers - preserves identity when same host function is passed multiple times
+  // Key: callback ID, Value: the sandbox jsi::Function wrapper
+  std::unordered_map<std::string, std::shared_ptr<jsi::Function>> wrapperCache_;
 
   // Convert value from host runtime to sandbox runtime
   jsi::Value hostToSandbox(jsi::Runtime &hostRt, jsi::Runtime &sandboxRt,
@@ -111,5 +115,8 @@ public:
 
   static void install(jsi::Runtime &runtime);
 };
+
+// Install __HermesSandboxJSI on the given runtime
+void installHermesSandbox(jsi::Runtime &runtime);
 
 } // namespace hermes_sandbox

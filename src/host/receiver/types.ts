@@ -11,22 +11,15 @@ import type { CallbackRegistry, HostMessage } from '../types';
 // ============================================
 
 declare global {
-  // Note: Previously we stored APPEND debug tracking in globalThis.__APPEND_*.
-  // This has been removed to avoid leaking memory and polluting host globals.
+  // Note: Previously we stored APPEND/TouchableOpacity/function debug tracking
+  // in globalThis.__APPEND_*, __TOUCHABLE_*, __RECEIVER_FUNCTION_*, __LAST_FUNCTION_*.
+  // These have been removed to avoid leaking memory and polluting host globals.
   // eslint-disable-next-line no-var
   var __RECEIVER_APPEND_CALLS: never;
   // eslint-disable-next-line no-var
   var __APPEND_PARENT_IDS: never;
   // eslint-disable-next-line no-var
   var __APPEND_DETAILS: never;
-  // eslint-disable-next-line no-var
-  var __TOUCHABLE_RENDER_COUNT: number | undefined;
-  // eslint-disable-next-line no-var
-  var __LAST_TOUCHABLE_HAS_ONPRESS: boolean | undefined;
-  // eslint-disable-next-line no-var
-  var __RECEIVER_FUNCTION_COUNT: number | undefined;
-  // eslint-disable-next-line no-var
-  var __LAST_FUNCTION_FNID: string | undefined;
 }
 
 // ============================================

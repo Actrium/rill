@@ -9,76 +9,14 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { HostMsg } from '../../types';
 import { Engine } from '../../engine';
-import { createMockJSEngineProvider } from '../test-utils';
-
-// Mock QuickJS Provider with callback tracking (uses sandboxed globalThis)
-function createMockQuickJSProviderWithTracking() {
-  const evalCalls: string[] = [];
-  const globals = new Map<string, unknown>();
-  const sandboxGlobalThis: Record<string, unknown> = {};
-
-  return {
-    evalCalls,
-    globals,
-    createRuntime() {
-      return {
-        createContext() {
-          const executeCode = (code: string): unknown => {
-            evalCalls.push(code);
-            // Execute callback registry setup and invocations
-            const globalNames = Array.from(globals.keys());
-            const globalValues = Array.from(globals.values());
-
-            // Wrap code to use sandboxed globalThis
-            const wrappedCode = `
-              "use strict";
-              var globalThis = arguments[arguments.length - 1];
-              ${code}
-            `;
-
-            try {
-              const fn = new Function(...globalNames, wrappedCode);
-              return fn(...globalValues, sandboxGlobalThis);
-            } catch (e) {
-              throw e;
-            }
-          };
-
-          return {
-            eval: executeCode,
-            evalAsync: async (code: string) => executeCode(code),
-            setGlobal(name: string, value: unknown): void {
-              globals.set(name, value);
-              sandboxGlobalThis[name] = value;
-            },
-            getGlobal(name: string): unknown {
-              if (name in sandboxGlobalThis) {
-                return sandboxGlobalThis[name];
-              }
-              return globals.get(name);
-            },
-            dispose(): void {
-              globals.clear();
-              for (const key of Object.keys(sandboxGlobalThis)) {
-                delete sandboxGlobalThis[key];
-              }
-            },
-          };
-        },
-        dispose(): void {},
-      };
-    },
-  };
-}
 
 describe('Engine Callback Handling', () => {
   let engine: Engine;
-  let mockProvider: ReturnType<typeof createMockQuickJSProviderWithTracking>;
 
   beforeEach(() => {
-    mockProvider = createMockQuickJSProviderWithTracking();
-    engine = new Engine({ quickjs: mockProvider });
+    engine = new Engine({ sandbox: 'vm', debug: false });
   });
 
   afterEach(() => {
@@ -92,7 +30,7 @@ describe('Engine Callback Handling', () => {
     await engine.loadBundle('console.log("loaded")', { theme: 'light' });
 
     await engine.sendToSandbox({
-      type: 'CONFIG_UPDATE',
+      type: HostMsg.CONFIG_UPDATE,
       config: { theme: 'dark', fontSize: 16 },
     });
 
@@ -104,7 +42,7 @@ describe('Engine Callback Handling', () => {
     expect(engine.isDestroyed).toBe(false);
 
     await engine.sendToSandbox({
-      type: 'DESTROY',
+      type: HostMsg.DESTROY,
     });
 
     expect(engine.isDestroyed).toBe(true);
@@ -112,18 +50,15 @@ describe('Engine Callback Handling', () => {
 
   it('should not send message when engine is destroyed', async () => {
     await engine.loadBundle('console.log("loaded")');
-    const evalCountBefore = mockProvider.evalCalls.length;
-
     engine.destroy();
 
-    await engine.sendToSandbox({
-      type: 'HOST_EVENT',
-      eventName: 'TEST',
-      payload: null,
-    });
-
-    // No new eval calls after destroy
-    expect(mockProvider.evalCalls.length).toBe(evalCountBefore);
+    await expect(
+      engine.sendToSandbox({
+        type: HostMsg.HOST_EVENT,
+        eventName: 'TEST',
+        payload: null,
+      })
+    ).resolves.toBeUndefined();
   });
 });
 
@@ -142,7 +77,7 @@ describe('Engine Event Listener Error Handling', () => {
       error: mock(),
     };
     engine = new Engine({
-      quickjs: createMockJSEngineProvider(),
+      sandbox: 'vm',
       logger: customLogger,
       debug: false,
     });
@@ -198,7 +133,7 @@ describe('Engine Metrics', () => {
   beforeEach(() => {
     metricsCollector = [];
     engine = new Engine({
-      quickjs: createMockJSEngineProvider(),
+      sandbox: 'vm',
       onMetric: (name, value, extra) => {
         metricsCollector.push({ name, value, extra });
       },
@@ -213,7 +148,7 @@ describe('Engine Metrics', () => {
     await engine.loadBundle('console.log("test")');
 
     await engine.sendToSandbox({
-      type: 'HOST_EVENT',
+      type: HostMsg.HOST_EVENT,
       eventName: 'TEST',
       payload: { data: 'value' },
     });
@@ -256,7 +191,7 @@ describe('Engine Metrics', () => {
 
 describe('Engine RequireWhitelist', () => {
   it('should use default whitelist when not provided', async () => {
-    const engine = new Engine({ quickjs: createMockJSEngineProvider() });
+    const engine = new Engine({ sandbox: 'vm'});
 
     // Default whitelist includes react, react-native, etc.
     // Use var instead of const to avoid redeclaration error since React is already injected as global
@@ -271,20 +206,20 @@ describe('Engine RequireWhitelist', () => {
   it('should enforce custom whitelist', async () => {
     const customLogger = { log: mock(), warn: mock(), error: mock() };
     const engine = new Engine({
-      quickjs: createMockJSEngineProvider(),
+      sandbox: 'vm',
       requireWhitelist: ['custom-module'],
       logger: customLogger,
     });
 
-    // Attempting to require non-whitelisted module should throw
-    await expect(engine.loadBundle(`const x = require('lodash');`)).rejects.toThrow();
+    // Attempting to require non-whitelisted module should throw (sync path)
+    expect(() => engine.loadBundle(`const x = require('lodash');`)).toThrow();
 
     engine.destroy();
   });
 
   it('should allow whitelisted modules', async () => {
     const engine = new Engine({
-      quickjs: createMockJSEngineProvider(),
+      sandbox: 'vm',
       requireWhitelist: ['react', 'my-custom-lib'],
     });
 
@@ -296,11 +231,11 @@ describe('Engine RequireWhitelist', () => {
   });
 });
 
-describe('Engine getHealth', () => {
+describe('Engine getDiagnostics().health', () => {
   it('should return health snapshot', async () => {
-    const engine = new Engine({ quickjs: createMockJSEngineProvider() });
+    const engine = new Engine({ sandbox: 'vm'});
 
-    let health = engine.getHealth();
+    let health = engine.getDiagnostics().health;
     expect(health.loaded).toBe(false);
     expect(health.destroyed).toBe(false);
     expect(health.errorCount).toBe(0);
@@ -309,7 +244,7 @@ describe('Engine getHealth', () => {
 
     await engine.loadBundle('console.log("test")');
 
-    health = engine.getHealth();
+    health = engine.getDiagnostics().health;
     expect(health.loaded).toBe(true);
     expect(health.destroyed).toBe(false);
 
@@ -317,7 +252,7 @@ describe('Engine getHealth', () => {
   });
 
   it('should track error count', async () => {
-    const engine = new Engine({ quickjs: createMockJSEngineProvider() });
+    const engine = new Engine({ sandbox: 'vm'});
 
     try {
       await engine.loadBundle('throw new Error("test error")');
@@ -325,7 +260,7 @@ describe('Engine getHealth', () => {
       // Expected
     }
 
-    const health = engine.getHealth();
+    const health = engine.getDiagnostics().health;
     expect(health.errorCount).toBe(1);
     expect(health.lastErrorAt).not.toBeNull();
 
@@ -333,11 +268,11 @@ describe('Engine getHealth', () => {
   });
 
   it('should report receiver node count', async () => {
-    const engine = new Engine({ quickjs: createMockJSEngineProvider() });
-    engine.createReceiver(() => {});
+    const engine = new Engine({ sandbox: 'vm'});
+    engine.createReceiver();
 
     await engine.loadBundle(`
-      __sendToHost({
+      __rill_sendBatch({
         version: 1,
         batchId: 1,
         operations: [
@@ -347,7 +282,7 @@ describe('Engine getHealth', () => {
       });
     `);
 
-    const health = engine.getHealth();
+    const health = engine.getDiagnostics().health;
     expect(health.receiverNodes).toBeGreaterThan(0);
 
     engine.destroy();

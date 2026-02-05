@@ -19,7 +19,7 @@ option(BUILD_WASM "Build WebAssembly version" OFF)
 
 # Source directories (same as native)
 set(VENDOR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
-set(JSI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/jsi)
+set(JSI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../jsi)
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # QuickJS Engine sources (C)

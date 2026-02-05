@@ -7,7 +7,7 @@ Lightweight, headless, sandboxed React Native dynamic UI rendering engine.
 ## Features
 
 - **React Development Experience**: Write guests using JSX and Hooks
-- **Complete Sandbox Isolation**: Pluggable JSEngineProvider (QuickJS, VM, WASM), guest crashes don't affect the host
+- **Complete Sandbox Isolation**: Multiple sandbox backends (VM/JSC/Hermes/QuickJS/WASM) with automatic selection; guest crashes don't affect the host
 - **Lightweight and Efficient**: No WebView overhead, native rendering performance
 - **Unified Bridge Layer**: Type-safe serialization with automatic callback lifecycle management
 - **Flexible Extension**: Supports registering custom business components
@@ -16,14 +16,14 @@ Lightweight, headless, sandboxed React Native dynamic UI rendering engine.
 
 ```
 rill/
-├── (default)        # Host runtime (Engine, EngineView, Receiver)
-├── /sdk             # Guest SDK (components, hooks)
+├── /host            # Host runtime (Engine, useEngineView)
+├── /host/preset     # Host UI helpers (EngineView, DefaultComponents)
+├── /guest           # Guest SDK (components, hooks, platform APIs)
 ├── /devtools        # Development tools
-├── /sandbox         # Sandbox providers (auto-detect)
-├── /sandbox/native  # Native sandbox (JSC/QuickJS)
-├── /sandbox/web     # Web sandbox (WASM)
 └── /cli             # CLI build tools
 ```
+
+> `import ... from 'rill'` is intentionally unsupported — use the explicit entrypoints above.
 
 
 ## Quick Start
@@ -47,7 +47,8 @@ npm install rill
 
 ```tsx
 import React, { useMemo, useEffect } from 'react';
-import { Engine, EngineView } from 'rill';
+import { Engine } from 'rill/host';
+import { EngineView } from 'rill/host/preset';
 import { NativeStepList } from './components/NativeStepList';
 
 function App() {
@@ -81,7 +82,7 @@ function App() {
 ### Guest Development
 
 ```tsx
-import { View, Text, TouchableOpacity, useHostEvent, useConfig } from 'rill/sdk';
+import { View, Text, TouchableOpacity, useHostEvent, useConfig } from 'rill/guest';
 
 export default function MyGuest() {
   const config = useConfig<{ theme: string }>();
@@ -121,7 +122,7 @@ bunx rill analyze dist/bundle.js
 ┌─────────────────────────────────────────────────────────────────┐
 │                       Host App (React Native)                    │
 ├─────────────────────────────────────────────────────────────────┤
-│  EngineView → Engine → Sandbox Provider                         │
+│  EngineView → Engine → Sandbox Backend                          │
 │                            │                                     │
 │                            ▼                                     │
 │                    ┌───────────────────┐                        │
@@ -144,8 +145,9 @@ bunx rill analyze dist/bundle.js
 
 | Module | Import Path | Description |
 |--------|-------------|-------------|
-| Runtime | `rill` | Host runtime: Engine, EngineView, Receiver |
-| Guest SDK | `rill/sdk` | Guest development kit: components, hooks |
+| Host | `rill/host` | Host runtime: Engine, useEngineView |
+| Host Preset | `rill/host/preset` | Host UI helpers: EngineView, DefaultComponents |
+| Guest | `rill/guest` | Guest module: components, hooks |
 | DevTools | `rill/devtools` | Debug tools: operation logging, tree inspection |
 | CLI | `rill` (bin) / `rill/cli` | Guest bundler (Bun-based) |
 
@@ -154,7 +156,7 @@ bunx rill analyze dist/bundle.js
 ### Engine
 
 ```typescript
-import { Engine } from 'rill';
+import { Engine } from 'rill/host';
 
 const engine = new Engine({
   timeout: 5000,        // Execution timeout (ms)
@@ -183,7 +185,7 @@ engine.destroy();
 ### SDK Hooks
 
 ```typescript
-import { useHostEvent, useConfig, useSendToHost, useRemoteRef, TextInputRef } from 'rill/sdk';
+import { useHostEvent, useConfig, useSendToHost, useRemoteRef, TextInputRef } from 'rill/guest';
 
 // Subscribe to host events
 useHostEvent('EVENT_NAME', (payload) => { /* handle */ });
@@ -219,7 +221,7 @@ Guest subscribes using SDK hook `useHostEvent(event, callback)`, Host sends via 
 
 **Guest example:**
 ```tsx
-import { View, Text, useHostEvent, useSendToHost } from 'rill/sdk';
+import { View, Text, useHostEvent, useSendToHost } from 'rill/guest';
 
 export default function Guest() {
   const send = useSendToHost();
@@ -234,7 +236,7 @@ export default function Guest() {
 
 **Host example:**
 ```tsx
-import { Engine } from 'rill';
+import { Engine } from 'rill/host';
 
 const engine = new Engine();
 engine.on('message', (m) => console.log(m.event, m.payload));

@@ -1,15 +1,9 @@
 #import "RillSandboxNativeTurboModule.h"
+#include "RillOrchestrator.h"
 
-#import <objc/runtime.h>
-
-#include <dispatch/dispatch.h>
+#include <atomic>
 #include <exception>
 #include <mutex>
-
-// Define fallbacks for macros that may not be defined
-#ifndef RCT_NEW_ARCH_ENABLED
-#define RCT_NEW_ARCH_ENABLED 0
-#endif
 
 // Forward declare sandbox install functions to avoid type conflicts
 // QuickJS defines JSValue as a C struct, while React Native's RCTBridge.h
@@ -26,18 +20,21 @@ namespace jsc_sandbox {
 }
 
 #import <React/RCTBridgeModule.h>
-
-#if !RCT_NEW_ARCH_ENABLED && __has_include(<React/RCTBridge+Private.h>)
-#define RILL_HAS_RN_BRIDGE_HOOK 1
-#import <React/RCTBridge+Private.h> // for runtime access
+#import <ReactCommon/RCTHost.h>
+#import <ReactCommon/RCTTurboModule.h>
+#import <ReactCommon/RCTTurboModuleWithJSIBindings.h>
+#import <objc/runtime.h>
 #import <objc/message.h>
-#else
-#define RILL_HAS_RN_BRIDGE_HOOK 0
-#endif
 
-#ifndef RILL_HAS_BRIDGING
-#define RILL_HAS_BRIDGING 0
-#endif
+// Global host runtime pointer — set by the RCTHost swizzle proxy when the
+// JS runtime initialises.  Consumers (e.g. demo perf bridge) can read it
+// via RillSandboxNativeGetHostRuntime(), which mirrors Android's
+// reactContext.javaScriptContextHolder.get().
+static std::atomic<facebook::jsi::Runtime *> gHostRuntime{nullptr};
+
+facebook::jsi::Runtime *RillSandboxNativeGetHostRuntime() {
+  return gHostRuntime.load(std::memory_order_acquire);
+}
 
 namespace {
 std::mutex gInstallMutex;
@@ -101,60 +98,6 @@ static void ensureSandboxInstalled(facebook::jsi::Runtime *runtime,
 }
 } // namespace
 
-#if RCT_NEW_ARCH_ENABLED
-namespace {
-using RCTHostDidInitializeRuntimeIMP =
-    void (*)(id, SEL, id, facebook::jsi::Runtime &);
-static RCTHostDidInitializeRuntimeIMP gOriginalRCTHostDidInitializeRuntime = nullptr;
-
-static void rill_RCTHost_instance_didInitializeRuntime(id self,
-                                                       SEL _cmd,
-                                                       id instance,
-                                                       facebook::jsi::Runtime &runtime) {
-  ensureSandboxInstalled(&runtime, "RCTHost.instance:didInitializeRuntime:");
-  if (gOriginalRCTHostDidInitializeRuntime != nullptr) {
-    gOriginalRCTHostDidInitializeRuntime(self, _cmd, instance, runtime);
-  }
-}
-
-static void installRCTHostRuntimeHookOnce() {
-  static dispatch_once_t onceToken;
-  dispatch_once(&onceToken, ^{
-    Class hostClass = NSClassFromString(@"RCTHost");
-    if (hostClass == Nil) {
-      NSLog(@"[RillSandboxNative] RCTHost not found; bridgeless auto-install disabled");
-      return;
-    }
-
-    SEL selector = NSSelectorFromString(@"instance:didInitializeRuntime:");
-    Method method = class_getInstanceMethod(hostClass, selector);
-    if (method == nullptr) {
-      NSLog(@"[RillSandboxNative] RCTHost missing selector instance:didInitializeRuntime:; bridgeless auto-install disabled");
-      return;
-    }
-
-    IMP currentImp = method_getImplementation(method);
-    if (currentImp == (IMP)rill_RCTHost_instance_didInitializeRuntime) {
-      return;
-    }
-
-    IMP previousImp = method_setImplementation(
-        method, (IMP)rill_RCTHost_instance_didInitializeRuntime);
-    gOriginalRCTHostDidInitializeRuntime =
-        (RCTHostDidInitializeRuntimeIMP)previousImp;
-
-    NSLog(@"[RillSandboxNative] Installed RCTHost runtime hook (bridgeless auto-install)");
-  });
-}
-} // namespace
-
-static void installRillSandboxNativeRCTHostHook(void)
-    __attribute__((constructor));
-static void installRillSandboxNativeRCTHostHook(void) {
-  installRCTHostRuntimeHookOnce();
-}
-#endif
-
 #pragma mark - Public C API for bridgeless mode
 
 extern "C" {
@@ -169,116 +112,129 @@ void RillSandboxNativeInstall(facebook::jsi::Runtime *runtime) {
 
 } // extern "C"
 
-namespace rill::sandbox_native {
+void RillSandboxNativeInstallWithOrchestrator(
+    facebook::jsi::Runtime *runtime,
+    std::shared_ptr<facebook::react::CallInvoker> callInvoker) {
+  ensureSandboxInstalled(runtime, "RillSandboxNativeInstallWithOrchestrator");
 
-RillSandboxNativeTurboModule::RillSandboxNativeTurboModule(
-    std::shared_ptr<facebook::react::CallInvoker> invoker)
-    : invoker_(invoker) {}
-
-void RillSandboxNativeTurboModule::initialize(facebook::jsi::Runtime &runtime) {
-  ensureSandboxInstalled(&runtime, "TurboModule.initialize");
+  if (runtime && !runtime->global().hasProperty(*runtime, "__RillOrchestrator")) {
+    rill::orchestrator::RillOrchestrator::install(*runtime, std::move(callInvoker));
+  }
 }
 
-} // namespace rill::sandbox_native
+#pragma mark - Runtime delegate proxy for +load swizzle
 
 /**
- * Objective-C++ bridge for TurboModule
+ * Internal proxy that intercepts RCTHost's runtime initialization to auto-install
+ * sandbox JSI bindings. Forwards all calls to the original delegate if present.
  */
-@interface RillSandboxNative : NSObject <RCTBridgeModule>
+@interface _RillRuntimeDelegateProxy : NSObject <RCTHostRuntimeDelegate>
+@property (nonatomic, weak, nullable) id<RCTHostRuntimeDelegate> originalDelegate;
+@end
+
+@implementation _RillRuntimeDelegateProxy
+
+- (void)host:(RCTHost *)host didInitializeRuntime:(facebook::jsi::Runtime &)runtime {
+  ensureSandboxInstalled(&runtime, "+load/didInitializeRuntime");
+
+  // Store for RillSandboxNativeGetHostRuntime() — iOS equivalent of
+  // Android's reactContext.javaScriptContextHolder.
+  gHostRuntime.store(&runtime, std::memory_order_release);
+
+  if ([_originalDelegate respondsToSelector:@selector(host:didInitializeRuntime:)]) {
+    [_originalDelegate host:host didInitializeRuntime:runtime];
+  }
+}
+
+@end
+
+#pragma mark - +load auto-install via RCTHost swizzle
+
+static void _rill_swizzled_RCTHost_start(id self, SEL _cmd) {
+  // Capture existing runtimeDelegate before start
+  id<RCTHostRuntimeDelegate> existing = [self runtimeDelegate];
+
+  // Only inject if no delegate is set, or if ours isn't already installed
+  if (!existing || ![existing isKindOfClass:[_RillRuntimeDelegateProxy class]]) {
+    _RillRuntimeDelegateProxy *proxy = [_RillRuntimeDelegateProxy new];
+    proxy.originalDelegate = existing;
+    [self setRuntimeDelegate:proxy];
+    // Associate proxy to keep it alive for the lifetime of the RCTHost instance
+    objc_setAssociatedObject(self, @selector(_rill_swizzled_RCTHost_start),
+                             proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  }
+
+  // Call original -[RCTHost start] (stored as _rill_original_start)
+  SEL origSel = @selector(_rill_original_start);
+  ((void (*)(id, SEL))objc_msgSend)(self, origSel);
+}
+
+__attribute__((constructor))
+static void _rill_install_rcthost_swizzle(void) {
+  Class hostClass = NSClassFromString(@"RCTHost");
+  if (!hostClass) {
+    return; // Not a React Native environment
+  }
+
+  SEL startSel = @selector(start);
+  Method startMethod = class_getInstanceMethod(hostClass, startSel);
+  if (!startMethod) {
+    NSLog(@"[RillSandboxNative] RCTHost has no -start method; skipping swizzle");
+    return;
+  }
+
+  // Add original implementation under a new selector
+  SEL origSel = @selector(_rill_original_start);
+  BOOL added = class_addMethod(hostClass, origSel,
+                               method_getImplementation(startMethod),
+                               method_getTypeEncoding(startMethod));
+  if (!added) {
+    NSLog(@"[RillSandboxNative] Failed to stash original -[RCTHost start]; skipping swizzle");
+    return;
+  }
+
+  // Replace -start with our version
+  method_setImplementation(startMethod, (IMP)_rill_swizzled_RCTHost_start);
+  NSLog(@"[RillSandboxNative] Installed RCTHost.start swizzle for auto JSI binding");
+}
+
+#pragma mark - TurboModule
+
+/**
+ * Objective-C++ TurboModule for RCT module registration.
+ *
+ * Bridgeless (New Architecture) only:
+ *   -installJSIBindingsWithRuntime:callInvoker: is called by TurboModuleManager
+ *   during runtime initialization.
+ */
+@interface RillSandboxNative : NSObject <
+    RCTBridgeModule,
+    RCTTurboModule,
+    RCTTurboModuleWithJSIBindings
+    >
 @end
 
 @implementation RillSandboxNative
+
 RCT_EXPORT_MODULE(RillSandboxNative)
 
 + (BOOL)requiresMainQueueSetup {
   return NO;
 }
 
+- (std::shared_ptr<facebook::react::TurboModule>)getTurboModule:
+    (const facebook::react::ObjCTurboModule::InitParams &)params {
+  // No exported JS methods: we only rely on RCTTurboModuleWithJSIBindings for side-effect installation.
+  return std::make_shared<facebook::react::ObjCTurboModule>(params);
+}
+
+- (void)installJSIBindingsWithRuntime:(facebook::jsi::Runtime &)runtime
+                          callInvoker:(const std::shared_ptr<facebook::react::CallInvoker> &)callinvoker {
+  // RN calls this during TurboModuleManager setup, after the JSI runtime is ready.
+  // Also store the host runtime pointer so app-local perf tooling (ios-demo)
+  // can synchronously access the host JSI runtime without relying on swizzles.
+  gHostRuntime.store(&runtime, std::memory_order_release);
+  RillSandboxNativeInstallWithOrchestrator(&runtime, callinvoker);
+}
+
 @end
-
-/**
- * TurboModule Registration for new architecture
- * If React Native is using the new architecture (Fabric),
- * this will be called to register the module.
- */
-#if RCT_NEW_ARCH_ENABLED && RILL_HAS_BRIDGING
-namespace facebook::react {
-
-std::shared_ptr<TurboModule> RillSandboxNativeTurboModuleProvider(
-    const ObjCTurboModule::InitParams &params) {
-  auto module = std::make_shared<rill::sandbox_native::RillSandboxNativeTurboModule>(
-      params.jsInvoker);
-
-  NSLog(@"[RillSandboxNative] TurboModule provider called - new arch enabled");
-
-  return module;
-}
-
-} // namespace facebook::react
-#else
-// Log if new architecture is not enabled
-static void logArchStatus(void) __attribute__((constructor));
-static void logArchStatus(void) {
-  NSLog(@"[RillSandboxNative] TurboModule not enabled - RCT_NEW_ARCH_ENABLED=%d, RILL_HAS_BRIDGING=%d",
-        RCT_NEW_ARCH_ENABLED, RILL_HAS_BRIDGING);
-}
-#endif
-
-/**
- * Legacy (old RN architecture) auto-install hook:
- * Install sandbox JSI bindings right before JS starts executing, so JS can
- * detect globals immediately (DefaultProvider, etc.).
- */
-#if RILL_HAS_RN_BRIDGE_HOOK && !RCT_NEW_ARCH_ENABLED
-static void installRillSandboxNativeLegacyHook(void) __attribute__((constructor));
-static void installRillSandboxNativeLegacyHook(void) {
-  NSLog(@"[RillSandboxNative] legacy bridge hook enabled");
-  // 安装时机调整到 JS 即将执行之前，确保 DefaultProvider 检测时 JSI 已写入 global
-  [[NSNotificationCenter defaultCenter]
-      addObserverForName:RCTJavaScriptWillStartExecutingNotification
-                  object:nil
-                   queue:[NSOperationQueue mainQueue]
-              usingBlock:^(NSNotification *_Nonnull note) {
-                RCTBridge *loadedBridge = (RCTBridge *)note.object;
-                if (![loadedBridge isKindOfClass:[RCTBridge class]]) {
-                  NSLog(@"[RillSandboxNative] Warning: WillStartExecuting object is not RCTBridge");
-                  return;
-                }
-
-                NSLog(@"[RillSandboxNative] RCTBridge class: %@", NSStringFromClass([loadedBridge class]));
-                NSLog(@"[RillSandboxNative] RCTBridge delegate: %@", loadedBridge.delegate);
-
-                // 在 macOS 0.79 上 runtime 挂在 RCTCxxBridge 的 runtime 方法上
-                RCTCxxBridge *cxxBridge = nil;
-                if ([loadedBridge isKindOfClass:[RCTCxxBridge class]]) {
-                  cxxBridge = (RCTCxxBridge *)loadedBridge;
-                } else if ([loadedBridge respondsToSelector:@selector(batchedBridge)]) {
-                  cxxBridge = (RCTCxxBridge *)[loadedBridge valueForKey:@"batchedBridge"];
-                }
-
-                if (cxxBridge == nil || ![cxxBridge respondsToSelector:@selector(runtime)]) {
-                  NSLog(@"[RillSandboxNative] Error: Cannot access RCTCxxBridge runtime");
-                  return;
-                }
-
-                void *runtimePtr = ((void *(*)(id, SEL))objc_msgSend)(cxxBridge, @selector(runtime));
-                if (runtimePtr == nullptr) {
-                  NSLog(@"[RillSandboxNative] Error: JS runtime is nil in WillStartExecuting, cannot install sandbox JSI");
-                  return;
-                }
-
-                auto *rt =
-                    reinterpret_cast<facebook::jsi::Runtime *>(runtimePtr);
-                ensureSandboxInstalled(rt, "RCTJavaScriptWillStartExecutingNotification");
-              }];
-}
-#elif !RCT_NEW_ARCH_ENABLED
-// Legacy (old RN architecture) but bridge runtime hook is unavailable (e.g.
-// missing private headers). If you hit this, either enable the new
-// architecture, or install the sandbox from your app with a custom runtime
-// access path.
-static void logLegacyHookUnavailable(void) __attribute__((constructor));
-static void logLegacyHookUnavailable(void) {
-  NSLog(@"[RillSandboxNative] legacy bridge hook unavailable: <React/RCTBridge+Private.h> not found");
-}
-#endif

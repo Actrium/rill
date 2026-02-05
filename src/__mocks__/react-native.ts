@@ -81,6 +81,12 @@ export const Dimensions = {
   addEventListener: () => ({ remove: () => {} }),
 };
 
+// TurboModuleRegistry mock
+export const TurboModuleRegistry = {
+  get: (_name: string) => null,
+  getEnforcing: (_name: string) => ({}),
+};
+
 // Common components
 export const TouchableOpacity = View;
 export const TouchableHighlight = View;
@@ -113,4 +119,5 @@ export default {
   KeyboardAvoidingView,
   Switch,
   Button,
+  TurboModuleRegistry,
 };

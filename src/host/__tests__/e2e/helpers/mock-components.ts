@@ -5,11 +5,13 @@
  * Each component returns a plain object with test helper methods.
  */
 
+import type { ReviewedUnknown } from '../../../types';
+
 export interface MockNode {
   type: string;
-  props: Record<string, unknown>;
-  children?: unknown;
-  [key: string]: unknown;
+  props: Record<string, ReviewedUnknown>;
+  children?: ReviewedUnknown;
+  [key: string]: ReviewedUnknown;
 }
 
 export const MockComponents = {

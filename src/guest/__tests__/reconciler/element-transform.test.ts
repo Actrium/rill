@@ -176,17 +176,17 @@ describe('element-transform', () => {
       expect(Array.isArray(result)).toBe(true);
     });
 
-    test('should handle debug mode logging', () => {
-      // Enable debug mode temporarily
+    test('should handle debug mode without per-transform logging (removed for perf)', () => {
+      // Per-transform __TRANSFORM_LOG_COUNT was removed for performance:
+      // In XPC ViewBridge + JSC sandbox, console calls in render hot path
+      // cost 100-500ms due to circular ref traversal (see PERF comment in source).
+      // Debug mode is now only used in reconciler-manager.ts render() entry point.
       const globalState = globalThis as Record<string, unknown>;
       const originalDebug = globalState.__RILL_RECONCILER_DEBUG__;
-      const originalCount = globalState.__TRANSFORM_LOG_COUNT;
 
       try {
         globalState.__RILL_RECONCILER_DEBUG__ = true;
-        globalState.__TRANSFORM_LOG_COUNT = 0;
 
-        // Transform an element (with proper React element structure)
         const mockElement = {
           $$typeof: Symbol.for('react.element'),
           type: 'div',
@@ -194,39 +194,12 @@ describe('element-transform', () => {
           __rillTypeMarker: 'string',
         };
 
-        transformGuestElement(mockElement as never);
-
-        // Log count should increment
-        expect(globalState.__TRANSFORM_LOG_COUNT).toBeGreaterThan(0);
+        // Should not throw even with debug enabled
+        expect(() => {
+          transformGuestElement(mockElement as never);
+        }).not.toThrow();
       } finally {
         globalState.__RILL_RECONCILER_DEBUG__ = originalDebug;
-        globalState.__TRANSFORM_LOG_COUNT = originalCount;
-      }
-    });
-
-    test('should stop logging after 20 transforms in debug mode', () => {
-      const globalState = globalThis as Record<string, unknown>;
-      const originalDebug = globalState.__RILL_RECONCILER_DEBUG__;
-      const originalCount = globalState.__TRANSFORM_LOG_COUNT;
-
-      try {
-        globalState.__RILL_RECONCILER_DEBUG__ = true;
-        globalState.__TRANSFORM_LOG_COUNT = 25; // Already past limit
-
-        const mockElement = {
-          $$typeof: Symbol.for('react.element'),
-          type: 'div',
-          props: {},
-          __rillTypeMarker: 'string',
-        };
-
-        transformGuestElement(mockElement as never);
-
-        // Should not increment further
-        expect(globalState.__TRANSFORM_LOG_COUNT).toBe(25);
-      } finally {
-        globalState.__RILL_RECONCILER_DEBUG__ = originalDebug;
-        globalState.__TRANSFORM_LOG_COUNT = originalCount;
       }
     });
 

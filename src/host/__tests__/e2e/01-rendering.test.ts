@@ -34,7 +34,7 @@ describe('E2E Rendering: Basic Rendering', () => {
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -68,7 +68,7 @@ describe('E2E Rendering: Basic Rendering', () => {
               testID: 'button',
               onPress: () => {
                 setCount(count + 1);
-                globalThis.__sendEventToHost('PRESSED', { count: count + 1 });
+                globalThis.__rill_emitEvent('PRESSED', { count: count + 1 });
               }
             },
             React.createElement('Text', { testID: 'counter' }, 'Count: ' + count)
@@ -76,7 +76,7 @@ describe('E2E Rendering: Basic Rendering', () => {
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -112,17 +112,17 @@ describe('E2E Rendering: Basic Rendering', () => {
           'TouchableOpacity',
           {
             testID: 'button',
-            onPress: () => globalThis.__sendEventToHost('CLICK')
+            onPress: () => globalThis.__rill_emitEvent('CLICK')
           },
           React.createElement('Text', {}, 'Button')
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
 
       // Expose unmount function
       globalThis.__unmountApp = () => {
-        unmount(globalThis.__sendToHost);
+        unmount(globalThis.__rill_sendBatch);
       };
     `;
 
@@ -133,7 +133,7 @@ describe('E2E Rendering: Basic Rendering', () => {
     expect(initialSize).toBeGreaterThan(0);
 
     // Unmount the app
-    await ctx.engine.context?.getGlobal('__unmountApp')?.();
+    await ctx.engine.context?.extract('__unmountApp')?.();
     await wait(100);
 
     // Verify cleanup
@@ -176,7 +176,7 @@ describe('E2E Rendering: Conditional Rendering', () => {
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -243,7 +243,7 @@ describe('E2E Rendering: List Rendering', () => {
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -290,7 +290,7 @@ describe('E2E Rendering: List Rendering', () => {
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -345,7 +345,7 @@ describe('E2E Rendering: Deep Nesting', () => {
         return React.createElement(Nested, { depth: 0, maxDepth: 10 });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);

@@ -112,18 +112,18 @@ describe('Hooks', () => {
   describe('useHostEvent', () => {
     beforeEach(() => {
       // Cleanup globalThis
-      delete (globalThis as Record<string, unknown>).__useHostEvent;
+      delete (globalThis as Record<string, unknown>).__rill_onHostEvent;
     });
 
     afterEach(() => {
-      delete (globalThis as Record<string, unknown>).__useHostEvent;
+      delete (globalThis as Record<string, unknown>).__rill_onHostEvent;
     });
 
     it('should subscribe and unsubscribe when component mounts/unmounts', async () => {
       const { useHostEvent } = await sdkImport;
       const mockUnsubscribe = mock();
       const mockUseHostEvent = mock(() => mockUnsubscribe);
-      (globalThis as Record<string, unknown>).__useHostEvent = mockUseHostEvent;
+      (globalThis as Record<string, unknown>).__rill_onHostEvent = mockUseHostEvent;
 
       const callback = mock();
 
@@ -152,7 +152,7 @@ describe('Hooks', () => {
       expect(mockUnsubscribe).toHaveBeenCalled();
     });
 
-    it('should not throw when __useHostEvent is not available', async () => {
+    it('should not throw when __rill_onHostEvent is not available', async () => {
       const { useHostEvent } = await sdkImport;
       const callback = mock();
 
@@ -164,7 +164,7 @@ describe('Hooks', () => {
       const ReactTestRenderer = await import('react-test-renderer');
       const { act } = ReactTestRenderer;
 
-      // Should not throw when __useHostEvent is not available
+      // Should not throw when __rill_onHostEvent is not available
       let didThrow = false;
       try {
         await act(() => {
@@ -185,7 +185,7 @@ describe('Hooks', () => {
         callCount++;
         return callCount === 1 ? mockUnsubscribe1 : mockUnsubscribe2;
       });
-      (globalThis as Record<string, unknown>).__useHostEvent = mockUseHostEvent;
+      (globalThis as Record<string, unknown>).__rill_onHostEvent = mockUseHostEvent;
 
       const callback = mock();
 
@@ -224,7 +224,7 @@ describe('Hooks', () => {
         set.add(cb);
         return () => set.delete(cb);
       };
-      (globalThis as Record<string, unknown>).__useHostEvent = mockUseHostEvent;
+      (globalThis as Record<string, unknown>).__rill_onHostEvent = mockUseHostEvent;
 
       let renderCount = 0;
       const callback1 = () => {
@@ -265,24 +265,24 @@ describe('Hooks', () => {
 
   describe('useConfig', () => {
     beforeEach(() => {
-      delete (globalThis as Record<string, unknown>).__getConfig;
+      delete (globalThis as Record<string, unknown>).__rill_getConfig;
     });
 
     afterEach(() => {
-      delete (globalThis as Record<string, unknown>).__getConfig;
+      delete (globalThis as Record<string, unknown>).__rill_getConfig;
     });
 
-    it('should return config from global __getConfig', async () => {
+    it('should return config from global __rill_getConfig', async () => {
       const { useConfig } = await sdkImport;
       const mockConfig = { theme: 'dark', fontSize: 14 };
-      (globalThis as Record<string, unknown>).__getConfig = () => mockConfig;
+      (globalThis as Record<string, unknown>).__rill_getConfig = () => mockConfig;
 
       const config = useConfig<{ theme: string; fontSize: number }>();
 
       expect(config).toEqual(mockConfig);
     });
 
-    it('should return empty object when __getConfig is not available', async () => {
+    it('should return empty object when __rill_getConfig is not available', async () => {
       const { useConfig } = await sdkImport;
       const config = useConfig();
 
@@ -297,7 +297,7 @@ describe('Hooks', () => {
       }
 
       const mockConfig: AppConfig = { theme: 'dark', language: 'en' };
-      (globalThis as Record<string, unknown>).__getConfig = () => mockConfig;
+      (globalThis as Record<string, unknown>).__rill_getConfig = () => mockConfig;
 
       const config = useConfig<AppConfig>();
 
@@ -308,17 +308,17 @@ describe('Hooks', () => {
 
   describe('useSendToHost', () => {
     beforeEach(() => {
-      delete (globalThis as Record<string, unknown>).__sendEventToHost;
+      delete (globalThis as Record<string, unknown>).__rill_emitEvent;
     });
 
     afterEach(() => {
-      delete (globalThis as Record<string, unknown>).__sendEventToHost;
+      delete (globalThis as Record<string, unknown>).__rill_emitEvent;
     });
 
-    it('should return global __sendEventToHost when available', async () => {
+    it('should return global __rill_emitEvent when available', async () => {
       const { useSendToHost } = await sdkImport;
       const mockSend = mock();
-      (globalThis as Record<string, unknown>).__sendEventToHost = mockSend;
+      (globalThis as Record<string, unknown>).__rill_emitEvent = mockSend;
 
       const send = useSendToHost();
       send('TEST_EVENT', { data: 123 });
@@ -343,7 +343,7 @@ describe('Hooks', () => {
     it('should accept optional payload', async () => {
       const { useSendToHost } = await sdkImport;
       const mockSend = mock();
-      (globalThis as Record<string, unknown>).__sendEventToHost = mockSend;
+      (globalThis as Record<string, unknown>).__rill_emitEvent = mockSend;
 
       const send = useSendToHost();
       send('EVENT_WITHOUT_PAYLOAD');

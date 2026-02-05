@@ -30,7 +30,7 @@ set(WASM_STACK_SIZE "512" CACHE STRING "WASM stack size in KB (default: 512)")
 
 # Source directories (same as native)
 set(VENDOR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
-set(JSI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/jsi)
+set(JSI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../jsi)
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # QuickJS Engine sources (C)
@@ -97,8 +97,8 @@ if(BUILD_WASM)
         "_qjs_destroy"
         "_qjs_eval"
         "_qjs_eval_void"
-        "_qjs_set_global_json"
-        "_qjs_get_global_json"
+        "_qjs_inject_json"
+        "_qjs_extract_json"
         "_qjs_set_host_callback"
         "_qjs_install_host_functions"
         "_qjs_set_timer_callback"

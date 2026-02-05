@@ -41,7 +41,7 @@ describe('E2E Map Serialization: Basic', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -76,7 +76,7 @@ describe('E2E Map Serialization: Basic', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -108,7 +108,7 @@ describe('E2E Map Serialization: Basic', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -148,7 +148,7 @@ describe('E2E Set Serialization: Basic', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -179,7 +179,7 @@ describe('E2E Set Serialization: Basic', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -230,7 +230,7 @@ describe('E2E Map/Set Serialization: Nested Structures', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -262,7 +262,7 @@ describe('E2E Map/Set Serialization: Nested Structures', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -303,7 +303,7 @@ describe('E2E Map/Set Serialization: Nested Structures', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -340,8 +340,8 @@ describe('E2E Map/Set Serialization: With Functions', () => {
       const { render } = require('rill/reconciler');
 
       const handlers = new Map([
-        ['onClick', () => globalThis.__sendEventToHost('CLICK')],
-        ['onHover', () => globalThis.__sendEventToHost('HOVER')]
+        ['onClick', () => globalThis.__rill_emitEvent('CLICK')],
+        ['onHover', () => globalThis.__rill_emitEvent('HOVER')]
       ]);
 
       function App() {
@@ -351,7 +351,7 @@ describe('E2E Map/Set Serialization: With Functions', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -403,7 +403,7 @@ describe('E2E Map/Set Serialization: Dynamic Updates', () => {
           const newItems = new Map(items);
           newItems.set('b', 2);
           setItems(newItems);
-          globalThis.__sendEventToHost('ITEM_ADDED', { size: newItems.size });
+          globalThis.__rill_emitEvent('ITEM_ADDED', { size: newItems.size });
         };
 
         return React.createElement(
@@ -416,7 +416,7 @@ describe('E2E Map/Set Serialization: Dynamic Updates', () => {
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -455,7 +455,7 @@ describe('E2E Map/Set Serialization: Dynamic Updates', () => {
             newSet.add(id);
           }
           setSelectedIds(newSet);
-          globalThis.__sendEventToHost('SELECTION_CHANGED', {
+          globalThis.__rill_emitEvent('SELECTION_CHANGED', {
             size: newSet.size,
             selected: Array.from(newSet)
           });
@@ -475,7 +475,7 @@ describe('E2E Map/Set Serialization: Dynamic Updates', () => {
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);

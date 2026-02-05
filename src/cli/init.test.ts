@@ -27,7 +27,7 @@ describe('CLI init', () => {
     process.argv = ['node', 'rill', 'init', 'my-rill-guest'];
 
     // dynamic import to execute commander program
-    await import('./index');
+    await import('./bin');
 
     // wait for async action to complete
     await new Promise((r) => setTimeout(r, 20));

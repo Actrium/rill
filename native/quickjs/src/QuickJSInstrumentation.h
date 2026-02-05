@@ -30,8 +30,6 @@ public:
 
   void dumpProfilerSymbolsToFile(const std::string &) const override;
 
-  // NOTE: Some JSI versions include dumpOpcodeStats() in Instrumentation, others don't.
-  // Keep it without `override` so this header compiles against both.
   void dumpOpcodeStats(std::ostream &) const {}
 
   void startTrackingHeapObjectStackTraces(

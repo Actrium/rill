@@ -50,8 +50,8 @@ describe('E2E Stress: Large Data Volumes', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
-      globalThis.__sendEventToHost('RENDERED', { keyCount: Object.keys(largeData).length });
+      render(React.createElement(App), globalThis.__rill_sendBatch);
+      globalThis.__rill_emitEvent('RENDERED', { keyCount: Object.keys(largeData).length });
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -80,7 +80,7 @@ describe('E2E Stress: Large Data Volumes', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -110,7 +110,7 @@ describe('E2E Stress: Large Data Volumes', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -159,7 +159,7 @@ describe('E2E Stress: Concurrent Operations', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -197,7 +197,7 @@ describe('E2E Stress: Concurrent Operations', () => {
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -247,7 +247,7 @@ describe('E2E Stress: Large Component Trees', () => {
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -285,7 +285,7 @@ describe('E2E Stress: Large Component Trees', () => {
         return React.createElement(Nested, { depth: 0 });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -338,7 +338,7 @@ describe('E2E Stress: Memory Pressure', () => {
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -404,7 +404,7 @@ describe('E2E Stress: Memory Pressure', () => {
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -457,7 +457,7 @@ describe('E2E Stress: Serialization Performance', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     const startTime = Date.now();
@@ -490,7 +490,7 @@ describe('E2E Stress: Serialization Performance', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     const startTime = Date.now();

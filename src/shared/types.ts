@@ -9,6 +9,18 @@
  */
 
 // ============================================
+// Type Safety
+// ============================================
+
+/**
+ * Reviewed Unknown Type
+ *
+ * Use of `unknown` is allowed only when it's explicit and intentional.
+ * Prefer specific types when possible; otherwise use ReviewedUnknown and validate at runtime.
+ */
+export type ReviewedUnknown = unknown;
+
+// ============================================
 // JSI 原生支持（直接传递，零开销）
 // ============================================
 
@@ -339,32 +351,35 @@ export function operationHasProps(
 // 消息类型 (Host → Guest)
 // ============================================
 
-export type HostMessageType =
-  | 'CALL_FUNCTION'
-  | 'HOST_EVENT'
-  | 'CONFIG_UPDATE'
-  | 'DESTROY'
-  | 'REF_METHOD_RESULT';
+export enum HostMsg {
+  CALL_FUNCTION = 'CALL_FUNCTION',
+  HOST_EVENT = 'HOST_EVENT',
+  CONFIG_UPDATE = 'CONFIG_UPDATE',
+  DESTROY = 'DESTROY',
+  PROMISE_RESOLVE = 'PROMISE_RESOLVE',
+  PROMISE_REJECT = 'PROMISE_REJECT',
+  REF_METHOD_RESULT = 'REF_METHOD_RESULT',
+}
 
 export interface CallFunctionMessage {
-  type: 'CALL_FUNCTION';
+  type: HostMsg.CALL_FUNCTION;
   fnId: string;
   args: BridgeValue[];
 }
 
 export interface HostEventMessage {
-  type: 'HOST_EVENT';
+  type: HostMsg.HOST_EVENT;
   eventName: string;
   payload: BridgeValue;
 }
 
 export interface ConfigUpdateMessage {
-  type: 'CONFIG_UPDATE';
+  type: HostMsg.CONFIG_UPDATE;
   config: BridgeValueObject;
 }
 
 export interface DestroyMessage {
-  type: 'DESTROY';
+  type: HostMsg.DESTROY;
 }
 
 /**
@@ -372,7 +387,7 @@ export interface DestroyMessage {
  * Host 返回给 Guest 的方法调用结果
  */
 export interface RefMethodResultMessage {
-  type: 'REF_METHOD_RESULT';
+  type: HostMsg.REF_METHOD_RESULT;
   refId: number; // 节点 ID
   callId: string; // 调用唯一标识（与 REF_CALL 对应）
   result?: BridgeValue; // 成功时的返回值
@@ -394,14 +409,14 @@ export type HostMessage =
  * Promise 结算消息 - 用于异步传递 Promise 结果
  */
 export type PromiseSettleMessage =
-  | { type: 'PROMISE_RESOLVE'; promiseId: string; value: BridgeValue }
-  | { type: 'PROMISE_REJECT'; promiseId: string; error: SerializedError };
+  | { type: HostMsg.PROMISE_RESOLVE; promiseId: string; value: BridgeValue }
+  | { type: HostMsg.PROMISE_REJECT; promiseId: string; error: SerializedError };
 
 /**
  * 序列化后的 REF_METHOD_RESULT 消息
  */
 export interface SerializedRefMethodResultMessage {
-  type: 'REF_METHOD_RESULT';
+  type: HostMsg.REF_METHOD_RESULT;
   refId: number;
   callId: string;
   result?: SerializedValue;
@@ -409,10 +424,10 @@ export interface SerializedRefMethodResultMessage {
 }
 
 export type SerializedHostMessage =
-  | { type: 'CALL_FUNCTION'; fnId: string; args: SerializedValue[] }
-  | { type: 'HOST_EVENT'; eventName: string; payload: SerializedValue }
-  | { type: 'CONFIG_UPDATE'; config: SerializedValueObject }
-  | { type: 'DESTROY' }
+  | { type: HostMsg.CALL_FUNCTION; fnId: string; args: SerializedValue[] }
+  | { type: HostMsg.HOST_EVENT; eventName: string; payload: SerializedValue }
+  | { type: HostMsg.CONFIG_UPDATE; config: SerializedValueObject }
+  | { type: HostMsg.DESTROY }
   | SerializedPromiseSettleMessage
   | SerializedRefMethodResultMessage;
 
@@ -420,8 +435,8 @@ export type SerializedHostMessage =
  * 序列化后的 Promise 结算消息
  */
 export type SerializedPromiseSettleMessage =
-  | { type: 'PROMISE_RESOLVE'; promiseId: string; value: SerializedValue }
-  | { type: 'PROMISE_REJECT'; promiseId: string; error: SerializedError };
+  | { type: HostMsg.PROMISE_RESOLVE; promiseId: string; value: SerializedValue }
+  | { type: HostMsg.PROMISE_REJECT; promiseId: string; error: SerializedError };
 
 // ============================================
 // Callback Registry 接口
@@ -430,19 +445,19 @@ export type SerializedPromiseSettleMessage =
 /**
  * Callback Registry - 管理跨边界函数调用
  *
- * Note: Uses `unknown` for flexibility with existing implementations.
+ * Note: Uses ReviewedUnknown for flexibility with existing implementations.
  * The actual serialization/deserialization is handled by Bridge.
  */
 export interface CallbackRegistry {
   /**
    * 注册函数，返回 fnId
    */
-  register(fn: (...args: unknown[]) => unknown): string;
+  register(fn: (...args: ReviewedUnknown[]) => ReviewedUnknown): string;
 
   /**
    * 通过 fnId 调用函数
    */
-  invoke(fnId: string, args: unknown[]): unknown;
+  invoke(fnId: string, args: ReviewedUnknown[]): ReviewedUnknown;
 
   /**
    * 检查 fnId 是否存在
@@ -475,9 +490,9 @@ export interface CallbackRegistry {
   getRefCount(fnId: string): number;
 
   /**
-   * 获取内部 Map（用于同步到 globalThis.__callbacks）
+   * 获取内部 Map（用于同步到 globalThis.__rill.callbacks）
    */
-  getMap(): Map<string, (...args: unknown[]) => unknown>;
+  getMap(): Map<string, (...args: ReviewedUnknown[]) => ReviewedUnknown>;
 
   /**
    * 当前注册的函数数量
@@ -495,11 +510,15 @@ export interface CallbackRegistry {
 export type SerializedProps = SerializedValueObject;
 
 /**
- * 发送到 Host 的函数类型
- * Guest 端发送 SerializedOperationBatch（已序列化）
- * Host 端发送 OperationBatch（未序列化）
+ * Send operations from Guest to Host.
+ * The batch format depends on the provider:
+ * - VM: OperationBatch (raw, same runtime)
+ * - WASM binary: ArrayBuffer
+ * - Native sandbox: string (JSON-serialized to avoid JSI stack overflow)
  */
-export type SendToHost = (batch: OperationBatch | SerializedOperationBatch) => void;
+export type SendToHost = (
+  batch: OperationBatch | SerializedOperationBatch | ArrayBuffer | string
+) => void;
 
 // ============================================
 // Type Guards

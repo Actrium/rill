@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'bun:test';
 import { Engine } from '../../engine';
-import { createMockJSEngineProvider } from '../test-utils';
 
 function makeBatch(batchId: number, ops: number) {
   return {
@@ -18,20 +17,20 @@ function makeBatch(batchId: number, ops: number) {
 describe('Engine diagnostics timeline', () => {
   it('aggregates ops/skip/apply into activity.timeline buckets', async () => {
     const engine = new Engine({
-      provider: createMockJSEngineProvider(),
+      sandbox: 'vm',
       receiverMaxBatchSize: 2,
       diagnostics: { activityHistoryMs: 10_000, activityBucketMs: 1000 },
     });
     await engine.loadBundle('globalThis.__noop = 1;');
-    engine.createReceiver(() => {});
+    engine.createReceiver();
 
-    // biome-ignore lint/suspicious/noExplicitAny: Timeline event has dynamic structure
-    const sendToHost = (engine as unknown as { sendToHostFn: ((b: any) => void) | null })
-      .sendToHostFn;
-    expect(typeof sendToHost).toBe('function');
+    // Feed batches directly through Bridge (simulates Guest → Host traffic)
+    // biome-ignore lint/suspicious/noExplicitAny: access private field in unit test
+    const bridge = (engine as any).bridge as { sendRawBatch?: (b: unknown) => void } | null;
+    expect(typeof bridge?.sendRawBatch).toBe('function');
 
-    sendToHost!(makeBatch(1, 5));
-    sendToHost!(makeBatch(2, 3));
+    bridge!.sendRawBatch!(makeBatch(1, 5));
+    bridge!.sendRawBatch!(makeBatch(2, 3));
 
     const d = engine.getDiagnostics();
     const timeline = d.activity.timeline;

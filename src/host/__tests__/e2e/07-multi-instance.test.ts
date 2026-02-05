@@ -11,7 +11,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { Engine } from '../../engine';
 import type { Receiver } from '../../receiver';
-import { createMockJSEngineProvider } from '../test-utils';
 import { MockComponents } from './helpers/mock-components';
 import { wait, waitFor } from './helpers/test-utils';
 
@@ -28,7 +27,7 @@ function createMultiInstanceContext(count: number): MultiInstanceContext {
 
   for (let i = 0; i < count; i++) {
     const engine = new Engine({
-      quickjs: createMockJSEngineProvider(),
+      sandbox: 'vm',
       debug: false,
     });
     engine.register(MockComponents);
@@ -39,7 +38,7 @@ function createMultiInstanceContext(count: number): MultiInstanceContext {
       instanceEvents.push({ engineIndex: i, ...msg });
     });
 
-    const receiver = engine.createReceiver(() => {});
+    const receiver = engine.createReceiver();
 
     engines.push(engine);
     receivers.push(receiver);
@@ -76,7 +75,7 @@ describe('E2E Multi-Instance: Independent Engines', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     // Load different code into each engine
@@ -100,11 +99,11 @@ describe('E2E Multi-Instance: Independent Engines', () => {
       function App() {
         return React.createElement('TouchableOpacity', {
           testID: 'button',
-          onPress: () => globalThis.__sendEventToHost('PRESSED', { engineId: ${id} })
+          onPress: () => globalThis.__rill_emitEvent('PRESSED', { engineId: ${id} })
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await Promise.all(ctx.engines.map((engine, i) => engine.loadBundle(guestCode(i))));
@@ -145,7 +144,7 @@ describe('E2E Multi-Instance: Independent Engines', () => {
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     // Each engine starts with different initial count
@@ -192,7 +191,7 @@ describe('E2E Multi-Instance: Lifecycle', () => {
         return React.createElement('View', { testID: 'container' });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await Promise.all(ctx.engines.map((engine) => engine.loadBundle(guestCode)));
@@ -215,7 +214,7 @@ describe('E2E Multi-Instance: Lifecycle', () => {
         return React.createElement('View', { testID: 'engine-${id}' });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     // Create and load first two engines
@@ -263,7 +262,7 @@ describe('E2E Multi-Instance: Resource Isolation', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await Promise.all(ctx.engines.map((engine) => engine.loadBundle(guestCode)));
@@ -289,7 +288,7 @@ describe('E2E Multi-Instance: Resource Isolation', () => {
         return React.createElement('View', { testID: 'working' });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     const brokenCode = `
@@ -300,8 +299,8 @@ describe('E2E Multi-Instance: Resource Isolation', () => {
     await ctx.engines[0]!.loadBundle(workingCode);
     await waitFor(() => ctx.receivers[0]!.nodeCount > 0, 2000);
 
-    // Load broken code into second engine (should fail)
-    await expect(ctx.engines[1]!.loadBundle(brokenCode)).rejects.toThrow();
+    // Load broken code into second engine (should fail — sync path throws)
+    expect(() => ctx.engines[1]!.loadBundle(brokenCode)).toThrow();
 
     // First engine should still work
     expect(ctx.receivers[0]!.findByTestId('working')).toBeDefined();
@@ -338,7 +337,7 @@ describe('E2E Multi-Instance: Concurrent Operations', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await Promise.all(ctx.engines.map((engine, i) => engine.loadBundle(guestCode(i))));
@@ -374,14 +373,14 @@ describe('E2E Multi-Instance: Concurrent Operations', () => {
             testID: 'action',
             onPress: () => {
               setCount(c => c + 1);
-              globalThis.__sendEventToHost('ACTION', { engineId: ${id}, newCount: count + 1 });
+              globalThis.__rill_emitEvent('ACTION', { engineId: ${id}, newCount: count + 1 });
               return count + 1;
             }
           })
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await Promise.all(ctx.engines.map((engine, i) => engine.loadBundle(guestCode(i))));

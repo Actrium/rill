@@ -55,7 +55,7 @@ describe('CLI Build - Error Handling', () => {
       fs.writeFileSync(
         path.join(srcDir, 'broken.tsx'),
         `
-        import { View } from 'rill/sdk';
+        import { View } from 'rill/guest';
         export default function Broken() {
           return <View>{ // unclosed bracket
         }
@@ -150,7 +150,7 @@ describe('CLI Build - Error Handling', () => {
       fs.writeFileSync(
         path.join(srcDir, 'valid.tsx'),
         `
-        import { View, Text } from 'rill/sdk';
+        import { View, Text } from 'rill/guest';
         export default function Valid() {
           return <View><Text>Valid</Text></View>;
         }
@@ -189,7 +189,7 @@ describe('CLI Build - Error Handling', () => {
       fs.writeFileSync(
         path.join(srcDir, 'component.tsx'),
         `
-        import { View, Text } from 'rill/sdk';
+        import { View, Text } from 'rill/guest';
         export default function Component() {
           return <View><Text>Test</Text></View>;
         }
@@ -277,7 +277,7 @@ describe('CLI Build - Error Handling', () => {
       fs.writeFileSync(
         path.join(srcDir, 'component.tsx'),
         `
-        import { View, Text, TouchableOpacity } from 'rill/sdk';
+        import { View, Text, TouchableOpacity } from 'rill/guest';
         export default function Component() {
           const handlePress = () => console.log('pressed');
           return (
@@ -307,9 +307,9 @@ describe('CLI Build - Error Handling', () => {
 
       // Should include runtime injection code
       expect(bundleContent).toContain('Rill Runtime Inject');
-      expect(bundleContent).toContain('__registerCallback');
-      expect(bundleContent).toContain('__invokeCallback');
-      expect(bundleContent).toContain('__removeCallback');
+      expect(bundleContent).toContain('__rill.registerCallback');
+      expect(bundleContent).toContain('__rill.invokeCallback');
+      expect(bundleContent).toContain('__rill.removeCallback');
     });
 
     it('should wrap bundle in IIFE with proper globals', async () => {
@@ -327,7 +327,7 @@ describe('CLI Build - Error Handling', () => {
 
       // Should wrap in function that receives globals
       expect(bundleContent).toContain('function(');
-      expect(bundleContent).toMatch(/React|ReactNative|RillSDK/);
+      expect(bundleContent).toMatch(/React|ReactNative|RillGuest/);
     });
   });
 
@@ -339,7 +339,7 @@ describe('CLI Build - Error Handling', () => {
       fs.writeFileSync(
         path.join(srcDir, 'component.tsx'),
         `
-        import { View, Text } from 'rill/sdk';
+        import { View, Text } from 'rill/guest';
         export default function Component() {
           return <View><Text>Test</Text></View>;
         }
@@ -386,7 +386,7 @@ describe('CLI Build - Error Handling', () => {
       fs.writeFileSync(
         path.join(srcDir, 'component.tsx'),
         `
-        import { View, Text } from 'rill/sdk';
+        import { View, Text } from 'rill/guest';
         export default function Component() {
           return <View><Text>Test Component</Text></View>;
         }

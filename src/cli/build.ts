@@ -67,6 +67,13 @@ export interface BuildOptions {
   dev?: boolean;
 }
 
+export interface AnalyzeOptions {
+  whitelist?: string[];
+  failOnViolation?: boolean;
+  treatEvalAsViolation?: boolean;
+  treatDynamicNonLiteralAsViolation?: boolean;
+}
+
 /**
  * Runtime injection code
  * Sets up necessary global environment before bundle execution
@@ -76,91 +83,115 @@ const RUNTIME_INJECT = `
 (function() {
   'use strict';
 
+  // Initialize __rill namespace
+  if (!globalThis.__rill) { globalThis.__rill = {}; }
+  var __rill = globalThis.__rill;
+
   // Callback registry - persist across re-executions
-  if (!globalThis.__callbacks) {
-    globalThis.__callbacks = new Map();
-    globalThis.__callbackId = 0;
+  if (!__rill.callbacks) {
+    __rill.callbacks = new Map();
+  }
+  if (typeof __rill.callbackId !== 'number') {
+    __rill.callbackId = 0;
   }
 
   // Register callback
-  globalThis.__registerCallback = function(fn) {
-    var id = 'fn_' + (++globalThis.__callbackId);
-    globalThis.__callbacks.set(id, fn);
-    return id;
-  };
+  if (typeof __rill.registerCallback !== 'function') {
+    __rill.registerCallback = function(fn) {
+      var id = 'fn_' + (++__rill.callbackId);
+      __rill.callbacks.set(id, fn);
+      return id;
+    };
+  }
 
   // Invoke callback
-  globalThis.__invokeCallback = function(fnId, args) {
-    var fn = globalThis.__callbacks.get(fnId);
-    if (fn) {
-      try {
-        return fn.apply(null, args || []);
-      } catch (e) {
-        console.error('[rill] Callback execution error for', fnId);
-        console.error('[rill] Error type:', typeof e);
-        console.error('[rill] Error message:', e && e.message ? e.message : String(e));
-        console.error('[rill] Error stack:', e && e.stack ? e.stack : 'no stack');
-        console.error('[rill] Error name:', e && e.name ? e.name : 'no name');
-        throw e;
+  if (typeof __rill.invokeCallback !== 'function') {
+    __rill.invokeCallback = function(fnId, args) {
+      var fn = __rill.callbacks.get(fnId);
+      if (fn) {
+        try {
+          return fn.apply(null, args || []);
+        } catch (e) {
+          console.error('[rill] Callback execution error for', fnId);
+          console.error('[rill] Error message:', e && e.message ? e.message : String(e));
+          console.error('[rill] Error stack:', e && e.stack ? e.stack : 'no stack');
+          throw e;
+        }
+      } else {
+        console.warn('[rill] Callback not found:', fnId);
       }
-    } else {
-      console.warn('[rill] Callback not found:', fnId);
-      console.warn('[rill] Available callbacks:', Array.from(globalThis.__callbacks.keys()).join(', '));
-    }
-  };
+    };
+  }
 
   // Remove callback
-  globalThis.__removeCallback = function(fnId) {
-    globalThis.__callbacks.delete(fnId);
-  };
+  if (typeof __rill.removeCallback !== 'function') {
+    __rill.removeCallback = function(fnId) {
+      __rill.callbacks.delete(fnId);
+    };
+  }
 
   // Host event listeners
-  var __hostEventListeners = new Map();
+  if (!__rill.eventListeners) {
+    __rill.eventListeners = new Map();
+  }
+  var __eventListeners = __rill.eventListeners;
 
   // Register host event listener
-  globalThis.__useHostEvent = function(eventName, callback) {
-    if (!__hostEventListeners.has(eventName)) {
-      __hostEventListeners.set(eventName, new Set());
-    }
-    __hostEventListeners.get(eventName).add(callback);
-  };
+  if (typeof globalThis.__rill_onHostEvent !== 'function') {
+    globalThis.__rill_onHostEvent = function(eventName, callback) {
+      if (!__eventListeners.has(eventName)) {
+        __eventListeners.set(eventName, new Set());
+      }
+      var set = __eventListeners.get(eventName);
+      set.add(callback);
+      return function() {
+        try { set.delete(callback); } catch (_) {}
+      };
+    };
+  }
 
   // Handle host event
-  globalThis.__handleHostEvent = function(eventName, payload) {
-    var listeners = __hostEventListeners.get(eventName);
-    if (listeners) {
-      listeners.forEach(function(listener) {
-        try {
-          listener(payload);
-        } catch (e) {
-          console.error('[rill] Host event listener error:', e);
-        }
-      });
-    }
-  };
+  if (typeof __rill.dispatchEvent !== 'function') {
+    __rill.dispatchEvent = function(eventName, payload) {
+      var listeners = __eventListeners.get(eventName);
+      if (listeners) {
+        listeners.forEach(function(listener) {
+          try {
+            listener(payload);
+          } catch (e) {
+            console.error('[rill] Host event listener error:', e);
+          }
+        });
+      }
+    };
+  }
 
   // Handle host message
-  globalThis.__handleHostMessage = function(message) {
-    switch (message.type) {
-      case 'CALL_FUNCTION':
-        globalThis.__invokeCallback(message.fnId, message.args);
-        break;
-      case 'HOST_EVENT':
-        globalThis.__handleHostEvent(message.eventName, message.payload);
-        break;
-      case 'CONFIG_UPDATE':
-        if (globalThis.__config) {
-          Object.assign(globalThis.__config, message.config);
-        }
-        break;
-      case 'DESTROY':
-        __hostEventListeners.clear();
-        break;
-    }
-  };
+  if (typeof globalThis.__rill_handleMessage !== 'function') {
+    globalThis.__rill_handleMessage = function(message) {
+      switch (message.type) {
+        case 'CALL_FUNCTION':
+          __rill.invokeCallback(message.fnId, message.args);
+          break;
+        case 'HOST_EVENT':
+          __rill.dispatchEvent(message.eventName, message.payload);
+          break;
+        case 'CONFIG_UPDATE':
+          if (__rill.config) {
+            Object.assign(__rill.config, message.config);
+          }
+          break;
+        case 'DESTROY':
+          __eventListeners.clear();
+          break;
+      }
+    };
+  }
 
   // Config storage
-  globalThis.__config = globalThis.__getConfig ? globalThis.__getConfig() : {};
+  if (!__rill.config) {
+    __rill.config = globalThis.__rill_getConfig ? globalThis.__rill_getConfig() : {};
+  }
 
 })();
 `;
@@ -174,7 +205,7 @@ const RUNTIME_INJECT = `
 const AUTO_RENDER_FOOTER = `
 /* Auto-render */
 (function() {
-  if (typeof __sendToHost === 'function' && typeof globalThis.__RillGuest !== 'undefined') {
+  if (typeof __rill_sendBatch === 'function' && typeof globalThis.__rill !== 'undefined' && globalThis.__rill.guest) {
     try {
       var React = globalThis.React;
       if (!React) {
@@ -188,7 +219,7 @@ const AUTO_RENDER_FOOTER = `
         return;
       }
 
-      var GuestExport = globalThis.__RillGuest;
+      var GuestExport = globalThis.__rill.guest;
       var Component = typeof GuestExport === 'function'
         ? GuestExport
         : (GuestExport.default || GuestExport);
@@ -199,7 +230,7 @@ const AUTO_RENDER_FOOTER = `
       }
 
       console.log('[rill] Auto-rendering guest component');
-      RillReconciler.render(React.createElement(Component), __sendToHost);
+      RillReconciler.render(React.createElement(Component), __rill_sendBatch);
     } catch (error) {
       console.error('[rill] Auto-render failed:', error);
     }
@@ -215,7 +246,7 @@ const EXTERNALS: Record<string, string> = {
   'react/jsx-runtime': 'ReactJSXRuntime',
   'react/jsx-dev-runtime': 'ReactJSXDevRuntime',
   'react-native': 'ReactNative',
-  'rill/sdk': 'RillSDK',
+  'rill/guest': 'RillGuest',
 };
 
 /**
@@ -352,7 +383,7 @@ export async function build(options: BuildOptions): Promise<void> {
 
   // Analyze JSX props for JSI optimization
   console.log('\nAnalyzing JSX props for JSI optimization...');
-  let jsxAnalysis: import('./oxcAdapter').JSXAnalysisResult = {
+  let jsxAnalysis: import('./oxc-adapter').JSXAnalysisResult = {
     propHints: [],
     stats: {
       totalElements: 0,
@@ -362,7 +393,7 @@ export async function build(options: BuildOptions): Promise<void> {
     },
   };
   try {
-    const { analyzeJSXProps } = await import('./oxcAdapter');
+    const { analyzeJSXProps } = await import('./oxc-adapter');
     jsxAnalysis = analyzeJSXProps(bundleCode);
 
     if (jsxAnalysis.stats) {
@@ -389,12 +420,13 @@ export async function build(options: BuildOptions): Promise<void> {
   }
 
   // For CJS output, module.exports carries the default export
-  // After transforming externals, capture default into globalThis.__RillGuest
+  // After transforming externals, capture default into globalThis.__rill.guest
   const captureExports = `
 try {
   var __rillModuleExports = (typeof module !== 'undefined' && module && module.exports) ? module.exports : (typeof exports !== 'undefined' ? exports : undefined);
   if (__rillModuleExports) {
-    globalThis.__RillGuest = __rillModuleExports.default || __rillModuleExports;
+    if (!globalThis.__rill) { globalThis.__rill = {}; }
+    globalThis.__rill.guest = __rillModuleExports.default || __rillModuleExports;
   }
 } catch {}
 `;
@@ -434,7 +466,7 @@ ${footerCode}
   if (strict) {
     try {
       await analyze(targetPath, {
-        whitelist: ['react', 'react-native', 'react/jsx-runtime', 'rill/sdk'],
+        whitelist: ['react', 'react-native', 'react/jsx-runtime', 'rill/guest'],
         failOnViolation: true,
         treatEvalAsViolation: true,
         treatDynamicNonLiteralAsViolation: true,
@@ -447,47 +479,14 @@ ${footerCode}
     }
   }
 
-  // Validate bundle can be loaded with Function constructor
+  // Validate bundle syntax via AST parse (no execution, no mock globals needed)
   try {
-    const mockExports: Record<string, unknown> = {};
-    const mockGlobals: Record<string, unknown> = {
-      React: { createElement: () => ({}) },
-      ReactJSXRuntime: { jsx: () => ({}), jsxs: () => ({}) },
-      ReactJSXDevRuntime: { jsx: () => ({}), jsxs: () => ({}) },
-      ReactNative: {},
-      RillReconciler: { render: () => {}, unmount: () => {} },
-      RillSDK: {
-        View: 'View',
-        Text: 'Text',
-        useHostEvent: () => {},
-        useConfig: () => ({}),
-        useSendToHost: () => () => {},
-      },
-      module: { exports: mockExports },
-      exports: mockExports,
-      __React: null,
-      __ReactJSXRuntime: null,
-      __ReactJSXDevRuntime: null,
-      __ReactNative: null,
-    };
-    // Alias externals to __React* variants
-    mockGlobals.__React = mockGlobals.React;
-    mockGlobals.__ReactJSXRuntime = mockGlobals.ReactJSXRuntime;
-    mockGlobals.__ReactJSXDevRuntime = mockGlobals.ReactJSXDevRuntime;
-    mockGlobals.__ReactNative = mockGlobals.ReactNative;
-
-    // Mock require function that returns mock globals based on module name
-    const mockRequire = (name: string) => {
-      if (name === 'react') return mockGlobals.React;
-      if (name === 'react/jsx-runtime') return mockGlobals.ReactJSXRuntime;
-      if (name === 'react/jsx-dev-runtime') return mockGlobals.ReactJSXDevRuntime;
-      if (name === 'react-native') return mockGlobals.ReactNative;
-      if (name === 'rill/sdk') return mockGlobals.RillSDK;
-      return {};
-    };
-    const globalNames = ['require', ...Object.keys(mockGlobals)];
-    const globalValues = [mockRequire, ...Object.values(mockGlobals)];
-    new Function(...globalNames, wrappedCode)(...globalValues);
+    const oxc = require('oxc-parser');
+    const result = oxc.parseSync(wrappedCode, { sourceType: 'script' });
+    if (result.errors && result.errors.length > 0) {
+      const msgs = result.errors.map((e: { message: string }) => e.message).join('\n  ');
+      throw new Error(`Syntax errors:\n  ${msgs}`);
+    }
     console.log('   Syntax validation: PASS');
   } catch (validationErr) {
     console.error('\n❌ Bundle validation failed:');
@@ -521,15 +520,7 @@ ${footerCode}
 /**
  * Analyze bundle for disallowed dependencies
  */
-export async function analyze(
-  bundlePath: string,
-  options?: {
-    whitelist?: string[];
-    failOnViolation?: boolean;
-    treatEvalAsViolation?: boolean;
-    treatDynamicNonLiteralAsViolation?: boolean;
-  }
-): Promise<void> {
+export async function analyze(bundlePath: string, options?: AnalyzeOptions): Promise<void> {
   const fullPath = path.resolve(process.cwd(), bundlePath);
   if (!fs.existsSync(fullPath)) {
     throw new Error(`Bundle not found: ${fullPath}`);
@@ -544,7 +535,7 @@ export async function analyze(
   console.log(`  Lines: ${content.split('\n').length}`);
 
   // Use oxc adapter for module analysis
-  const { analyzeModuleIDs } = await import('./oxcAdapter');
+  const { analyzeModuleIDs } = await import('./oxc-adapter');
   const scan = await analyzeModuleIDs(content);
   const found = new Set<string>([
     ...scan.static,
@@ -553,7 +544,7 @@ export async function analyze(
   ] as string[]);
 
   const whitelist = new Set(
-    options?.whitelist ?? ['react', 'react-native', 'react/jsx-runtime', 'rill/sdk']
+    options?.whitelist ?? ['react', 'react-native', 'react/jsx-runtime', 'rill/guest']
   );
 
   const violations: string[] = Array.from(found).filter((m) => {

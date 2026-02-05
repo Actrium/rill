@@ -36,8 +36,8 @@
 ### 变更
 
 #### SDK 重命名
-- **破坏性变更**：Guest SDK 从 `rill/let` 重命名为 `rill/sdk`
-  - 更新导入：`import { View, Text } from 'rill/sdk'`
+- **破坏性变更**：Guest SDK 从 `rill/let` 重命名为 `rill/guest`
+  - 更新导入：`import { View, Text } from 'rill/guest'`
   - 旧的 `rill/let` 路径已移除
 
 #### 原生代码整合

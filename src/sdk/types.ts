@@ -1,11 +1,12 @@
 /**
- * rill/sdk Type Definitions
+ * rill/guest Type Definitions
  *
  * Types for Guest-side SDK and Reconciler
  * 通信相关类型从 bridge/types.ts 重新导出
  */
 
 import type React from 'react';
+import type { ReviewedUnknown } from '../shared';
 
 // ============================================
 // 从 Bridge 重新导出通信类型
@@ -66,8 +67,8 @@ export interface GuestReactElement {
   type: string | symbol | Function | GuestComponentRef | Record<string, unknown>;
   props?: Record<string, unknown>;
   key?: React.Key | null;
-  ref?: unknown;
-  children?: unknown;
+  ref?: ReviewedUnknown;
+  children?: ReviewedUnknown;
 }
 
 /**
@@ -86,6 +87,7 @@ export type GuestElement =
 /**
  * Type guard for Guest React element
  */
+// Reason: Type guard input is untrusted (sandbox boundary)
 export function isGuestReactElement(value: unknown): value is GuestReactElement {
   if (typeof value !== 'object' || value === null) {
     return false;
@@ -114,6 +116,7 @@ export function isGuestReactElement(value: unknown): value is GuestReactElement 
 /**
  * Type guard for Guest component reference
  */
+// Reason: Type guard input is untrusted (sandbox boundary)
 export function isGuestComponentRef(value: unknown): value is GuestComponentRef {
   return (
     typeof value === 'object' &&
@@ -261,7 +264,11 @@ export interface FlatListRef extends ScrollViewRef {
     viewOffset?: number;
     viewPosition?: number;
   }): Promise<void>;
-  scrollToItem(params: { item: unknown; animated?: boolean; viewPosition?: number }): Promise<void>;
+  scrollToItem(params: {
+    item: ReviewedUnknown;
+    animated?: boolean;
+    viewPosition?: number;
+  }): Promise<void>;
   scrollToOffset(params: { offset: number; animated?: boolean }): Promise<void>;
   recordInteraction(): Promise<void>;
 }

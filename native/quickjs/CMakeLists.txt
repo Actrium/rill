@@ -30,7 +30,7 @@ endif()
 
 # Source directories
 set(VENDOR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
-set(JSI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/jsi)
+set(JSI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../jsi)
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # QuickJS Engine sources (C)

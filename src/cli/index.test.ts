@@ -39,7 +39,7 @@ describe('CLI Commands', () => {
     fs.writeFileSync(
       path.join(srcDir, 'guest.tsx'),
       `
-      import { View, Text } from 'rill/sdk';
+      import { View, Text } from 'rill/guest';
       export default function Guest() {
         return <View><Text>Hello CLI Test</Text></View>;
       }
@@ -228,7 +228,7 @@ describe('CLI Commands', () => {
       };
 
       await analyzeMock.analyze('dist/test-bundle.js', {
-        whitelist: ['react', 'react-native', 'react/jsx-runtime', 'rill/sdk'],
+        whitelist: ['react', 'react-native', 'react/jsx-runtime', 'rill/guest'],
       });
     });
 
@@ -338,7 +338,7 @@ describe('CLI Commands', () => {
       // Create src/guest.tsx
       const guestPath = path.join(srcDir, 'guest.tsx');
       const guestContent = `import * as React from 'react';
-import { View, Text } from 'rill/sdk';
+import { View, Text } from 'rill/guest';
 
 export default function Guest() {
   return (

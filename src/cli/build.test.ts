@@ -30,7 +30,7 @@ describe('CLI Build', () => {
     fs.writeFileSync(
       path.join(srcDir, 'guest.tsx'),
       `
-      import { View, Text } from 'rill/sdk';
+      import { View, Text } from 'rill/guest';
       export default function Guest() {
         return <View><Text>Hello</Text></View>;
       }
@@ -308,16 +308,16 @@ describe('Runtime Inject Content', () => {
     // 读取源码验证运行时注入内容
     const buildSource = fs.readFileSync(path.join(__dirname, 'build.ts'), 'utf-8');
 
-    expect(buildSource).toContain('__registerCallback');
-    expect(buildSource).toContain('__invokeCallback');
-    expect(buildSource).toContain('__removeCallback');
+    expect(buildSource).toContain('__rill.registerCallback');
+    expect(buildSource).toContain('__rill.invokeCallback');
+    expect(buildSource).toContain('__rill.removeCallback');
   });
 
   it('should include host event handling', () => {
     const buildSource = fs.readFileSync(path.join(__dirname, 'build.ts'), 'utf-8');
 
-    expect(buildSource).toContain('__useHostEvent');
-    expect(buildSource).toContain('__handleHostEvent');
-    expect(buildSource).toContain('__handleHostMessage');
+    expect(buildSource).toContain('__rill_onHostEvent');
+    expect(buildSource).toContain('__rill.dispatchEvent');
+    expect(buildSource).toContain('__rill_handleMessage');
   });
 });

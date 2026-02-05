@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it } from 'bun:test';
+import { HostMsg } from '../../types';
 import type {
   AppendOperation,
   CallFunctionMessage,
@@ -13,7 +14,6 @@ import type {
   DeleteOperation,
   DestroyMessage,
   HostEventMessage,
-  HostMessageType,
   InsertOperation,
   NodeInstance,
   OperationBatch,
@@ -252,30 +252,34 @@ describe('Serialized Types', () => {
 });
 
 describe('Host Message Types', () => {
-  describe('HostMessageType', () => {
+  describe('HostMsg enum', () => {
     it('should include all message types', () => {
-      const types: HostMessageType[] = ['CALL_FUNCTION', 'HOST_EVENT', 'CONFIG_UPDATE', 'DESTROY'];
-
-      expect(types).toHaveLength(4);
+      expect(HostMsg.CALL_FUNCTION).toBe('CALL_FUNCTION');
+      expect(HostMsg.HOST_EVENT).toBe('HOST_EVENT');
+      expect(HostMsg.CONFIG_UPDATE).toBe('CONFIG_UPDATE');
+      expect(HostMsg.DESTROY).toBe('DESTROY');
+      expect(HostMsg.PROMISE_RESOLVE).toBe('PROMISE_RESOLVE');
+      expect(HostMsg.PROMISE_REJECT).toBe('PROMISE_REJECT');
+      expect(HostMsg.REF_METHOD_RESULT).toBe('REF_METHOD_RESULT');
     });
   });
 
   describe('CallFunctionMessage', () => {
     it('should have correct structure', () => {
       const msg: CallFunctionMessage = {
-        type: 'CALL_FUNCTION',
+        type: HostMsg.CALL_FUNCTION,
         fnId: 'fn_1',
         args: ['arg1', 123, true],
       };
 
-      expect(msg.type).toBe('CALL_FUNCTION');
+      expect(msg.type).toBe(HostMsg.CALL_FUNCTION);
       expect(msg.fnId).toBe('fn_1');
       expect(msg.args).toHaveLength(3);
     });
 
     it('should accept optional seq', () => {
       const msg: CallFunctionMessage = {
-        type: 'CALL_FUNCTION',
+        type: HostMsg.CALL_FUNCTION,
         fnId: 'fn_1',
         args: [],
         seq: 42,
@@ -288,12 +292,12 @@ describe('Host Message Types', () => {
   describe('HostEventMessage', () => {
     it('should have correct structure', () => {
       const msg: HostEventMessage = {
-        type: 'HOST_EVENT',
+        type: HostMsg.HOST_EVENT,
         eventName: 'REFRESH',
         payload: { timestamp: Date.now() },
       };
 
-      expect(msg.type).toBe('HOST_EVENT');
+      expect(msg.type).toBe(HostMsg.HOST_EVENT);
       expect(msg.eventName).toBe('REFRESH');
     });
   });
@@ -301,11 +305,11 @@ describe('Host Message Types', () => {
   describe('ConfigUpdateMessage', () => {
     it('should have correct structure', () => {
       const msg: ConfigUpdateMessage = {
-        type: 'CONFIG_UPDATE',
+        type: HostMsg.CONFIG_UPDATE,
         config: { theme: 'dark', fontSize: 16 },
       };
 
-      expect(msg.type).toBe('CONFIG_UPDATE');
+      expect(msg.type).toBe(HostMsg.CONFIG_UPDATE);
       expect(msg.config.theme).toBe('dark');
     });
   });
@@ -313,10 +317,10 @@ describe('Host Message Types', () => {
   describe('DestroyMessage', () => {
     it('should have minimal structure', () => {
       const msg: DestroyMessage = {
-        type: 'DESTROY',
+        type: HostMsg.DESTROY,
       };
 
-      expect(msg.type).toBe('DESTROY');
+      expect(msg.type).toBe(HostMsg.DESTROY);
     });
   });
 });
