@@ -1,0 +1,24 @@
+{
+  "extends": "@tsconfig/react-native/tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2021",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "types": ["react", "react-native", "node"],
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "lib": ["ES2021", "DOM", "DOM.Iterable"],
+    "paths": {
+      "react": ["../node_modules/@types/react/index.d.ts"],
+      "react-native": ["../node_modules/@types/react-native/index.d.ts"],
+      "react/jsx-runtime": ["../node_modules/@types/react/jsx-runtime.d.ts"],
+      "rill": ["../node_modules/rill/src/host/index.ts"],
+      "rill/*": ["../node_modules/rill/src/host/*"]
+    }
+  },
+  "include": ["index.tsx", "src"],
+  "exclude": ["node_modules"]
+}

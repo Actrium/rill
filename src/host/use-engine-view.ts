@@ -29,6 +29,12 @@ export interface UseEngineViewOptions {
   source: string;
 
   /**
+   * Optional Hermes bytecode asset path for the guest bundle.
+   * If provided and supported by the active sandbox, Engine will prefer bytecode.
+   */
+  bytecodeAssetPath?: string;
+
+  /**
    * Initial props to pass to the Guest
    */
   initialProps?: Record<string, unknown>;
@@ -91,6 +97,7 @@ export interface UseEngineViewResult {
 export function useEngineView({
   engine,
   source,
+  bytecodeAssetPath,
   initialProps,
   onLoad,
   onError,
@@ -128,9 +135,20 @@ export function useEngineView({
         engine.createReceiver();
 
         // Load and execute Guest
-        await engine.loadBundle(source, initialProps);
+        if (bytecodeAssetPath) {
+          await engine.loadBundle(source, initialProps, { bytecodeAssetPath });
+        } else {
+          await engine.loadBundle(source, initialProps);
+        }
 
         if (mountedRef.current) {
+          // Force content capture after loadBundle completes.
+          // For sync providers (JSC, QuickJS, Hermes-native), the entire
+          // pipeline (eval → drain → applyBatch) runs before await yields.
+          // By the time we reach here, the Receiver has content. Calling
+          // handleUpdate() ensures setContent() picks it up even if the
+          // 'update' event fired before the listener was attached.
+          handleUpdate();
           setLoadingState('loaded');
           onLoad?.();
         }
@@ -150,11 +168,16 @@ export function useEngineView({
     return () => {
       mountedRef.current = false;
     };
-  }, [engine, source, initialProps, onLoad, onError]);
+  }, [engine, source, bytecodeAssetPath, initialProps, onLoad, onError, handleUpdate]);
 
   // Listen to engine events
   useEffect(() => {
     const unsubscribeUpdate = engine.on('update', handleUpdate);
+
+    // Catch up: if loadBundle completed synchronously (native providers),
+    // the initial 'update' event fired before this listener was attached.
+    // Call handleUpdate() immediately to pick up any already-rendered content.
+    handleUpdate();
 
     const unsubscribeError = engine.on('error', (err: Error) => {
       if (mountedRef.current) {

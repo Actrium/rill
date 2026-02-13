@@ -1,9 +1,9 @@
 /**
  * @rill/bridge - Serialization Utilities
  *
- * 通用序列化工具，供 Host 和 Guest 共享使用
- * - Host: bridge.ts 使用
- * - Guest: reconciler 使用（打包注入到沙箱）
+ * ， Host  Guest
+ * - Host: bridge.ts
+ * - Guest: reconciler （）
  *
  * Performance: Uses type-tag dispatch (O(1) Map lookup) instead of
  * linear rule traversal for serialized objects with __type field.
@@ -12,7 +12,7 @@
 import type { CodecCallbacks, TypeRule } from './type-rules';
 import type { ReviewedUnknown } from './types';
 
-/** 循环引用标记 */
+/**  */
 export interface CircularRef {
   __type: 'circular';
 }
@@ -50,19 +50,19 @@ function buildTagDispatchMap(rules: TypeRule[]): Map<string, TypeRule> {
 }
 
 /**
- * 创建编码函数
- * 使用 TypeRules 遍历匹配并编码值
- * 自动检测循环引用，避免无限递归
  *
- * 性能优化：
- * - 原始类型快速路径（跳过规则遍历）
- * - 按类型预分组规则减少匹配次数
- * - instanceof 快速分派避免线性遍历
+ *  TypeRules
+ * ，
  *
- * 循环引用检测：
- * - 每次顶层 encode 调用创建新的 WeakSet（通过 depth 计数器跟踪）
- * - 同一次 encode 调用树内共享 WeakSet（正确检测循环引用）
- * - 不同 encode 调用之间不共享（避免跨 render 误判）
+ * ：
+ * - （）
+ * -
+ * - instanceof
+ *
+ * ：
+ * -  encode  WeakSet（ depth ）
+ * -  encode  WeakSet（）
+ * -  encode （ render ）
  */
 export function createEncoder(
   typeRules: TypeRule[],
@@ -117,23 +117,23 @@ export function createEncoder(
     depth++;
 
     try {
-      // 快速路径：null/undefined 直接返回
+      // ：null/undefined
       if (value === null || value === undefined) {
         return value;
       }
 
-      // 快速路径：原始类型直接返回（跳过规则遍历）
+      // ：（）
       const type = typeof value;
       if (type === 'boolean' || type === 'number' || type === 'string') {
         return value;
       }
 
-      // 函数类型：直接使用函数规则
+      // ：
       if (type === 'function') {
         return applyRule(rulesByName.get('function'), value);
       }
 
-      // 对象类型 — instanceof-based dispatch
+      //  — instanceof-based dispatch
       if (type === 'object') {
         // Promise (leaf object, no circular ref detection needed)
         if (value instanceof Promise) {
@@ -236,7 +236,7 @@ export function createEncoder(
 }
 
 /**
- * 编码对象的所有属性
+ *
  */
 export function encodeObject(
   obj: Record<string, unknown>,
@@ -250,13 +250,13 @@ export function encodeObject(
 }
 
 /**
- * 创建解码函数
- * 使用 type-tag dispatch (O(1) Map lookup) 替代线性遍历
  *
- * 性能优化：
- * - 原始类型快速路径
- * - 对象 __type tag → O(1) Map dispatch
- * - 数组/对象递归解码内联处理
+ *  type-tag dispatch (O(1) Map lookup)
+ *
+ * ：
+ * -
+ * -  __type tag → O(1) Map dispatch
+ * - /
  */
 export function createDecoder(
   typeRules: TypeRule[],
@@ -280,12 +280,12 @@ export function createDecoder(
   );
 
   const decode = (value: ReviewedUnknown): ReviewedUnknown => {
-    // 快速路径：null/undefined
+    // ：null/undefined
     if (value === null || value === undefined) {
       return value;
     }
 
-    // 快速路径：原始类型
+    // ：
     const type = typeof value;
     if (type === 'boolean' || type === 'number' || type === 'string') {
       return value;
@@ -352,7 +352,7 @@ export function createDecoder(
 }
 
 /**
- * 解码对象的所有属性
+ *
  *
  * Reference-preserving: returns the original object if no values changed.
  * This is critical for React reconciliation — creating new object references

@@ -1,7 +1,7 @@
 /**
  * @rill/shared/bridge - Communication Layer
  *
- * Host/Guest 通信层实现
+ * Host/Guest
  */
 
 // P3-X.5: Binary Protocol Support

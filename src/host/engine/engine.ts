@@ -47,6 +47,7 @@ import type {
   EngineOptions,
   EventListener,
   IEngine,
+  LoadBundleOptions,
 } from './types';
 import { ExecutionError, RequireError, TimeoutError } from './types';
 
@@ -62,6 +63,7 @@ export type {
   EngineOptions,
   GuestMessage,
   IEngine,
+  LoadBundleOptions,
 } from './types';
 export { ExecutionError, RequireError, TimeoutError } from './types';
 
@@ -315,7 +317,11 @@ export class Engine implements IEngine {
    * stall in XPC ViewBridge context where RN bridge's RCTTiming is frozen (~24s)
    * and microtask continuations never drain.
    */
-  loadBundle(source: string, initialProps?: Record<string, unknown>): Promise<void> {
+  loadBundle(
+    source: string,
+    initialProps?: Record<string, unknown>,
+    bundleOptions?: LoadBundleOptions
+  ): Promise<void> {
     if (this.destroyed) {
       throw new Error('[rill] Engine has been destroyed');
     }
@@ -326,10 +332,12 @@ export class Engine implements IEngine {
 
     this.config = initialProps ?? {};
 
+    const bytecodeAssetPath = bundleOptions?.bytecodeAssetPath;
+
     const isRemoteSource = source.startsWith('http://') || source.startsWith('https://');
 
     if (isRemoteSource || this.isAsyncProvider()) {
-      return this._loadBundleAsync(source);
+      return this._loadBundleAsync(source, bytecodeAssetPath);
     }
 
     // ──── SYNC FAST PATH (JSC + inline code) ────
@@ -355,7 +363,7 @@ export class Engine implements IEngine {
       const initResult = this.initializeRuntime();
       if (initResult instanceof Promise) {
         // Should not happen for sync providers — defensive check
-        return initResult.then(() => this._loadBundleSyncContinuation(code, t0));
+        return initResult.then(() => this._loadBundleSyncContinuation(code, t0, bytecodeAssetPath));
       }
       const t1 = Date.now();
       this.options.logger.log(`[rill:${this.id}] [DIAG] initializeRuntime: ${t1 - t0}ms`);
@@ -364,7 +372,7 @@ export class Engine implements IEngine {
 
       // Execute bundle synchronously
       const t2 = Date.now();
-      this.executeBundleSync(code);
+      this.executeBundleSync(code, bytecodeAssetPath);
       const t3 = Date.now();
       this.options.logger.log(`[rill:${this.id}] [DIAG] executeBundle: ${t3 - t2}ms`);
 
@@ -380,7 +388,7 @@ export class Engine implements IEngine {
   /**
    * Async path for loadBundle — used for remote URLs and async providers (Worker).
    */
-  private async _loadBundleAsync(source: string): Promise<void> {
+  private async _loadBundleAsync(source: string, bytecodeAssetPath?: string): Promise<void> {
     try {
       const t0 = Date.now();
       const code = await this.resolveSource(source);
@@ -426,7 +434,7 @@ export class Engine implements IEngine {
           });
 
           try {
-            await Promise.race([this.executeBundle(code), timeoutPromise]);
+            await Promise.race([this.executeBundle(code, bytecodeAssetPath), timeoutPromise]);
           } finally {
             if (this._timeoutTimer) {
               globalThis.clearTimeout(this._timeoutTimer);
@@ -434,10 +442,10 @@ export class Engine implements IEngine {
             }
           }
         } else {
-          await this.executeBundle(code);
+          await this.executeBundle(code, bytecodeAssetPath);
         }
       } else {
-        this.executeBundleSync(code);
+        this.executeBundleSync(code, bytecodeAssetPath);
       }
       const t4 = Date.now();
       this.options.logger.log(`[rill:${this.id}] [DIAG] executeBundle: ${t4 - t3}ms`);
@@ -453,7 +461,7 @@ export class Engine implements IEngine {
    * Continuation for the rare case where a supposedly-sync provider returns a Promise
    * from initializeRuntime (defensive fallback).
    */
-  private _loadBundleSyncContinuation(code: string, t0: number): void {
+  private _loadBundleSyncContinuation(code: string, t0: number, bytecodeAssetPath?: string): void {
     try {
       const t1 = Date.now();
       this.options.logger.log(
@@ -462,7 +470,7 @@ export class Engine implements IEngine {
       this._devtools?.updateSandboxStatus({ state: 'running' });
 
       const t2 = Date.now();
-      this.executeBundleSync(code);
+      this.executeBundleSync(code, bytecodeAssetPath);
       const t3 = Date.now();
       this.options.logger.log(`[rill:${this.id}] [DIAG] executeBundle: ${t3 - t2}ms`);
 
@@ -1332,16 +1340,46 @@ export class Engine implements IEngine {
   /**
    * Execute bundle code in sandbox (async path for Worker providers)
    */
-  private async executeBundle(code: string): Promise<void> {
+  private async executeBundle(code: string, bytecodeAssetPath?: string): Promise<void> {
     const start = Date.now();
     if (!this.context) {
       throw new Error('[rill] Context not initialized');
     }
 
     try {
-      await this.evalCode(code);
+      const canEvalBytecodeFromAsset =
+        typeof bytecodeAssetPath === 'string' &&
+        bytecodeAssetPath.length > 0 &&
+        typeof this.context.evalBytecodeAsset === 'function';
+      let usedBytecodeAsset = false;
+
+      if (canEvalBytecodeFromAsset) {
+        try {
+          this.context.evalBytecodeAsset!(bytecodeAssetPath!);
+          usedBytecodeAsset = true;
+          const stats = this.receiver?.getStats();
+          if (stats && stats.rootChildrenCount === 0) {
+            this.options.logger.warn(
+              `[rill:${this.id}] evalBytecodeAsset produced no root nodes, fallback to source eval`
+            );
+            await this.evalCode(code);
+            usedBytecodeAsset = false;
+          }
+        } catch (error) {
+          this.options.logger.warn(
+            `[rill:${this.id}] evalBytecodeAsset failed, fallback to source eval:`,
+            error
+          );
+          await this.evalCode(code);
+        }
+      } else {
+        await this.evalCode(code);
+      }
       const dur = Date.now() - start;
-      this.options.onMetric?.('engine.executeBundle', dur, { size: code.length });
+      this.options.onMetric?.('engine.executeBundle', dur, {
+        size: code.length,
+        mode: usedBytecodeAsset ? 'bytecode-asset' : 'source',
+      });
     } catch (error) {
       this.options.logger.error('[rill] Bundle execution error:', error);
       const errLike = error as {
@@ -1373,7 +1411,7 @@ export class Engine implements IEngine {
    * fire until the HOST RunLoop processes them (which can be delayed by seconds
    * in XPC ViewBridge context where RCTTiming is frozen).
    */
-  private executeBundleSync(code: string): void {
+  private executeBundleSync(code: string, bytecodeAssetPath?: string): void {
     const start = Date.now();
     if (!this.context) {
       throw new Error('[rill] Context not initialized');
@@ -1395,10 +1433,43 @@ export class Engine implements IEngine {
 
     try {
       const es = Date.now();
-      this.context.eval(code);
-      this.options.logger.log(
-        `[rill:${this.id}] [DIAG] evalCode: sync eval done in ${Date.now() - es}ms, codeLen=${code.length}`
-      );
+      const canEvalBytecodeFromAsset =
+        typeof bytecodeAssetPath === 'string' &&
+        bytecodeAssetPath.length > 0 &&
+        typeof this.context.evalBytecodeAsset === 'function';
+      let usedBytecodeAsset = false;
+
+      if (canEvalBytecodeFromAsset) {
+        try {
+          this.context.evalBytecodeAsset!(bytecodeAssetPath!);
+          usedBytecodeAsset = true;
+          const stats = this.receiver?.getStats();
+          if (stats && stats.rootChildrenCount === 0) {
+            this.options.logger.warn(
+              `[rill:${this.id}] evalBytecodeAsset produced no root nodes, fallback to source eval`
+            );
+            this.context.eval(code);
+            usedBytecodeAsset = false;
+          }
+          this.options.logger.log(
+            `[rill:${this.id}] [DIAG] evalBytecodeAsset: sync eval done in ${Date.now() - es}ms, path=${bytecodeAssetPath}`
+          );
+        } catch (error) {
+          this.options.logger.warn(
+            `[rill:${this.id}] evalBytecodeAsset failed, fallback to source eval:`,
+            error
+          );
+          this.context.eval(code);
+          this.options.logger.log(
+            `[rill:${this.id}] [DIAG] evalCode(fallback): sync eval done in ${Date.now() - es}ms, codeLen=${code.length}`
+          );
+        }
+      } else {
+        this.context.eval(code);
+        this.options.logger.log(
+          `[rill:${this.id}] [DIAG] evalCode: sync eval done in ${Date.now() - es}ms, codeLen=${code.length}`
+        );
+      }
 
       // Drain pending setImmediate callbacks synchronously.
       // React's scheduler schedules reconciliation work via setImmediate during eval().
@@ -1427,7 +1498,10 @@ export class Engine implements IEngine {
 
       const dur = Date.now() - start;
       this.diagAccum(`[rill:${this.id}] executeBundleSync COMPLETE dur=${dur}ms`);
-      this.options.onMetric?.('engine.executeBundle', dur, { size: code.length });
+      this.options.onMetric?.('engine.executeBundle', dur, {
+        size: code.length,
+        mode: usedBytecodeAsset ? 'bytecode-asset' : 'source',
+      });
     } catch (error) {
       this.diagAccum(`[rill:${this.id}] executeBundleSync ERROR: ${error}`);
       this.options.logger.error('[rill] Bundle execution error:', error);

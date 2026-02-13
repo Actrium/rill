@@ -305,7 +305,7 @@ describe('Build Options Validation', () => {
 
 describe('Runtime Inject Content', () => {
   it('should include callback registration functions', () => {
-    // 读取源码验证运行时注入内容
+    // 
     const buildSource = fs.readFileSync(path.join(__dirname, 'build.ts'), 'utf-8');
 
     expect(buildSource).toContain('__rill.registerCallback');

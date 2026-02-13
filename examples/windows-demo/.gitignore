@@ -1,0 +1,29 @@
+# Node
+node_modules/
+
+# Build outputs
+windows/x64/
+windows/WindowsDemo/x64/
+windows/WindowsDemo/obj/
+windows/WindowsDemo/Generated Files/
+windows/WindowsDemo/packages.lock.json
+windows/WindowsDemo.Package/obj/
+windows/WindowsDemo.Package/bin/
+windows/WindowsDemo.Package/AppPackages/
+windows/WindowsDemo.Package/Bundle/
+windows/WindowsDemo.Package/packages.lock.json
+windows/RillSandboxNative/build/
+windows/RillSandboxNative/*.obj
+windows/RillSandboxNative/*.exe
+windows/RillSandboxNative/*.ilk
+windows/RillSandboxNative/*.pdb
+
+# MSBuild logs
+windows/msbuild_*.binlog
+windows/msbuild_*.err
+windows/msbuild_*.wrn
+
+# Debug/temp
+debug_*
+*.hbc
+step1.bundle

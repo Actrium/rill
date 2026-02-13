@@ -298,6 +298,18 @@ export interface EngineDiagnostics {
 }
 
 /**
+ * Optional load settings for engine.loadBundle().
+ */
+export interface LoadBundleOptions {
+  /**
+   * Optional Hermes bytecode asset path (.hbc).
+   * When supported by the active sandbox context, Engine will execute this
+   * bytecode instead of source text for the final guest bundle eval.
+   */
+  bytecodeAssetPath?: string;
+}
+
+/**
  * Common engine interface
  */
 export interface IEngine {
@@ -318,7 +330,11 @@ export interface IEngine {
    * and executed. For sync providers the work completes before the Promise
    * settles, so callers can simply `await engine.loadBundle(...)`.
    */
-  loadBundle(source: string, initialProps?: Record<string, unknown>): Promise<void>;
+  loadBundle(
+    source: string,
+    initialProps?: Record<string, unknown>,
+    options?: LoadBundleOptions
+  ): Promise<void>;
 
   /**
    * Subscribe to engine events

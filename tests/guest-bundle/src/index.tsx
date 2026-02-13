@@ -1,7 +1,7 @@
 /**
  * Example Guest
  *
- * 展示 Rill SDK 的基本用法
+ * Basic usage examples for the Rill SDK.
  */
 
 import { useState } from 'react';
@@ -20,9 +20,7 @@ interface Config {
   theme?: 'light' | 'dark';
 }
 
-/**
- * 计数器组件
- */
+/** Counter component */
 function Counter() {
   const [count, setCount] = useState(0);
   const sendToHost = useSendToHost();
@@ -71,9 +69,7 @@ function Counter() {
   );
 }
 
-/**
- * 列表项组件
- */
+/** List item component */
 function ListItem({ title, index }: { title: string; index: number }) {
   return (
     <TouchableOpacity
@@ -97,13 +93,13 @@ export default function Guest() {
   const config = useConfig<Config>();
   const [refreshCount, setRefreshCount] = useState(0);
 
-  // 监听宿主刷新事件
+  // Listen for host refresh events.
   useHostEvent('REFRESH', () => {
     console.log('Host requested refresh');
     setRefreshCount((c) => c + 1);
   });
 
-  // 监听主题变更
+  // Listen for host theme updates.
   useHostEvent<{ theme: 'light' | 'dark' }>('THEME_CHANGE', (payload) => {
     console.log('Theme changed to:', payload.theme);
   });

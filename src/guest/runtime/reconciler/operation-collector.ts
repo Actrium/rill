@@ -44,7 +44,7 @@ export class OperationCollector {
       timestamp: Date.now(),
     });
 
-    // 调试：少量输出，便于确认是否有 CREATE/APPEND/UPDATE 被收集（默认关闭）
+    // ：， CREATE/APPEND/UPDATE （）
     if (this.isDebugEnabled()) {
       const len = this.operations.length;
       if (len <= 10 || len % 50 === 0) {
@@ -90,7 +90,7 @@ export class OperationCollector {
       const debug = this.isDebugEnabled();
       if (debug) console.log('[rill:reconciler] flush ops=', opLen);
 
-      // 避免刷屏/卡顿：默认不输出详细 ops（仅 debug 模式）
+      // /： ops（ debug ）
       if (debug) {
         try {
           if (opLen <= 30) {

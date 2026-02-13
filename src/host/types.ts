@@ -1,21 +1,21 @@
 /**
  * Rill Core Type Definitions
  *
- * 通信相关类型从 bridge/types.ts 重新导出
- * 运行时内部类型在此定义
+ *  bridge/types.ts
+ *
  */
 
 // ============================================
-// 从 Bridge 重新导出通信类型
+//  Bridge
 // ============================================
 
 export type {
   AppendOperation,
   BaseOperation,
-  // Bridge 值类型
+  // Bridge
   BridgeValue,
   BridgeValueObject,
-  // 接口
+  //
   CallbackRegistry,
   CallFunctionMessage,
   ConfigUpdateMessage,
@@ -27,13 +27,13 @@ export type {
   InsertOperation,
   Operation,
   OperationBatch,
-  // 操作类型
+  //
   OperationType,
   RefCallOperation,
   RefMethodResultMessage,
   RemoveOperation,
   ReorderOperation,
-  // 函数类型
+  //
   SendToHost,
   SerializedCreateOperation,
   SerializedError,
@@ -44,7 +44,7 @@ export type {
   SerializedProps,
   SerializedRefCallOperation,
   SerializedUpdateOperation,
-  // 序列化类型
+  //
   SerializedValue,
   TextOperation,
   UpdateOperation,
@@ -184,6 +184,11 @@ export interface EngineViewPropsBase {
    * Bundle source (URL or code string)
    */
   source: string;
+
+  /**
+   * Optional Hermes bytecode asset path (.hbc) for the guest bundle.
+   */
+  bytecodeAssetPath?: string;
 
   /**
    * Initial props to pass to the Guest

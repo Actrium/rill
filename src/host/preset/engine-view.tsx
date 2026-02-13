@@ -24,6 +24,11 @@ export interface EngineViewProps {
   source: string;
 
   /**
+   * Optional Hermes bytecode asset path (.hbc) for the guest bundle.
+   */
+  bytecodeAssetPath?: string;
+
+  /**
    * Initial props to pass to the Guest
    */
   initialProps?: Record<string, unknown>;
@@ -79,6 +84,7 @@ export interface EngineViewProps {
 export function EngineView({
   engine,
   source,
+  bytecodeAssetPath,
   initialProps,
   onLoad,
   onError,
@@ -90,6 +96,7 @@ export function EngineView({
   const { loadingState, error, content } = useEngineView({
     engine,
     source,
+    bytecodeAssetPath,
     initialProps,
     onLoad,
     onError,

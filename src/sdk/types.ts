@@ -2,14 +2,14 @@
  * rill/guest Type Definitions
  *
  * Types for Guest-side SDK and Reconciler
- * 通信相关类型从 bridge/types.ts 重新导出
+ *  bridge/types.ts
  */
 
 import type React from 'react';
 import type { ReviewedUnknown } from '../shared';
 
 // ============================================
-// 从 Bridge 重新导出通信类型
+//  Bridge
 // ============================================
 
 export type {
@@ -22,20 +22,20 @@ export type {
   InsertOperation,
   Operation,
   OperationBatch,
-  // 操作类型
+  //
   OperationType,
   RemoveOperation,
   ReorderOperation,
-  // 函数类型
+  //
   SendToHost,
-  // 序列化操作类型 (Guest 端使用)
+  //  (Guest )
   SerializedCreateOperation,
   SerializedFunction,
   SerializedOperation,
   SerializedOperationBatch,
   SerializedProps,
   SerializedUpdateOperation,
-  // 序列化类型
+  //
   SerializedValue,
   SerializedValueObject,
   TextOperation,
@@ -45,7 +45,7 @@ export type {
 export { isSerializedFunction, operationHasProps } from '../shared';
 
 // ============================================
-// Guest Element Types (let 特有)
+// Guest Element Types (let )
 // ============================================
 
 /**
@@ -127,7 +127,7 @@ export function isGuestComponentRef(value: unknown): value is GuestComponentRef 
 }
 
 // ============================================
-// Virtual Node (let 内部使用)
+// Virtual Node (let )
 // ============================================
 
 /**
@@ -174,14 +174,14 @@ export type {
 } from '../shared/style-types';
 
 // ============================================
-// Remote Ref Types (跨沙箱组件引用)
+// Remote Ref Types ()
 // ============================================
 
 /**
- * Remote Ref - Guest 端对 Host 组件实例的引用
+ * Remote Ref - Guest  Host
  *
- * 由于沙箱隔离，Guest 无法直接访问 Host 原生组件实例。
- * RemoteRef 提供异步方法调用机制，通过消息传递调用 Host 端方法。
+ * ，Guest  Host
+ * RemoteRef ， Host
  *
  * @example
  * const [inputRef, remoteInput] = useRemoteRef<TextInputRef>();
@@ -189,20 +189,20 @@ export type {
  * await remoteInput?.invoke('focus');
  */
 export interface RemoteRef<T = unknown> {
-  /** 节点 ID */
+  /**  ID */
   readonly nodeId: number;
 
   /**
-   * 调用 Host 端组件方法
-   * @param method 方法名
-   * @param args 方法参数
-   * @returns Promise 包装的返回值
+   *  Host
+   * @param method
+   * @param args
+   * @returns Promise
    */
   invoke<R = unknown>(method: string, ...args: unknown[]): Promise<R>;
 
   /**
-   * 类型安全的方法调用代理
-   * 使用 Proxy 实现，调用任意方法名都会转为 invoke() 调用
+   *
+   *  Proxy ， invoke()
    */
   call: T extends Record<string, (...args: unknown[]) => unknown>
     ? { [K in keyof T]: (...args: Parameters<T[K]>) => Promise<Awaited<ReturnType<T[K]>>> }
@@ -210,7 +210,7 @@ export interface RemoteRef<T = unknown> {
 }
 
 /**
- * Measure 结果
+ * Measure
  */
 export interface MeasureResult {
   x: number;
@@ -222,7 +222,7 @@ export interface MeasureResult {
 }
 
 /**
- * 可测量布局的组件方法
+ *
  */
 export interface MeasurableRef {
   measure(): Promise<MeasureResult>;
@@ -235,7 +235,7 @@ export interface MeasurableRef {
 }
 
 /**
- * TextInput 组件方法
+ * TextInput
  */
 export interface TextInputRef extends MeasurableRef {
   focus(): Promise<void>;
@@ -246,7 +246,7 @@ export interface TextInputRef extends MeasurableRef {
 }
 
 /**
- * ScrollView 组件方法
+ * ScrollView
  */
 export interface ScrollViewRef extends MeasurableRef {
   scrollTo(options: { x?: number; y?: number; animated?: boolean }): Promise<void>;
@@ -255,7 +255,7 @@ export interface ScrollViewRef extends MeasurableRef {
 }
 
 /**
- * FlatList 组件方法
+ * FlatList
  */
 export interface FlatListRef extends ScrollViewRef {
   scrollToIndex(params: {
@@ -274,7 +274,7 @@ export interface FlatListRef extends ScrollViewRef {
 }
 
 /**
- * Remote Ref 回调类型
- * 用于 useRemoteRef 返回的 ref callback
+ * Remote Ref
+ *  useRemoteRef  ref callback
  */
 export type RemoteRefCallback = (instance: { nodeId: number } | null) => void;

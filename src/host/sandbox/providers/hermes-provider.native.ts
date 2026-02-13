@@ -31,6 +31,9 @@ export class HermesProvider extends NativeJSIProvider {
     // Hermes contexts support evalBytecode for precompiled .hbc files
     const hermesCtx = ctx as HermesContextNative;
     scope.evalBytecode = (bytecode: ArrayBuffer) => hermesCtx.evalBytecode(bytecode);
+    if (typeof hermesCtx.evalBytecodeAsset === 'function') {
+      scope.evalBytecodeAsset = (path: string) => hermesCtx.evalBytecodeAsset!(path);
+    }
     return scope;
   }
 }

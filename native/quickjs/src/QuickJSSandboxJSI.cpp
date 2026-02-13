@@ -1,7 +1,9 @@
 #include "QuickJSSandboxJSI.h"
 #include <cstring>
-#include <iostream>
 #include <sstream>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace quickjs_sandbox {
 
@@ -115,7 +117,12 @@ void QuickJSSandboxContext::installConsole() {
     for (int i = 0; i < argc; i++) {
       const char *str = JS_ToCString(ctx, argv[i]);
       if (str) {
-        std::cout << "[QuickJSSandbox] " << str << std::endl;
+        // Forward sandbox console.log to host's OutputDebugString
+#ifdef _WIN32
+        OutputDebugStringA("[QuickJSSandbox] ");
+        OutputDebugStringA(str);
+        OutputDebugStringA("\n");
+#endif
         JS_FreeCString(ctx, str);
       }
     }
@@ -155,11 +162,19 @@ jsi::Value QuickJSSandboxContext::get(jsi::Runtime &rt,
         rt, name, 1,
         [this](jsi::Runtime &rt, const jsi::Value &, const jsi::Value *args,
                size_t count) -> jsi::Value {
-          if (count < 1 || !args[0].isString()) {
-            throw jsi::JSError(rt, "eval requires a string argument");
+          try {
+            if (count < 1 || !args[0].isString()) {
+              throw jsi::JSError(rt, "eval requires a string argument");
+            }
+            std::string code = args[0].asString(rt).utf8(rt);
+            return this->eval(rt, code);
+          } catch (const jsi::JSError &) {
+            throw;
+          } catch (const std::exception &e) {
+            throw jsi::JSError(rt, std::string("eval lambda: ") + e.what());
+          } catch (...) {
+            throw jsi::JSError(rt, "eval lambda: unknown exception");
           }
-          std::string code = args[0].asString(rt).utf8(rt);
-          return this->eval(rt, code);
         });
   }
 
@@ -226,29 +241,37 @@ QuickJSSandboxContext::getPropertyNames(jsi::Runtime &rt) {
 
 jsi::Value QuickJSSandboxContext::eval(jsi::Runtime &rt,
                                        const std::string &code) {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  try {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
 
-  if (disposed_) {
-    throw jsi::JSError(rt, "Context has been disposed");
-  }
+    if (disposed_) {
+      throw jsi::JSError(rt, "Context has been disposed");
+    }
 
-  JSValue result = JS_Eval(qjsContext_, code.c_str(), code.size(), "<eval>",
-                           JS_EVAL_TYPE_GLOBAL);
+    JSValue result = JS_Eval(qjsContext_, code.c_str(), code.size(), "<eval>",
+                             JS_EVAL_TYPE_GLOBAL);
 
-  if (JS_IsException(result)) {
-    JSValue exception = JS_GetException(qjsContext_);
-    const char *str = JS_ToCString(qjsContext_, exception);
-    std::string errorMsg = str ? str : "Unknown error";
-    if (str)
-      JS_FreeCString(qjsContext_, str);
-    JS_FreeValue(qjsContext_, exception);
+    if (JS_IsException(result)) {
+      JSValue exception = JS_GetException(qjsContext_);
+      const char *str = JS_ToCString(qjsContext_, exception);
+      std::string errorMsg = str ? str : "Unknown error";
+      if (str)
+        JS_FreeCString(qjsContext_, str);
+      JS_FreeValue(qjsContext_, exception);
+      JS_FreeValue(qjsContext_, result);
+      throw jsi::JSError(rt, errorMsg);
+    }
+
+    jsi::Value jsiResult = qjsToJSI(rt, result);
     JS_FreeValue(qjsContext_, result);
-    throw jsi::JSError(rt, errorMsg);
+    return jsiResult;
+  } catch (const jsi::JSError &) {
+    throw; // Re-throw JSI errors as-is
+  } catch (const std::exception &e) {
+    throw jsi::JSError(rt, std::string("eval error: ") + e.what());
+  } catch (...) {
+    throw jsi::JSError(rt, "eval error: unknown non-std exception");
   }
-
-  jsi::Value jsiResult = qjsToJSI(rt, result);
-  JS_FreeValue(qjsContext_, result);
-  return jsiResult;
 }
 
 // Static callback for host functions
@@ -633,7 +656,14 @@ QuickJSSandboxRuntime::QuickJSSandboxRuntime(jsi::Runtime &hostRuntime,
   // Match the reference QuickJSRuntime defaults used elsewhere in the repo.
   // These settings shouldn't be required, but they help avoid runtime-specific
   // edge cases and keep behavior consistent.
+#ifdef _WIN32
+  // WindowsDemo.vcxproj reserves 8MB thread stack. Give QuickJS 4MB so
+  // CONFIG_STACK_CHECK fires before hitting the OS guard page, while
+  // leaving ~4MB headroom for host frames above QuickJS.
+  JS_SetMaxStackSize(qjsRuntime_, 4 * 1024 * 1024); // 4MB
+#else
   JS_SetMaxStackSize(qjsRuntime_, 1024 * 1024 * 1024); // 1GB
+#endif
   JS_SetCanBlock(qjsRuntime_, true);
   JS_SetRuntimeInfo(qjsRuntime_, "RillQuickJSSandbox");
 
@@ -791,7 +821,9 @@ void QuickJSSandboxModule::install(jsi::Runtime &runtime) {
   jsi::Object moduleObj = jsi::Object::createFromHostObject(runtime, module);
   runtime.global().setProperty(runtime, "__QuickJSSandboxJSI",
                                std::move(moduleObj));
-  std::cout << "[QuickJSSandbox] Installed __QuickJSSandboxJSI" << std::endl;
+#ifdef _WIN32
+  OutputDebugStringA("[QuickJSSandbox] Installed __QuickJSSandboxJSI\n");
+#endif
 }
 
 // Wrapper function for external linkage (avoids JSValue symbol conflicts)

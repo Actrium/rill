@@ -1,10 +1,10 @@
 /**
  * Callback Registry - Guest Side
  *
- * 管理 Guest 侧的函数引用
- * - 为函数生成唯一 ID (fnId)
- * - 使用引用计数防止内存泄漏
- * - 与 Host 注入的 __rill.callbacks Map 共享（在 Guest 环境中）
+ *  Guest
+ * -  ID (fnId)
+ * -
+ * -  Host  __rill.callbacks Map （ Guest ）
  */
 
 import type { SandboxGlobals } from '../host/sandbox/globals';

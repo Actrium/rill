@@ -1,10 +1,10 @@
 /**
  * @rill/shared/bridge - Communication Layer
  *
- * Bridge 是 Host/Guest 之间的通信层
- * - 只暴露两个方法：sendToHost() / sendToGuest()
- * - 内部自动处理所有编码/解码
- * - 最大化 JSI 能力：原生支持的类型直接传递，零开销
+ * Bridge  Host/Guest
+ * - ：sendToHost() / sendToGuest()
+ * - /
+ * -  JSI ：，
  */
 
 import type {
@@ -39,7 +39,7 @@ import { BinaryProtocol, type BinaryProtocolConfig } from './binary-protocol';
 import { PromiseManager, type PromiseSettleResult } from './promise-manager';
 
 /**
- * Bridge 配置选项
+ * Bridge
  */
 export interface BridgeOptions {
   /**
@@ -58,25 +58,25 @@ export interface BridgeOptions {
   callbackRegistry: CallbackRegistry;
 
   /**
-   * Guest 回调调用器 - 用于调用 Sandbox 中注册的回调
-   * 如果提供，Bridge 会自动路由这些调用到 Guest
+   * Guest  -  Sandbox
+   * ，Bridge  Guest
    */
   guestInvoker?: (fnId: string, args: ReviewedUnknown[]) => ReviewedUnknown;
 
   /**
-   * Guest 回调释放器 - 用于释放 Sandbox 中注册的回调
-   * 如果提供，Bridge 会路由 release 调用到 Guest
+   * Guest  -  Sandbox
+   * ，Bridge  release  Guest
    */
   guestReleaseCallback?: (fnId: string) => void;
 
   /**
-   * 类型规则（可选，默认使用 DEFAULT_TYPE_RULES）
+   * （， DEFAULT_TYPE_RULES）
    */
   typeRules?: TypeRule[];
 
   /**
-   * Promise 超时时间（毫秒），默认 30000ms (30秒)
-   * 设置为 0 禁用超时
+   * Promise （）， 30000ms (30)
+   *  0
    */
   promiseTimeout?: number;
 
@@ -87,7 +87,7 @@ export interface BridgeOptions {
   binaryProtocol?: BinaryProtocolConfig;
 
   /**
-   * 调试模式
+   *
    */
   debug?: boolean;
 
@@ -110,9 +110,9 @@ export interface EncodeBatchResult {
 }
 
 /**
- * Bridge - 统一通信层
+ * Bridge -
  *
- * 只暴露两个方法，内部自动处理所有编码/解码
+ * ，/
  */
 export class Bridge {
   private onGuestOperations: (batch: OperationBatch) => void;
@@ -132,7 +132,7 @@ export class Bridge {
   // Promise handling - delegated to PromiseManager
   private promiseManager: PromiseManager;
 
-  // Type rule context (提供给规则的能力)
+  // Type rule context ()
   private readonly context: CodecCallbacks;
 
   // Encoder/Decoder functions (created using shared utilities)
@@ -160,15 +160,15 @@ export class Bridge {
       debug: this.debug,
     });
 
-    // 初始化 type rule context (需要先声明，因为 encoder/decoder 会引用它)
+    //  type rule context (， encoder/decoder )
     // Reason: Context must reference encoder/decoder which reference context (circular)
     this.context = {} as CodecCallbacks;
 
-    // 使用共享工具创建 encoder 和 decoder
+    //  encoder  decoder
     this.encoder = createEncoder(this.typeRules, this.context);
     this.decoder = createDecoder(this.typeRules, this.context);
 
-    // 完善 context（现在 encoder/decoder 已创建）
+    //  context（ encoder/decoder ）
     this.context.encode = this.encoder;
     this.context.decode = this.decoder;
     this.context.logger = options.logger; // Pass logger to context for TypeRules error reporting
@@ -180,19 +180,19 @@ export class Bridge {
       }
       return fnId;
     };
-    // invokeFunction: 智能路由到 Guest 或 Host registry
+    // invokeFunction:  Guest  Host registry
     this.context.invokeFunction = (fnId, args) => {
-      // 先检查 Host registry（Host 端注册的回调）
+      //  Host registry（Host ）
       if (this.registry.has(fnId)) {
         return this.registry.invoke(fnId, args);
       }
-      // Host registry 中没有 → 路由到 Guest sandbox
-      // 包括 fn_N (sandbox __rill.registerCallback) 和 fn_xxx_N (Guest globalCallbackRegistry)
+      // Host registry  →  Guest sandbox
+      //  fn_N (sandbox __rill.registerCallback)  fn_xxx_N (Guest globalCallbackRegistry)
       // NOTE: args encoding is handled by TypeRules (serialized-function decode)
       if (this.guestInvoker) {
         return this.guestInvoker(fnId, args);
       }
-      // 无法路由
+      //
       if (this.debug) {
         console.warn(
           `[Bridge] invokeFunction: fnId ${fnId} not found in Host registry and no guestInvoker`
@@ -311,23 +311,23 @@ export class Bridge {
 
   /**
    * Host → Guest
-   * 发送宿主消息，内部自动编码
+   * ，
    */
   async sendToGuest(message: HostMessage): Promise<void> {
     if (this.debug) {
       console.log('[Bridge] sendToGuest input:', message);
     }
 
-    // 1. 编码
+    // 1.
     const encoded = this.encodeHostMessage(message);
 
     if (this.debug) {
       console.log('[Bridge] sendToGuest encoded:', encoded);
     }
 
-    // 2. 跨 JSI 边界
+    // 2.  JSI
 
-    // 3. 解码并传递给接收器
+    // 3.
     const decoded = this.decodeHostMessage(encoded);
 
     if (this.debug) {
@@ -338,7 +338,7 @@ export class Bridge {
   }
 
   // ============================================
-  // 内部实现 - 编码（BridgeValue → SerializedValue）
+  //  - （BridgeValue → SerializedValue）
   // ============================================
 
   /**
@@ -378,7 +378,7 @@ export class Bridge {
   }
 
   /**
-   * 编码 Host 消息
+   *  Host
    */
   private encodeHostMessage(message: HostMessage): SerializedHostMessage {
     switch (message.type) {
@@ -425,25 +425,25 @@ export class Bridge {
   }
 
   /**
-   * 编码任意 BridgeValue - 使用类型规则自动分发
+   *  BridgeValue -
    */
   private encode(value: BridgeValue): SerializedValue {
     return this.encoder(value) as SerializedValue;
   }
 
   /**
-   * 编码对象（使用共享工具）
+   * （）
    */
   private encodeObject(obj: BridgeValueObject): SerializedValueObject {
     return sharedEncodeObject(obj, this.encoder) as SerializedValueObject;
   }
 
   // ============================================
-  // 内部实现 - 解码（SerializedValue → BridgeValue）
+  //  - （SerializedValue → BridgeValue）
   // ============================================
 
   /**
-   * 解码操作批次
+   *
    */
   private decodeBatch(batch: SerializedOperationBatch): OperationBatch {
     return {
@@ -469,7 +469,7 @@ export class Bridge {
   }
 
   /**
-   * 解码 Host 消息
+   *  Host
    */
   private decodeHostMessage(message: SerializedHostMessage): HostMessage {
     switch (message.type) {
@@ -493,7 +493,7 @@ export class Bridge {
       case HostMsg.DESTROY:
         return { type: HostMsg.DESTROY };
       case HostMsg.PROMISE_RESOLVE:
-        // 处理 Promise 结算
+        //  Promise
         this.settlePromise(message.promiseId, {
           status: 'fulfilled',
           value: this.decode(message.value),
@@ -504,7 +504,7 @@ export class Bridge {
           value: this.decode(message.value),
         };
       case HostMsg.PROMISE_REJECT: {
-        // 处理 Promise 拒绝
+        //  Promise
         const error = new Error(message.error.__message);
         error.name = message.error.__name;
         if (message.error.__stack) {
@@ -529,14 +529,14 @@ export class Bridge {
   }
 
   /**
-   * 解码任意 SerializedValue - 使用类型规则自动分发
+   *  SerializedValue -
    */
   private decode(value: SerializedValue): BridgeValue {
     return this.decoder(value) as BridgeValue;
   }
 
   /**
-   * 解码对象（使用共享工具）
+   * （）
    */
   private decodeObject(obj: SerializedValueObject): BridgeValueObject {
     return sharedDecodeObject(obj, this.decoder) as BridgeValueObject;
@@ -547,7 +547,7 @@ export class Bridge {
   // ============================================
 
   /**
-   * 发送 Promise 结算结果到对端
+   *  Promise
    */
   private sendPromiseResult(promiseId: string, result: PromiseSettleResult): void {
     // Fire-and-forget, but MUST handle rejection to avoid unhandled Promise rejection.
@@ -560,7 +560,7 @@ export class Bridge {
     };
 
     if (result.status === 'fulfilled') {
-      // 发送 resolve 消息
+      //  resolve
       safeSend(
         this.sendToGuest({
           type: HostMsg.PROMISE_RESOLVE,
@@ -569,7 +569,7 @@ export class Bridge {
         })
       );
     } else {
-      // 发送 reject 消息
+      //  reject
       const error =
         result.reason instanceof Error ? result.reason : new Error(String(result.reason));
       const serializedError: SerializedError = {
@@ -589,7 +589,7 @@ export class Bridge {
   }
 
   /**
-   * 结算待处理的 Promise - delegated to PromiseManager
+   *  Promise - delegated to PromiseManager
    */
   private settlePromise(promiseId: string, result: PromiseSettleResult): void {
     this.promiseManager.settle(promiseId, result);

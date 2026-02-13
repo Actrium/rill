@@ -76,6 +76,15 @@ export interface SandboxScope {
   evalBytecode?: (bytecode: ArrayBuffer) => unknown;
 
   /**
+   * Synchronously evaluates precompiled Hermes bytecode from an asset path.
+   * Optional native fast path used by platforms that can load bytecode files
+   * directly in native code.
+   *
+   * @param path Relative or absolute asset path to a .hbc file.
+   */
+  evalBytecodeAsset?: (path: string) => unknown;
+
+  /**
    * Sets a global variable in the sandbox's global scope synchronously.
    *
    * CRITICAL: This MUST be synchronous. Bridge architecture requires immediate execution.

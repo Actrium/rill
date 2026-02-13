@@ -10,10 +10,10 @@
 
 throw new Error(
   [
-    "[rill] 不再支持 `import ... from 'rill'`。",
-    '请改用：',
+    "[rill] `import ... from 'rill'` is not supported.",
+    'Use one of these explicit entrypoints:',
     "  - Host:  `import { Engine } from 'rill/host'`",
     "  - Guest: `import { View, Text } from 'rill/guest'`",
-    "  - UI 预设: `import { EngineView } from 'rill/host/preset'`",
+    "  - UI preset: `import { EngineView } from 'rill/host/preset'`",
   ].join('\n')
 );

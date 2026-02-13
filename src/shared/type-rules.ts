@@ -1,8 +1,8 @@
 /**
  * @rill/bridge - Type Rules
  *
- * 类型规则系统：定义跨边界数据的编码/解码策略
- * Host ↔ Guest 共享
+ * ：/
+ * Host ↔ Guest
  */
 
 import { createDecoder, createEncoder } from './serialization';
@@ -16,74 +16,74 @@ export { createDecoder, createEncoder };
 type SerializedObject = { __type: string; [key: string]: unknown };
 
 /**
- * 数据传输策略
+ *
  */
 export type TransportStrategy =
-  | 'passthrough' // 直接传递（JSI 安全类型）
-  | 'serialize' // 序列化传递（复杂类型）
-  | 'proxy'; // 代理传递（函数）
+  | 'passthrough' // （JSI ）
+  | 'serialize' // （）
+  | 'proxy'; // （）
 
 /**
- * 类型处理规则
+ *
  */
 export interface TypeRule {
   /**
-   * 规则名称（用于调试）
+   * （）
    */
   name: string;
 
   /**
-   * 类型检测
+   *
    */
   // Reason: Type rule must accept any value to check its type
   match: (value: unknown) => boolean;
 
   /**
-   * 编码策略（发送前）
-   * @param value - 原始值
-   * @param context - Bridge 上下文（提供 registry 等）
+   * （）
+   * @param value -
+   * @param context - Bridge （ registry ）
    */
   // Reason: Type rule encode/decode must handle arbitrary values
   encode?: (value: unknown, context: CodecCallbacks) => unknown;
 
   /**
-   * 解码策略（接收后）
-   * @param value - 编码后的值
-   * @param context - Bridge 上下文
+   * （）
+   * @param value -
+   * @param context - Bridge
    */
   // Reason: Type rule decode must handle arbitrary value types
   decode?: (value: unknown, context: CodecCallbacks) => unknown;
 
   /**
-   * 传输策略
+   *
    */
   strategy: TransportStrategy;
 }
 
 /**
- * 类型规则上下文（Bridge 提供给规则的能力）
+ * （Bridge ）
  */
 export interface CodecCallbacks {
   /**
-   * 递归编码（用于嵌套结构）
+   * （）
    */
   // Reason: Recursive encode/decode must handle arbitrary value types
   encode: (value: unknown) => unknown;
 
   /**
-   * 递归解码（用于嵌套结构）
+   * （）
    */
   // Reason: Recursive decode must handle arbitrary value types
   decode: (value: unknown) => unknown;
 
   /**
-   * 注册函数（返回 fnId）
+   * （ fnId）
    */
   // biome-ignore lint/complexity/noBannedTypes: Generic function registration requires Function type
   registerFunction: (fn: Function) => string;
 
   /**
-   * 调用函数（通过 fnId）
+   * （ fnId）
    */
   // Reason: Callback functions have arbitrary signatures with unknown args/return
   invokeFunction: (fnId: string, args: unknown[]) => unknown;
@@ -98,42 +98,42 @@ export interface CodecCallbacks {
   };
 
   /**
-   * 注册 Promise（用于跨边界 Promise 传递）
-   * Bridge 会自动监听 Promise 结算并发送消息到对端
-   * @param promise - 要注册的 Promise
+   *  Promise（ Promise ）
+   * Bridge  Promise
+   * @param promise -  Promise
    * @returns promiseId
    */
   // Reason: Promise values are runtime-defined across boundaries
   registerPromise?: (promise: Promise<ReviewedUnknown>) => string;
 
   /**
-   * 创建待解析的 Promise（用于解码时创建）
+   *  Promise（）
    * @param promiseId - Promise ID
-   * @returns 一个 Promise，当收到对端结算消息时 resolve/reject
+   * @returns  Promise， resolve/reject
    */
   // Reason: Promise values are runtime-defined across boundaries
   createPendingPromise?: (promiseId: string) => Promise<ReviewedUnknown>;
 }
 
 /**
- * 预定义的类型规则
+ *
  */
 export const DEFAULT_TYPE_RULES: TypeRule[] = [
-  // 1. Null/Undefined - 直接传递
+  // 1. Null/Undefined -
   {
     name: 'null-undefined',
     match: (v) => v === null || v === undefined,
     strategy: 'passthrough',
   },
 
-  // 2. Primitives - 直接传递
+  // 2. Primitives -
   {
     name: 'primitives',
     match: (v) => typeof v === 'boolean' || typeof v === 'number' || typeof v === 'string',
     strategy: 'passthrough',
   },
 
-  // 2.5. Circular Reference - 解码为 undefined（数据已丢失）
+  // 2.5. Circular Reference -  undefined（）
   {
     name: 'circular',
     match: (v) =>
@@ -141,11 +141,11 @@ export const DEFAULT_TYPE_RULES: TypeRule[] = [
       v !== null &&
       '__type' in v &&
       (v as { __type: string }).__type === 'circular',
-    decode: () => undefined, // 循环引用无法恢复，返回 undefined
+    decode: () => undefined, // ， undefined
     strategy: 'serialize',
   },
 
-  // 3. Serialized Function - 解码为 proxy
+  // 3. Serialized Function -  proxy
   {
     name: 'serialized-function',
     match: (v) =>
@@ -219,7 +219,7 @@ export const DEFAULT_TYPE_RULES: TypeRule[] = [
     strategy: 'proxy',
   },
 
-  // 4. Functions - 编码为 fnId
+  // 4. Functions -  fnId
   {
     name: 'function',
     match: (v) => typeof v === 'function',
@@ -257,7 +257,7 @@ export const DEFAULT_TYPE_RULES: TypeRule[] = [
     strategy: 'proxy',
   },
 
-  // 4.5. Serialized Promise - 解码为 pending Promise
+  // 4.5. Serialized Promise -  pending Promise
   {
     name: 'serialized-promise',
     match: (v) =>
@@ -268,35 +268,35 @@ export const DEFAULT_TYPE_RULES: TypeRule[] = [
       '__promiseId' in v,
     decode: (v, ctx) => {
       const { __promiseId } = v as SerializedPromise;
-      // 如果 Bridge 提供了 createPendingPromise，使用它
+      //  Bridge  createPendingPromise，
       if (ctx.createPendingPromise) {
         return ctx.createPendingPromise(__promiseId);
       }
-      // 否则返回一个永不 resolve 的 Promise（降级处理）
+      //  resolve  Promise（）
       console.warn('[TypeRules] Promise decoding not supported, createPendingPromise not provided');
       return new Promise(() => {});
     },
     strategy: 'proxy',
   },
 
-  // 4.6. Promise - 编码为 promiseId
+  // 4.6. Promise -  promiseId
   {
     name: 'promise',
     match: (v) => v instanceof Promise,
     encode: (promise, ctx) => {
-      // 如果 Bridge 提供了 registerPromise，使用它
+      //  Bridge  registerPromise，
       if (ctx.registerPromise) {
         const promiseId = ctx.registerPromise(promise as Promise<ReviewedUnknown>);
         return { __type: 'promise', __promiseId: promiseId } as SerializedPromise;
       }
-      // 否则标记为 unsupported（降级处理）
+      //  unsupported（）
       console.warn('[TypeRules] Promise encoding not supported, registerPromise not provided');
       return { __type: 'unsupported', __originalType: 'Promise' } as unknown;
     },
     strategy: 'proxy',
   },
 
-  // 5. Date - 序列化传递
+  // 5. Date -
   {
     name: 'date',
     match: (v) =>
@@ -328,7 +328,7 @@ export const DEFAULT_TYPE_RULES: TypeRule[] = [
     strategy: 'serialize',
   },
 
-  // 6. RegExp - 序列化传递
+  // 6. RegExp -
   {
     name: 'regexp',
     match: (v) =>
@@ -365,7 +365,7 @@ export const DEFAULT_TYPE_RULES: TypeRule[] = [
     strategy: 'serialize',
   },
 
-  // 7. Error - 序列化传递
+  // 7. Error -
   {
     name: 'error',
     match: (v) =>
@@ -409,7 +409,7 @@ export const DEFAULT_TYPE_RULES: TypeRule[] = [
     strategy: 'serialize',
   },
 
-  // 8. Map - 编码/解码
+  // 8. Map - /
   {
     name: 'map',
     match: (v) =>
@@ -441,7 +441,7 @@ export const DEFAULT_TYPE_RULES: TypeRule[] = [
     strategy: 'serialize',
   },
 
-  // 9. Set - 编码/解码
+  // 9. Set - /
   {
     name: 'set',
     match: (v) =>
@@ -473,7 +473,7 @@ export const DEFAULT_TYPE_RULES: TypeRule[] = [
     strategy: 'serialize',
   },
 
-  // 10. TypedArray - 序列化传递 (must be before ArrayBuffer)
+  // 10. TypedArray -  (must be before ArrayBuffer)
   {
     name: 'typedarray',
     match: (v) =>
@@ -580,7 +580,7 @@ export const DEFAULT_TYPE_RULES: TypeRule[] = [
     strategy: 'serialize',
   },
 
-  // 11. ArrayBuffer - 序列化传递
+  // 11. ArrayBuffer -
   {
     name: 'arraybuffer',
     match: (v) =>
@@ -611,7 +611,7 @@ export const DEFAULT_TYPE_RULES: TypeRule[] = [
     strategy: 'serialize',
   },
 
-  // 12. Arrays - 递归处理 (reference-preserving decode)
+  // 12. Arrays -  (reference-preserving decode)
   {
     name: 'array',
     match: (v) => Array.isArray(v),
@@ -629,9 +629,9 @@ export const DEFAULT_TYPE_RULES: TypeRule[] = [
     strategy: 'serialize',
   },
 
-  // 13. toJSON - 支持自定义序列化
-  // 允许类实例通过 toJSON() 方法控制序列化行为
-  // 例如: class User { toJSON() { return { __class: 'User', name: this.name }; } }
+  // 13. toJSON -
+  //  toJSON()
+  // : class User { toJSON() { return { __class: 'User', name: this.name }; } }
   {
     name: 'toJSON',
     match: (v) =>
@@ -639,27 +639,27 @@ export const DEFAULT_TYPE_RULES: TypeRule[] = [
       v !== null &&
       !Array.isArray(v) &&
       typeof (v as { toJSON?: ReviewedUnknown }).toJSON === 'function' &&
-      // 排除内置类型（Date, RegExp 等已有专门规则）
+      // （Date, RegExp ）
       !(v instanceof Date) &&
       !(v instanceof RegExp) &&
       !(v instanceof Error) &&
       !(v instanceof Map) &&
       !(v instanceof Set),
     encode: (obj, ctx) => {
-      // 调用对象的 toJSON 方法，然后递归编码结果
+      //  toJSON ，
       const serialized = (obj as { toJSON: () => unknown }).toJSON();
       return ctx.encode(serialized);
     },
-    // decode 不需要特殊处理，toJSON 的结果会被正常解码
+    // decode ，toJSON
     strategy: 'serialize',
   },
 
-  // 14. Objects - 递归处理 (reference-preserving decode)
+  // 14. Objects -  (reference-preserving decode)
   {
     name: 'object',
     match: (v) => typeof v === 'object' && v !== null,
     encode: (obj, ctx) => {
-      // 检测特殊序列化类型（已处理的，直接返回）
+      // （，）
       if (typeof obj === 'object' && obj !== null && '__type' in obj) {
         const typed = obj as { __type: string };
         const specialTypes = [
@@ -676,7 +676,7 @@ export const DEFAULT_TYPE_RULES: TypeRule[] = [
         }
       }
 
-      // 普通对象递归处理
+      //
       const result: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
         result[key] = ctx.encode(value);
@@ -684,9 +684,9 @@ export const DEFAULT_TYPE_RULES: TypeRule[] = [
       return result;
     },
     decode: (obj, ctx) => {
-      // 检测特殊序列化类型（不处理，让其他规则处理）
+      // （，）
       if (typeof obj === 'object' && obj !== null && '__type' in obj) {
-        // 不处理，返回原值让其他规则匹配
+        // ，
         return obj;
       }
 

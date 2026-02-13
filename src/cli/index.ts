@@ -1,9 +1,9 @@
 /**
  * rill/cli
  *
- * 可 import 的编程 API（无副作用）。
+ * Importable programmatic API (side-effect free).
  *
- * CLI 可执行入口在：`src/cli/bin.ts`
+ * CLI executable entrypoint: `src/cli/bin.ts`
  */
 
 export type { AnalyzeOptions, BuildOptions } from './build';

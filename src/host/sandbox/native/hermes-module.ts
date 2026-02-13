@@ -24,6 +24,11 @@ interface HermesContextNative {
    * @param bytecode Precompiled Hermes bytecode (.hbc format)
    */
   evalBytecode(bytecode: ArrayBuffer): ReviewedUnknown;
+  /**
+   * Evaluate precompiled Hermes bytecode from an asset path.
+   * Native side resolves and reads the .hbc file.
+   */
+  evalBytecodeAsset?(path: string): ReviewedUnknown;
   inject(name: string, value: ReviewedUnknown): void;
   extract(name: string): ReviewedUnknown;
   dispose(): void;

@@ -44,7 +44,7 @@ export class Receiver {
   private nodeChildrenSet = new Map<number, Set<number>>();
   // Reverse index: childId -> parentId (0 means root). Keeps DELETE/REMOVE O(1).
   private parentByChildId = new Map<number, number>();
-  // Remote Ref 支持：节点 ID → React ref 映射
+  // Remote Ref ： ID → React ref
   private refMap = new Map<number, React.RefObject<ReviewedUnknown>>();
   private registry: ComponentRegistry;
   private callbackRegistry?: ReceiverCallbackRegistry;
@@ -74,7 +74,7 @@ export class Receiver {
     [];
   private static readonly DEBUG_APPEND_TRACK_LIMIT = 1000;
 
-  // 操作处理器映射表 - 类型驱动自动分发
+  //  -
   private readonly operationHandlers: Record<
     OperationType,
     (op: Extract<Operation, { op: OperationType }>) => void
@@ -103,8 +103,8 @@ export class Receiver {
       debug: options?.debug ?? false,
     };
 
-    // 初始化操作处理器映射表
-    // 使用 satisfies 确保包含所有 OperationType
+    //
+    //  satisfies  OperationType
     this.operationHandlers = {
       CREATE: (op) => this.handleCreate(op as Extract<Operation, { op: 'CREATE' }>),
       UPDATE: (op) => this.handleUpdate(op as Extract<Operation, { op: 'UPDATE' }>),
@@ -305,8 +305,8 @@ export class Receiver {
       this.log(`Applying CREATE: id=${op.id}, type=${op.type}`);
     }
 
-    // 使用操作处理器映射表自动分发
-    // satisfies 确保初始化时包含所有 OperationType，这里可以安全调用
+    //
+    // satisfies  OperationType，
     const handler = this.operationHandlers[op.op];
     handler(op);
   }
@@ -555,7 +555,7 @@ export class Receiver {
       }
     }
 
-    // 清理 Remote Ref
+    //  Remote Ref
     this.refMap.delete(id);
     // Clean up O(1) children lookup Set
     this.nodeChildrenSet.delete(id);
@@ -616,15 +616,15 @@ export class Receiver {
 
   /**
    * Handle remote ref method call
-   * Guest 调用 Host 组件实例方法（如 focus, blur, scrollTo）
+   * Guest  Host （ focus, blur, scrollTo）
    */
   private handleRefCall(op: RefCallOperation): void {
     const { refId, method, args, callId } = op;
 
-    // 异步执行方法调用，避免阻塞操作处理
+    // ，
     (async () => {
       try {
-        // 获取组件 ref
+        //  ref
         const ref = this.refMap.get(refId);
         if (!ref?.current) {
           throw new Error(`Node ${refId} not mounted or has no ref`);
@@ -632,19 +632,19 @@ export class Receiver {
 
         const instance = ref.current as Record<string, unknown>;
 
-        // 检查方法是否存在
+        //
         if (typeof instance[method] !== 'function') {
           throw new Error(`Method "${method}" not found on node ${refId}`);
         }
 
-        // 调用方法（可能返回 Promise）
+        // （ Promise）
         const fn = instance[method];
         // Reason: Remote Ref target method signature is runtime-defined by host component instances
         const result = await (fn as (...a: BridgeValue[]) => BridgeValue | Promise<BridgeValue>)(
           ...args
         );
 
-        // 发送成功结果
+        //
         // Cast result to BridgeValue - method return types are serializable values
         await this.sendToSandbox({
           type: HostMsg.REF_METHOD_RESULT,
@@ -653,7 +653,7 @@ export class Receiver {
           result: result as BridgeValue,
         });
       } catch (error) {
-        // 发送错误结果
+        //
         const err = error instanceof Error ? error : new Error(String(error));
         const serializedError: SerializedError = {
           __type: 'error',
@@ -744,7 +744,7 @@ export class Receiver {
 
     // Handle text node
     if (node.type === '__TEXT__') {
-      // React Native 需要实际的 Text 组件实例，而不是字符串标签
+      // React Native  Text ，
       // Reason: React module structure unknown, Text component may or may not exist
       const TextComponent =
         this.registry.get('Text') ?? (React as unknown as { Text?: unknown }).Text;
@@ -771,7 +771,7 @@ export class Receiver {
       .map((childId) => this.renderNode(childId))
       .filter((child): child is React.ReactElement | string => child !== null);
 
-    // 创建或获取 ref（用于 Remote Ref 支持）
+    //  ref（ Remote Ref ）
     let nodeRef = this.refMap.get(id);
     if (!nodeRef) {
       nodeRef = React.createRef<ReviewedUnknown>();
@@ -785,7 +785,7 @@ export class Receiver {
     const props: Record<string, unknown> = {
       ...filteredProps,
       key: `rill-${id}`,
-      ref: nodeRef, // 注入 ref 用于 Remote Ref 方法调用
+      ref: nodeRef, //  ref  Remote Ref
     };
 
     return React.createElement(Component, props, ...children);

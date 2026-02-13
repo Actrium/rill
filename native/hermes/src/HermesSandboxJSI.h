@@ -1,5 +1,13 @@
 #pragma once
 
+// HermesSandboxJSI — Hermes sandbox adapter using C++ JSI (hermes/hermes.h).
+//
+// Requires the Hermes C++ JSI interface (facebook::hermes::makeHermesRuntime).
+// Used on iOS, Android, and macOS where Hermes is built from source with full
+// C++ headers available.
+//
+// For Windows (Hermes NuGet, N-API-only), see HermesSandboxNAPI.h instead.
+
 #include <jsi/jsi.h>
 #include <memory>
 #include <mutex>
