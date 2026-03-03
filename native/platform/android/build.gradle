@@ -1,27 +1,24 @@
-buildscript {
-    repositories {
-        google()
-        mavenCentral()
-    }
-    dependencies {
-        classpath 'com.android.tools.build:gradle:7.4.2'
-    }
-}
-
 apply plugin: 'com.android.library'
+
+def reactNativeDir = file("$rootDir/../node_modules/react-native")
+def reactProperties = new Properties()
+file("$reactNativeDir/ReactAndroid/gradle.properties").withInputStream { reactProperties.load(it) }
 
 android {
     namespace 'com.rill.sandbox'
-    compileSdkVersion 33
+    compileSdkVersion rootProject.ext.compileSdkVersion
+    ndkVersion rootProject.ext.ndkVersion
+    buildToolsVersion rootProject.ext.buildToolsVersion
 
     defaultConfig {
-        minSdkVersion 21
-        targetSdkVersion 33
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
 
         externalNativeBuild {
             cmake {
                 cppFlags '-std=c++17 -fexceptions -frtti'
-                arguments '-DANDROID_STL=c++_shared'
+                arguments '-DANDROID_STL=c++_shared',
+                          "-DREACT_NATIVE_DIR=${reactNativeDir}"
             }
         }
     }
@@ -30,6 +27,10 @@ android {
         cmake {
             path 'CMakeLists.txt'
         }
+    }
+
+    buildFeatures {
+        prefab true
     }
 
     sourceSets {
@@ -42,8 +43,9 @@ android {
 repositories {
     google()
     mavenCentral()
+    maven { url "$reactNativeDir/../@react-native/gradle-plugin/react-native-gradle-plugin/build/publications/maven" }
 }
 
 dependencies {
-    implementation 'com.facebook.react:react-native:+'
+    implementation 'com.facebook.react:react-android'
 }

@@ -56,7 +56,7 @@ set_source_files_properties(${QUICKJS_VENDOR_SOURCES} PROPERTIES
     COMPILE_FLAGS "-w"
 )
 
-# Link with React Native's JSI
+# Link with React Native's JSI via prefab
 find_package(ReactAndroid REQUIRED CONFIG)
 target_link_libraries(rillsandbox
     ReactAndroid::jsi
