@@ -4,7 +4,7 @@
 #include <mutex>
 #include <unordered_map>
 
-#include "../jsi/jsi.h"
+#include <jsi/jsi.h>
 #include <quickjs.h>
 
 namespace jsi = facebook::jsi;

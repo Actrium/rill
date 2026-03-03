@@ -8,8 +8,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 get_filename_component(PACKAGE_ROOT "${CMAKE_SOURCE_DIR}/../.." ABSOLUTE)
 
 set(QUICKJS_DIR "${PACKAGE_ROOT}/quickjs")
-set(JSI_DIR "${PACKAGE_ROOT}/jsi")
-
 # QuickJS vendor sources
 set(QUICKJS_VENDOR_SOURCES
     ${QUICKJS_DIR}/vendor/quickjs.c
@@ -27,23 +25,18 @@ set(QUICKJS_JSI_SOURCES
     ${QUICKJS_DIR}/src/QuickJSInstrumentation.cpp
     ${QUICKJS_DIR}/src/JSIValueConverter.cpp
     ${QUICKJS_DIR}/src/HostProxy.cpp
-)
-
-# JSI sources
-set(JSI_SOURCES
-    ${JSI_DIR}/jsi.cpp
+    ${QUICKJS_DIR}/src/QuickJSSandboxJSI.cpp
 )
 
 add_library(rillsandbox SHARED
     ${QUICKJS_VENDOR_SOURCES}
     ${QUICKJS_JSI_SOURCES}
-    ${JSI_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/main/cpp/RillSandboxInstaller.cpp
 )
 
 target_include_directories(rillsandbox PRIVATE
     ${QUICKJS_DIR}/vendor
     ${QUICKJS_DIR}/src
-    ${JSI_DIR}
 )
 
 target_compile_definitions(rillsandbox PRIVATE

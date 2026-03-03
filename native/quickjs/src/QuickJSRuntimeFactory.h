@@ -2,7 +2,7 @@
 
 #include <memory.h>
 
-#include "../jsi/jsi.h"
+#include <jsi/jsi.h>
 
 namespace jsi = facebook::jsi;
 

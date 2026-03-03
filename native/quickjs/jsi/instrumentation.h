@@ -13,7 +13,7 @@
 #include <tuple>
 #include <unordered_map>
 
-#include "jsi.h"
+#include <jsi/jsi.h>
 
 namespace facebook {
 namespace jsi {
