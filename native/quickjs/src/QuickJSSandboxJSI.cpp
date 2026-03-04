@@ -553,6 +553,11 @@ QuickJSSandboxRuntime::QuickJSSandboxRuntime(jsi::Runtime &hostRuntime,
     throw jsi::JSError(hostRuntime, "Failed to create QuickJS runtime");
   }
 
+  // QuickJS default stack limit is conservative and can overflow on
+  // React/Reconciler update paths (especially during setState rerenders).
+  // Keep this aligned with QuickJSRuntime to avoid false-positive overflow.
+  JS_SetMaxStackSize(qjsRuntime_, 8 * 1024 * 1024); // 8MB
+
   // Set memory limit (optional)
   JS_SetMemoryLimit(qjsRuntime_, 256 * 1024 * 1024); // 256MB
 }
