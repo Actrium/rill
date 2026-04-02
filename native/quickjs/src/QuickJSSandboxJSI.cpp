@@ -8,9 +8,8 @@ namespace quickjs_sandbox {
 // Static counter for sandbox functions
 static int g_sandboxFuncCounter = 0;
 
-// Static members for HostFunctionData class
+// Static member for HostFunctionData class id
 JSClassID QuickJSSandboxContext::hostFunctionDataClassID_ = 0;
-bool QuickJSSandboxContext::classRegistered_ = false;
 
 void QuickJSSandboxContext::hostFunctionDataFinalizer(JSRuntime *rt,
                                                       JSValue val) {
@@ -27,15 +26,13 @@ void QuickJSSandboxContext::hostFunctionDataFinalizer(JSRuntime *rt,
 }
 
 void QuickJSSandboxContext::ensureClassRegistered() {
-  if (!classRegistered_) {
-    JS_NewClassID(&hostFunctionDataClassID_);
-    JSClassDef classDef = {
-        .class_name = "HostFunctionData",
-        .finalizer = hostFunctionDataFinalizer,
-    };
-    JS_NewClass(qjsRuntime_, hostFunctionDataClassID_, &classDef);
-    classRegistered_ = true;
-  }
+  JSClassDef classDef = {
+      .class_name = "HostFunctionData",
+      .finalizer = hostFunctionDataFinalizer,
+  };
+  // 每个 runtime 都注册一次 class，QuickJS 允许多 runtime 注册同一个 class id
+  JS_NewClassID(&hostFunctionDataClassID_);
+  JS_NewClass(qjsRuntime_, hostFunctionDataClassID_, &classDef);
 }
 
 // MARK: - QuickJSSandboxContext Implementation
@@ -559,7 +556,7 @@ QuickJSSandboxRuntime::QuickJSSandboxRuntime(jsi::Runtime &hostRuntime,
   JS_SetMaxStackSize(qjsRuntime_, 8 * 1024 * 1024); // 8MB
 
   // Set memory limit (optional)
-  JS_SetMemoryLimit(qjsRuntime_, 256 * 1024 * 1024); // 256MB
+  JS_SetMemoryLimit(qjsRuntime_, 64 * 1024 * 1024); // 256MB
 }
 
 QuickJSSandboxRuntime::~QuickJSSandboxRuntime() { dispose(); }
