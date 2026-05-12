@@ -426,9 +426,26 @@ ${footerCode}
   // Write final bundle
   await Bun.write(targetPath, wrappedCode);
 
-  // Remove Bun's original output if different from target
-  if (result.outputs[0]!.path !== targetPath) {
-    fs.unlinkSync(result.outputs[0]!.path);
+  // 拷贝 bun 输出中的非 JS 资产（图片等）到目标目录
+  // 当 outDir 与最终目标目录不同时需要拷贝；相同时图片已在目标位置，无需拷贝
+  for (const output of result.outputs) {
+    if (output.path === targetPath) continue;
+    const ext = path.extname(output.path).toLowerCase();
+    if (ext !== '.js' && ext !== '.map') {
+      const destPath = path.join(outDir, path.basename(output.path));
+      if (output.path !== destPath) {
+        fs.copyFileSync(output.path, destPath);
+      }
+      console.log(`   Asset: ${path.basename(output.path)}`);
+    }
+  }
+  // 删除 bun 原始输出中的 JS/Map 文件（非 JS 资产保留在目标目录）
+  for (const output of result.outputs) {
+    if (output.path === targetPath) continue;
+    const ext = path.extname(output.path).toLowerCase();
+    if ((ext === '.js' || ext === '.map') && fs.existsSync(output.path)) {
+      fs.unlinkSync(output.path);
+    }
   }
 
   // Post-build strict dependency guard
