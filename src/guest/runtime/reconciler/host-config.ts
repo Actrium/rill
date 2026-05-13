@@ -99,12 +99,14 @@ export function createReconciler(
 
       // Filter out children and internal React props
       // Children are handled separately via appendChild/appendInitialChild
-      const { children, key, ref, ...filteredProps } = props as {
-        children?: unknown;
-        key?: unknown;
-        ref?: unknown;
-        [key: string]: unknown;
-      };
+      // 使用 Object.entries 过滤而非解构，避免触发 React 19 的 defineKeyPropWarningGetter
+      // （解构会访问 props.key/props.ref，触发 React 开发模式的警告 getter）
+      const filteredProps: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(props)) {
+        if (k !== 'children' && k !== 'key' && k !== 'ref') {
+          filteredProps[k] = v;
+        }
+      }
 
       // Serialize props using TypeRules
       // Functions are converted to { __type: 'function', __fnId }
@@ -256,12 +258,13 @@ export function createReconciler(
         : (nextPropsOrInternalHandle as Record<string, unknown>);
 
       // Filter out children and internal React props
-      const { children, key, ref, ...filteredProps } = newProps as {
-        children?: unknown;
-        key?: unknown;
-        ref?: unknown;
-        [key: string]: unknown;
-      };
+      // 使用 Object.entries 过滤而非解构，避免触发 React 19 的 defineKeyPropWarningGetter
+      const filteredProps: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(newProps as Record<string, unknown>)) {
+        if (k !== 'children' && k !== 'key' && k !== 'ref') {
+          filteredProps[k] = v;
+        }
+      }
 
       // Serialize props using TypeRules
       // Functions are converted to { __type: 'function', __fnId }
