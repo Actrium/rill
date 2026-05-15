@@ -486,6 +486,13 @@ export class Engine implements IEngine {
       guestReceiver: async (message: BridgeHostMessage) => {
         // Message is already decoded by Bridge
         if (this.context) {
+          if (this.options.debug) {
+            this.options.logger.log(`[rill:${this.id}] guestReceiver message`, {
+              type: message.type,
+              keys: typeof message === 'object' && message ? Object.keys(message) : [],
+            });
+          }
+
           // REF_METHOD_RESULT needs special handling - dispatch directly in sandbox context
           // because __handleHostEvent is defined in sandbox, not accessible from native function
           if (message.type === 'REF_METHOD_RESULT') {
@@ -497,9 +504,7 @@ export class Engine implements IEngine {
             return;
           }
 
-          this.context.setGlobal('__hostMessage', message);
-          await this.evalCode('globalThis.__handleHostMessage(__hostMessage)');
-          this.context.setGlobal('__hostMessage', undefined);
+          await this.dispatchMessageToGuest(message);
         }
       },
     });
@@ -896,8 +901,58 @@ export class Engine implements IEngine {
 
     const debug = this.options.debug;
     const logger = this.options.logger;
+    // 在 Guest 沙箱内部建立专用事件总线，避免 Host 直接持有并调用 Guest 回调。
+    await this.evalCode(`
+      (function() {
+        var listeners = globalThis.__rillHostEventListeners;
+        if (!listeners) {
+          listeners = new Map();
+          globalThis.__rillHostEventListeners = listeners;
+        }
+        globalThis.__rillHostEventListenerCounts =
+          globalThis.__rillHostEventListenerCounts || {};
+        globalThis.__rillLastHostEventDispatch =
+          globalThis.__rillLastHostEventDispatch || null;
 
-    // Note: Runtime helpers (__useHostEvent, __handleHostEvent) are now in Guest bundle
+        globalThis.__rillUseHostEvent = function(eventName, callback) {
+          if (!listeners.has(eventName)) {
+            listeners.set(eventName, new Set());
+          }
+          var set = listeners.get(eventName);
+          set.add(callback);
+          globalThis.__rillHostEventListenerCounts[eventName] = set.size;
+          return function() {
+            try {
+              set.delete(callback);
+              globalThis.__rillHostEventListenerCounts[eventName] = set.size;
+            } catch (_) {}
+          };
+        };
+
+        // 兼容仍然读取 __useHostEvent 的旧代码路径。
+        globalThis.__useHostEvent = globalThis.__rillUseHostEvent;
+        globalThis.__handleHostEvent = function(eventName, payload) {
+          var set = listeners.get(eventName);
+          globalThis.__rillLastHostEventDispatch = {
+            eventName: eventName,
+            listenerCount: set ? set.size : 0
+          };
+          if (!set) {
+            return;
+          }
+          set.forEach(function(listener) {
+            try {
+              listener(payload);
+            } catch (e) {
+              if (globalThis.console && typeof globalThis.console.error === 'function') {
+                globalThis.console.error('[rill] Host event listener error:', e);
+              }
+            }
+          });
+        };
+        globalThis.__rillHandleHostEvent = globalThis.__handleHostEvent;
+      })();
+    `);
 
     // __rill_register_component_type: register Guest function components on Host so they survive JSI
     const engineId = this.id;
@@ -1132,6 +1187,120 @@ export class Engine implements IEngine {
   }
 
   /**
+   * 将 Host 消息按类型拆开发送到 Guest，避免把整包对象再次注入沙箱。
+   */
+  private async dispatchMessageToGuest(message: BridgeHostMessage): Promise<void> {
+    if (!this.context) return;
+
+    const logger = this.options.logger;
+    const debug = this.options.debug;
+
+    try {
+      switch (message.type) {
+        case 'CALL_FUNCTION': {
+          // QuickJS JSI 限制同 HOST_EVENT，使用 JSON 字面量嵌入 eval 字符串
+          const fnId = message.fnId;
+          const argsJson = JSON.stringify(message.args);
+          try {
+            this.context.eval(`globalThis.__invokeCallback("${fnId}", ${argsJson})`);
+          } catch (evalErr) {
+            console.error(`[Host→Guest] eval __invokeCallback 失败: ${evalErr instanceof Error ? evalErr.message : String(evalErr)}`);
+            logger.error(`[rill:${this.id}] dispatchMessageToGuest CALL_FUNCTION eval error:`, evalErr);
+          }
+          return;
+        }
+
+        case 'HOST_EVENT': {
+          // QuickJS JSI 的 getGlobal 返回的函数引用，从 Host 侧直接调用不会在沙箱中执行。
+          // 必须通过 context.eval() 在沙箱内部调用。
+          // 注意: 使用 __rillHandleHostEvent 而非 __handleHostEvent，
+          // 因为 globals-setup.ts 会覆盖 __handleHostEvent，其内部使用空的 __hostEventListeners，
+          // 而 SDK 通过 __rillUseHostEvent 注册的回调在 __rillHostEventListeners 中，
+          // 只有 __rillHandleHostEvent (injectRuntimeAPI 版本) 才能找到这些回调。
+          // QuickJS 的 context.eval() 会在执行后自动 drain pending jobs（微任务），
+          // 确保 Promise .then() 回调能正常触发。
+          const eventName = message.eventName;
+          const payloadJson = message.payload === undefined || message.payload === null
+            ? 'null'
+            : JSON.stringify(message.payload);
+          try {
+            this.context.eval(`globalThis.__rillHandleHostEvent("${eventName}", ${payloadJson})`);
+          } catch (evalErr) {
+            console.error(`[Host→Guest] eval __rillHandleHostEvent 失败: ${evalErr instanceof Error ? evalErr.message : String(evalErr)}`);
+            logger.error(`[rill:${this.id}] dispatchMessageToGuest HOST_EVENT eval error:`, evalErr);
+          }
+
+          return;
+        }
+
+        case 'CONFIG_UPDATE': {
+          if (debug) {
+            logger.log(`[rill:${this.id}] dispatch CONFIG_UPDATE`, {
+              configKeys: Object.keys(message.config ?? {}),
+            });
+          }
+
+          this.context.setGlobal('__hostConfigPatch', message.config);
+          await this.evalCode(
+            `
+              // 将配置更新限制在 Guest 的配置对象上，避免依赖整包消息注入。
+              globalThis.__config = globalThis.__config || {};
+              Object.assign(globalThis.__config, __hostConfigPatch);
+            `
+          );
+          this.context.setGlobal('__hostConfigPatch', undefined);
+          return;
+        }
+
+        case 'PROMISE_RESOLVE': {
+          if (debug) {
+            logger.log(`[rill:${this.id}] dispatch PROMISE_RESOLVE`, {
+              promiseId: message.promiseId,
+            });
+          }
+          return;
+        }
+
+        case 'PROMISE_REJECT': {
+          if (debug) {
+            logger.log(`[rill:${this.id}] dispatch PROMISE_REJECT`, {
+              promiseId: message.promiseId,
+              errorName: message.error.__name,
+            });
+          }
+          return;
+        }
+
+        case 'DESTROY': {
+          if (debug) {
+            logger.log(`[rill:${this.id}] dispatch DESTROY`);
+          }
+
+          await this.evalCode(
+            `
+              // 清空 Guest 侧事件监听，保持与原来的 DESTROY 语义一致。
+              globalThis.__handleHostMessage({ type: 'DESTROY' });
+            `
+          );
+          return;
+        }
+      }
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error
+          ? `${error.name}: ${error.message}${error.stack ? `\n${error.stack}` : ''}`
+          : String(error);
+      console.error(
+        `[rill:${this.id}] dispatchMessageToGuest error type=${message.type} ${errorMessage}`
+      );
+      logger.error(
+        `[rill:${this.id}] dispatchMessageToGuest error type=${message.type}: ${errorMessage}`
+      );
+      throw error;
+    }
+  }
+
+  /**
    * Execute bundle code in sandbox
    */
   private async executeBundle(code: string): Promise<void> {
@@ -1157,7 +1326,9 @@ export class Engine implements IEngine {
    * Delegates to Bridge for unified communication handling
    */
   async sendToSandbox(message: HostMessage): Promise<void> {
-    if (this.destroyed || !this.bridge) return;
+    if (this.destroyed || !this.bridge) {
+      return;
+    }
 
     const start = Date.now();
     await this.bridge.sendToGuest(message);

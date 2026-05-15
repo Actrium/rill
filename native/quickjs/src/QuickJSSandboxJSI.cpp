@@ -235,6 +235,16 @@ jsi::Value QuickJSSandboxContext::eval(jsi::Runtime &rt,
     throw jsi::JSError(rt, errorMsg);
   }
 
+  // Drain pending jobs (Promise microtasks) after each eval.
+  // QuickJS does not automatically execute pending jobs after JS_Eval,
+  // so Promise .then() callbacks would never fire without this.
+  JSContext *ctx;
+  int execCount = 0;
+  while (JS_ExecutePendingJob(qjsRuntime_, &ctx) > 0) {
+    execCount++;
+    if (execCount > 1000) break; // 安全阀，防止无限循环
+  }
+
   jsi::Value jsiResult = qjsToJSI(rt, result);
   JS_FreeValue(qjsContext_, result);
   return jsiResult;

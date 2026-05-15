@@ -542,14 +542,16 @@ export function useHostEvent<T = unknown>(eventName: string, callback: (payload:
 
   useEffect(() => {
     const g = globalThis as Record<string, unknown>;
-    if ('__useHostEvent' in globalThis) {
+    // 优先使用 Host 注入的专用事件通道，避免被 Guest runtime 的同名全局覆盖。
+    const subscribe =
+      (g.__rillUseHostEvent as ((name: string, cb: (payload: T) => void) => () => void) | undefined) ??
+      (g.__useHostEvent as ((name: string, cb: (payload: T) => void) => () => void) | undefined);
+    if (typeof subscribe === 'function') {
       // Create stable callback wrapper that always calls the latest callback
       const stableCallback = (payload: T) => callbackRef.current(payload);
 
       // Subscribe and get unsubscribe function
-      const unsubscribe = (
-        g.__useHostEvent as (name: string, cb: (payload: T) => void) => () => void
-      )(eventName, stableCallback);
+      const unsubscribe = subscribe(eventName, stableCallback);
 
       // React automatically calls this cleanup function when component unmounts
       return unsubscribe;
@@ -683,7 +685,14 @@ export function useRemoteRef<T = unknown>(options?: {
   // Listen for REF_METHOD_RESULT events from Host
   useEffect(() => {
     const g = globalThis as Record<string, unknown>;
-    if (!('__useHostEvent' in g)) {
+    const subscribe =
+      (g.__rillUseHostEvent as
+        | ((name: string, cb: (payload: RefMethodResult) => void) => () => void)
+        | undefined) ??
+      (g.__useHostEvent as
+        | ((name: string, cb: (payload: RefMethodResult) => void) => () => void)
+        | undefined);
+    if (typeof subscribe !== 'function') {
       return undefined;
     }
 
@@ -714,9 +723,7 @@ export function useRemoteRef<T = unknown>(options?: {
     };
 
     // Subscribe to __REF_RESULT__ events
-    const unsubscribe = (
-      g.__useHostEvent as (name: string, cb: (payload: RefMethodResult) => void) => () => void
-    )('__REF_RESULT__', handleResult);
+    const unsubscribe = subscribe('__REF_RESULT__', handleResult);
 
     return unsubscribe;
   }, [nodeId]);
