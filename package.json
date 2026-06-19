@@ -34,6 +34,7 @@
     "./guest": "./src/sdk/index.ts",
     "./host/preset": "./src/host/preset/index.ts",
     "./devtools": "./src/devtools/index.ts",
+    "./contract": "./src/contract/index.ts",
     "./cli": "./src/cli/index.ts"
   },
   "bin": {

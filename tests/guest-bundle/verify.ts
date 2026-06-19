@@ -8,7 +8,7 @@
  */
 
 import React from 'react';
-import { Engine } from '../../src/host/Engine';
+import { Engine } from '../../src/host';
 
 // ============================================================================
 // Mock Components

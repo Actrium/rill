@@ -198,6 +198,34 @@ describe('CLI Commands', () => {
 
       expect(fs.existsSync(path.join(tempDir, 'dist/meta.json'))).toBe(true);
     });
+
+    it('should handle contract and capability manifest options', async () => {
+      const buildMock = {
+        // biome-ignore lint/suspicious/noExplicitAny: Mock function accepts any build options
+        build: async (opts: any) => {
+          expect(opts.contractFile).toBe('src/rill.contract.ts');
+          expect(opts.capabilityManifest).toBe('dist/rill-capabilities.json');
+
+          fs.writeFileSync(path.join(tempDir, 'dist/bundle.js'), '// bundle');
+          fs.writeFileSync(
+            path.join(tempDir, 'dist/rill-capabilities.json'),
+            JSON.stringify({ hostCapabilities: [], guestExports: [] })
+          );
+        },
+      };
+
+      await buildMock.build({
+        entry: 'src/guest.tsx',
+        outfile: 'dist/bundle.js',
+        minify: true,
+        sourcemap: false,
+        watch: false,
+        contractFile: 'src/rill.contract.ts',
+        capabilityManifest: 'dist/rill-capabilities.json',
+      });
+
+      expect(fs.existsSync(path.join(tempDir, 'dist/rill-capabilities.json'))).toBe(true);
+    });
   });
 
   describe('analyze command', () => {
@@ -281,6 +309,19 @@ describe('CLI Commands', () => {
 
       await analyzeMock.analyze('dist/test-bundle.js', {
         treatDynamicNonLiteralAsViolation: true,
+      });
+    });
+
+    it('should handle contract option', async () => {
+      const analyzeMock = {
+        // biome-ignore lint/suspicious/noExplicitAny: Mock function accepts any analyze options
+        analyze: async (_bundlePath: string, opts?: any) => {
+          expect(opts?.contractFile).toBe('src/rill.contract.ts');
+        },
+      };
+
+      await analyzeMock.analyze('dist/test-bundle.js', {
+        contractFile: 'src/rill.contract.ts',
       });
     });
   });

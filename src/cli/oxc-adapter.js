@@ -3,6 +3,12 @@
 
 const oxc = require('oxc-parser');
 
+const HOST_MODULE_PATTERN = /^host:[a-z0-9_-]+(?:\/[a-z0-9_-]+)*$/;
+
+function isHostModuleId(value) {
+  return typeof value === 'string' && HOST_MODULE_PATTERN.test(value);
+}
+
 /**
  * Analyze module dependencies using oxc-parser
  *
@@ -56,20 +62,8 @@ function analyzeModuleIDs(code) {
       }
     }
 
-    // Process static exports (re-exports)
-    if (lexerResult.exports) {
-      for (const exp of lexerResult.exports) {
-        if (exp.n) {
-          foundStatic.add(exp.n);
-          details.push({
-            moduleId: exp.n,
-            kind: 'export',
-            start: exp.s,
-            end: exp.e,
-          });
-        }
-      }
-    }
+    // moduleLexerSync.exports contains exported symbol names, not dependency module ids.
+    // Re-export sources are already represented in the imports collection.
   } catch (err) {
     // If lexer fails, continue with regex-based detection
     console.warn('[oxc-adapter] moduleLexerSync failed:', err.message);
@@ -137,6 +131,257 @@ function analyzeModuleIDs(code) {
     evalCount,
     details,
   };
+}
+
+/**
+ * Analyze Rill host module imports and Guest exports.
+ *
+ * Static named imports are the only accepted host import shape:
+ *   import { openProfile } from 'host:navigation'
+ *
+ * Other host module access forms are intentionally rejected here so the
+ * capability boundary stays visible in source and statically auditable.
+ *
+ * @param {string} code
+ * @returns {{
+ *   hostImports: Array<{
+ *     moduleId: string,
+ *     specifiers: Array<{ imported: string | null, local: string, kind: string }>,
+ *     kind: string,
+ *     start?: number,
+ *     end?: number
+ *   }>,
+ *   hostCapabilities: string[],
+ *   guestExports: string[],
+ *   hasDefaultExport: boolean,
+ *   violations: Array<{ code: string, moduleId: string, message: string, start?: number, end?: number }>
+ * }}
+ */
+function analyzeHostBoundary(code) {
+  const hostImports = [];
+  const hostCapabilities = new Set();
+  const guestExports = new Set();
+  const violations = [];
+  let hasDefaultExport = false;
+
+  try {
+    const result = oxc.parseSync(code, {
+      sourceType: 'module',
+      sourceFilename: 'rill-guest-boundary.tsx',
+    });
+
+    if (result.errors && result.errors.length > 0) {
+      return {
+        hostImports,
+        hostCapabilities: [],
+        guestExports: [],
+        hasDefaultExport,
+        violations,
+      };
+    }
+
+    const ast = typeof result.program === 'string' ? JSON.parse(result.program) : result.program;
+
+    for (const node of ast.body || []) {
+      if (node.type === 'ImportDeclaration') {
+        collectHostImport(node, hostImports, hostCapabilities, violations);
+      } else if (node.type === 'ExportNamedDeclaration') {
+        collectGuestNamedExport(node, guestExports);
+        collectHostReExport(node, violations);
+      } else if (node.type === 'ExportDefaultDeclaration') {
+        hasDefaultExport = true;
+      }
+    }
+  } catch (err) {
+    console.warn('[oxc-adapter] analyzeHostBoundary failed:', err.message);
+  }
+
+  const moduleScan = analyzeModuleIDs(code);
+  for (const detail of moduleScan.details) {
+    if (!isHostModuleId(detail.moduleId)) continue;
+
+    if (detail.kind === 'dynamic') {
+      violations.push({
+        code: 'host-dynamic-import',
+        moduleId: detail.moduleId,
+        message: `Dynamic host module import is not allowed: ${detail.moduleId}. Use a static named import.`,
+        start: detail.start,
+        end: detail.end,
+      });
+      hostImports.push({
+        moduleId: detail.moduleId,
+        specifiers: [],
+        kind: 'dynamic',
+        start: detail.start,
+        end: detail.end,
+      });
+    } else if (detail.kind === 'require') {
+      violations.push({
+        code: 'host-require',
+        moduleId: detail.moduleId,
+        message: `CommonJS require() is not allowed for host modules: ${detail.moduleId}. Use a static named import.`,
+        start: detail.start,
+        end: detail.end,
+      });
+      hostImports.push({
+        moduleId: detail.moduleId,
+        specifiers: [],
+        kind: 'require',
+        start: detail.start,
+        end: detail.end,
+      });
+    }
+  }
+
+  return {
+    hostImports,
+    hostCapabilities: Array.from(hostCapabilities).sort(),
+    guestExports: Array.from(guestExports).sort(),
+    hasDefaultExport,
+    violations,
+  };
+}
+
+function collectHostImport(node, hostImports, hostCapabilities, violations) {
+  const moduleId = getStringLiteralValue(node.source);
+  if (!isHostModuleId(moduleId)) return;
+
+  const specifiers = [];
+
+  for (const specifier of node.specifiers || []) {
+    if (specifier.type === 'ImportSpecifier') {
+      const imported = getImportSpecifierName(specifier.imported);
+      const local = getImportSpecifierName(specifier.local) || imported;
+      if (imported) {
+        specifiers.push({
+          imported,
+          local,
+          kind: 'named',
+        });
+        hostCapabilities.add(`${moduleId}.${imported}`);
+      }
+    } else if (specifier.type === 'ImportDefaultSpecifier') {
+      const local = getImportSpecifierName(specifier.local) || 'default';
+      specifiers.push({
+        imported: 'default',
+        local,
+        kind: 'default',
+      });
+      violations.push({
+        code: 'host-import-default',
+        moduleId,
+        message: `Default import is not allowed for host module ${moduleId}. Use named imports.`,
+        start: specifier.start,
+        end: specifier.end,
+      });
+    } else if (specifier.type === 'ImportNamespaceSpecifier') {
+      const local = getImportSpecifierName(specifier.local) || '*';
+      specifiers.push({
+        imported: null,
+        local,
+        kind: 'namespace',
+      });
+      violations.push({
+        code: 'host-import-namespace',
+        moduleId,
+        message: `Namespace import is not allowed for host module ${moduleId}. Use named imports.`,
+        start: specifier.start,
+        end: specifier.end,
+      });
+    }
+  }
+
+  if (specifiers.length === 0) {
+    specifiers.push({
+      imported: null,
+      local: '',
+      kind: 'bare',
+    });
+    violations.push({
+      code: 'host-import-bare',
+      moduleId,
+      message: `Bare host module import is not allowed: ${moduleId}. Import named capabilities instead.`,
+      start: node.start,
+      end: node.end,
+    });
+  }
+
+  hostImports.push({
+    moduleId,
+    specifiers,
+    kind: 'import',
+    start: node.start,
+    end: node.end,
+  });
+}
+
+function collectGuestNamedExport(node, guestExports) {
+  if (node.source) return;
+
+  if (node.declaration) {
+    const declaration = node.declaration;
+
+    if (
+      (declaration.type === 'FunctionDeclaration' || declaration.type === 'ClassDeclaration') &&
+      declaration.id?.name
+    ) {
+      guestExports.add(declaration.id.name);
+      return;
+    }
+
+    if (declaration.type === 'VariableDeclaration') {
+      for (const item of declaration.declarations || []) {
+        if (item.id?.type === 'Identifier' && item.id.name) {
+          guestExports.add(item.id.name);
+        }
+      }
+    }
+
+    return;
+  }
+
+  for (const specifier of node.specifiers || []) {
+    const exported = getExportSpecifierName(specifier.exported);
+    if (exported) {
+      guestExports.add(exported);
+    }
+  }
+}
+
+function collectHostReExport(node, violations) {
+  const moduleId = getStringLiteralValue(node.source);
+  if (!isHostModuleId(moduleId)) return;
+
+  violations.push({
+    code: 'host-reexport',
+    moduleId,
+    message: `Re-exporting a host module is not allowed: ${moduleId}. Import named capabilities where they are used.`,
+    start: node.start,
+    end: node.end,
+  });
+}
+
+function getStringLiteralValue(node) {
+  if (!node) return null;
+  if (typeof node.value === 'string') return node.value;
+  if (typeof node.raw === 'string') {
+    return node.raw.replace(/^['"]|['"]$/g, '');
+  }
+  return null;
+}
+
+function getImportSpecifierName(node) {
+  if (!node) return null;
+  if (typeof node.name === 'string') return node.name;
+  if (typeof node.value === 'string') return node.value;
+  return null;
+}
+
+function getExportSpecifierName(node) {
+  if (!node) return null;
+  if (typeof node.name === 'string') return node.name;
+  if (typeof node.value === 'string') return node.value;
+  return null;
 }
 
 /**
@@ -456,4 +701,4 @@ function traverseAST(node, visitor) {
   }
 }
 
-module.exports = { analyzeModuleIDs, analyzeJSXProps };
+module.exports = { analyzeModuleIDs, analyzeHostBoundary, analyzeJSXProps };

@@ -16,6 +16,7 @@ const config = {
     monorepoRoot,
   ],
   resolver: {
+    useWatchman: process.env.RILL_E2E_USE_WATCHMAN === '1',
     // Ensure module resolution uses the app's node_modules, even when importing
     // source files from the monorepo (watchFolders).
     disableHierarchicalLookup: true,

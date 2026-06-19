@@ -1,5 +1,6 @@
 #include "TenantRegistry.h"
 #include <chrono>
+#include <mutex>
 #include <stdexcept>
 
 namespace rill::orchestrator {

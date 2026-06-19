@@ -8,6 +8,8 @@ import * as babel from '@babel/core';
 import type { BunPlugin } from 'bun';
 import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
+import { isHostModuleId, type RillContractShape, validateContract } from '../contract';
 
 /**
  * Build options
@@ -55,6 +57,21 @@ export interface BuildOptions {
   metafile?: string;
 
   /**
+   * Contract object used to validate host:* imports and Guest exports.
+   */
+  contract?: RillContractShape;
+
+  /**
+   * Path to a contract module. The module must export `contract` or a default contract.
+   */
+  contractFile?: string;
+
+  /**
+   * Capability manifest output path.
+   */
+  capabilityManifest?: string;
+
+  /**
    * Custom footer file path (replaces default auto-render footer)
    * Used for custom render logic (e.g., askc usePanels hook)
    */
@@ -72,6 +89,21 @@ export interface AnalyzeOptions {
   failOnViolation?: boolean;
   treatEvalAsViolation?: boolean;
   treatDynamicNonLiteralAsViolation?: boolean;
+  contract?: RillContractShape;
+  contractFile?: string;
+}
+
+export interface AnalyzeResult {
+  modules: string[];
+  hostCapabilities: string[];
+  guestExports: string[];
+  violations: string[];
+}
+
+export interface GuestCapabilitiesManifest {
+  contractVersion: string | null;
+  hostCapabilities: string[];
+  guestExports: string[];
 }
 
 /**
@@ -193,6 +225,21 @@ const RUNTIME_INJECT = `
     __rill.config = globalThis.__rill_getConfig ? globalThis.__rill_getConfig() : {};
   }
 
+  // Host module resolver. Bundled host:* imports are rewritten to this hook.
+  if (typeof globalThis.__rill_importHostModule !== 'function') {
+    globalThis.__rill_importHostModule = function(moduleId) {
+      if (__rill.hostModules && __rill.hostModules[moduleId]) {
+        return __rill.hostModules[moduleId];
+      }
+
+      if (typeof globalThis.__rill_getHostModule === 'function') {
+        return globalThis.__rill_getHostModule(moduleId);
+      }
+
+      throw new Error('[rill] Host module not registered: ' + moduleId);
+    };
+  }
+
 })();
 `;
 
@@ -248,6 +295,8 @@ const EXTERNALS: Record<string, string> = {
   'react-native': 'ReactNative',
   'rill/guest': 'RillGuest',
 };
+
+const HOST_MODULE_EXTERNAL = 'host:*';
 
 /**
  * Create Bun plugin for pre-bundle Babel transforms (dev mode source location injection)
@@ -310,14 +359,233 @@ try { if (typeof __ReactJSXDevRuntime === 'undefined' && typeof ReactJSXDevRunti
 try { if (typeof __ReactNative === 'undefined' && typeof ReactNative !== 'undefined') { var __ReactNative = ReactNative; } } catch {}
 `;
 
+type HostBoundaryScanResult = import('./oxc-adapter').HostBoundaryScanResult;
+
+interface ContractOptions {
+  contract?: RillContractShape;
+  contractFile?: string;
+}
+
+interface CollectedHostBoundary {
+  hostModuleIds: string[];
+  hostCapabilities: string[];
+  guestExports: string[];
+  violations: string[];
+}
+
+async function resolveContract(options: ContractOptions): Promise<RillContractShape | undefined> {
+  if (options.contract) {
+    validateContract(options.contract);
+    return options.contract;
+  }
+
+  if (!options.contractFile) {
+    return undefined;
+  }
+
+  const contractPath = path.resolve(process.cwd(), options.contractFile);
+  if (!fs.existsSync(contractPath)) {
+    throw new Error(`Contract file not found: ${contractPath}`);
+  }
+
+  const contractModule = await import(pathToFileURL(contractPath).href);
+  const contract = contractModule.contract ?? contractModule.default;
+
+  if (!contract) {
+    throw new Error(`Contract file must export "contract" or default: ${contractPath}`);
+  }
+
+  validateContract(contract);
+  return contract;
+}
+
+function createHostBoundaryCollector(entryPath: string): {
+  plugin: BunPlugin;
+  getResult: () => CollectedHostBoundary;
+} {
+  const hostModuleIds = new Set<string>();
+  const hostCapabilities = new Set<string>();
+  const guestExports = new Set<string>();
+  const violations: string[] = [];
+  let analyzerPromise: Promise<typeof import('./oxc-adapter')> | undefined;
+
+  const getAnalyzer = () => {
+    analyzerPromise ??= import('./oxc-adapter');
+    return analyzerPromise;
+  };
+
+  return {
+    plugin: {
+      name: 'rill-host-boundary-analysis',
+      setup(build) {
+        build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async (args) => {
+          if (args.path.includes(`${path.sep}node_modules${path.sep}`)) {
+            return undefined;
+          }
+
+          const contents = await Bun.file(args.path).text();
+          const { analyzeHostBoundary } = await getAnalyzer();
+          const scan = analyzeHostBoundary(contents);
+          const isEntry = path.resolve(args.path) === entryPath;
+
+          mergeHostBoundaryScan(args.path, scan, {
+            hostModuleIds,
+            hostCapabilities,
+            guestExports: isEntry ? guestExports : undefined,
+            violations,
+          });
+
+          return undefined;
+        });
+      },
+    },
+
+    getResult() {
+      return {
+        hostModuleIds: Array.from(hostModuleIds).sort(),
+        hostCapabilities: Array.from(hostCapabilities).sort(),
+        guestExports: Array.from(guestExports).sort(),
+        violations: [...violations],
+      };
+    },
+  };
+}
+
+function mergeHostBoundaryScan(
+  filePath: string,
+  scan: HostBoundaryScanResult,
+  target: {
+    hostModuleIds: Set<string>;
+    hostCapabilities: Set<string>;
+    guestExports?: Set<string>;
+    violations: string[];
+  }
+): void {
+  for (const hostImport of scan.hostImports) {
+    target.hostModuleIds.add(hostImport.moduleId);
+  }
+
+  for (const capability of scan.hostCapabilities) {
+    target.hostCapabilities.add(capability);
+  }
+
+  if (target.guestExports) {
+    for (const exportName of scan.guestExports) {
+      target.guestExports.add(exportName);
+    }
+  }
+
+  for (const violation of scan.violations) {
+    target.violations.push(`${path.relative(process.cwd(), filePath)}: ${violation.message}`);
+  }
+}
+
+function validateBoundaryAgainstContract(
+  boundary: Pick<CollectedHostBoundary, 'hostCapabilities' | 'guestExports'>,
+  contract: RillContractShape,
+  options: { checkMissingGuestExports?: boolean } = {}
+): string[] {
+  const violations: string[] = [];
+
+  for (const capability of boundary.hostCapabilities) {
+    const [moduleId, exportName] = splitCapabilityName(capability);
+    if (!moduleId || !exportName) continue;
+
+    const moduleSpec = contract.hostModules[moduleId as keyof typeof contract.hostModules];
+
+    if (!moduleSpec) {
+      violations.push(`Host module "${moduleId}" is not declared in contract.`);
+      continue;
+    }
+
+    if (!(exportName in moduleSpec)) {
+      violations.push(`Host capability "${capability}" is not declared in contract.`);
+    }
+  }
+
+  for (const exportName of boundary.guestExports) {
+    if (!(exportName in contract.guestExports)) {
+      violations.push(`Guest export "${exportName}" is not declared in contract.`);
+    }
+  }
+
+  if (options.checkMissingGuestExports ?? true) {
+    for (const exportName of Object.keys(contract.guestExports)) {
+      if (!boundary.guestExports.includes(exportName)) {
+        violations.push(`Guest export "${exportName}" is declared in contract but not exported.`);
+      }
+    }
+  }
+
+  return violations;
+}
+
+function splitCapabilityName(capability: string): [string | null, string | null] {
+  const dotIndex = capability.lastIndexOf('.');
+  if (dotIndex <= 0 || dotIndex === capability.length - 1) {
+    return [null, null];
+  }
+
+  return [capability.slice(0, dotIndex), capability.slice(dotIndex + 1)];
+}
+
+function throwBoundaryViolations(violations: string[]): void {
+  if (violations.length === 0) {
+    return;
+  }
+
+  throw new Error(`Rill boundary violations:\n- ${violations.join('\n- ')}`);
+}
+
+function rewriteHostModuleRequires(code: string, moduleIds: string[]): string {
+  let rewritten = code;
+
+  for (const moduleId of moduleIds) {
+    const pattern = new RegExp(`require\\(["']${escapeRegExp(moduleId)}["']\\)`, 'g');
+    rewritten = rewritten.replace(
+      pattern,
+      `globalThis.__rill_importHostModule(${JSON.stringify(moduleId)})`
+    );
+  }
+
+  return rewritten;
+}
+
+function createGuestCapabilitiesManifest(
+  boundary: Pick<CollectedHostBoundary, 'hostCapabilities' | 'guestExports'>,
+  contract?: RillContractShape
+): GuestCapabilitiesManifest {
+  return {
+    contractVersion: contract?.version ?? null,
+    hostCapabilities: [...boundary.hostCapabilities].sort(),
+    guestExports: [...boundary.guestExports].sort(),
+  };
+}
+
+// Reason: JSON artifact writer accepts arbitrary serializable manifest-like values.
+function writeJsonFile(filePath: string, value: unknown): void {
+  const fullPath = path.resolve(process.cwd(), filePath);
+  const directory = path.dirname(fullPath);
+  if (!fs.existsSync(directory)) {
+    fs.mkdirSync(directory, { recursive: true });
+  }
+  fs.writeFileSync(fullPath, JSON.stringify(value, null, 2));
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
  * Execute build using Bun.build
  */
 export async function build(options: BuildOptions): Promise<void> {
   const startTime = Date.now();
 
-  const { entry, outfile, minify, sourcemap, watch, metafile, footer } = options;
+  const { entry, outfile, minify, sourcemap, watch, metafile, footer, capabilityManifest } =
+    options;
   const strict = options.strict ?? true;
+  const contract = await resolveContract(options);
 
   // Validate entry file
   const entryPath = path.resolve(process.cwd(), entry);
@@ -342,6 +610,8 @@ export async function build(options: BuildOptions): Promise<void> {
 
   // Create plugins array
   const plugins: BunPlugin[] = [];
+  const hostBoundaryCollector = createHostBoundaryCollector(entryPath);
+  plugins.push(hostBoundaryCollector.plugin);
 
   // In dev mode, add Babel plugin for source location injection
   if (options.dev) {
@@ -358,7 +628,7 @@ export async function build(options: BuildOptions): Promise<void> {
     naming: `${outFileName.replace(/\.js$/, '')}.[ext]`,
     minify,
     sourcemap: sourcemap ? 'external' : 'none',
-    external: Object.keys(EXTERNALS),
+    external: [...Object.keys(EXTERNALS), HOST_MODULE_EXTERNAL],
     plugins,
     define: {
       'process.env.NODE_ENV': '"production"',
@@ -373,6 +643,12 @@ export async function build(options: BuildOptions): Promise<void> {
     }
     throw new Error('Bun build failed');
   }
+
+  const hostBoundary = hostBoundaryCollector.getResult();
+  throwBoundaryViolations([
+    ...hostBoundary.violations,
+    ...(contract ? validateBoundaryAgainstContract(hostBoundary, contract) : []),
+  ]);
 
   // Post-process: wrap in IIFE with globals mapping
   const targetPath = path.join(outDir, outFileName);
@@ -418,6 +694,7 @@ export async function build(options: BuildOptions): Promise<void> {
     const requirePattern = new RegExp(`require\\(["']${mod.replace('/', '\\/')}["']\\)`, 'g');
     bundleCode = bundleCode.replace(requirePattern, globalName);
   }
+  bundleCode = rewriteHostModuleRequires(bundleCode, hostBoundary.hostModuleIds);
 
   // For CJS output, module.exports carries the default export
   // After transforming externals, capture default into globalThis.__rill.guest
@@ -515,12 +792,20 @@ ${footerCode}
     fs.writeFileSync(path.resolve(process.cwd(), metafile), JSON.stringify(metaInfo, null, 2));
     console.log(`   Metafile: ${metafile}`);
   }
+
+  if (capabilityManifest) {
+    writeJsonFile(capabilityManifest, createGuestCapabilitiesManifest(hostBoundary, contract));
+    console.log(`   Capability manifest: ${capabilityManifest}`);
+  }
 }
 
 /**
  * Analyze bundle for disallowed dependencies
  */
-export async function analyze(bundlePath: string, options?: AnalyzeOptions): Promise<void> {
+export async function analyze(
+  bundlePath: string,
+  options?: AnalyzeOptions
+): Promise<AnalyzeResult> {
   const fullPath = path.resolve(process.cwd(), bundlePath);
   if (!fs.existsSync(fullPath)) {
     throw new Error(`Bundle not found: ${fullPath}`);
@@ -535,8 +820,9 @@ export async function analyze(bundlePath: string, options?: AnalyzeOptions): Pro
   console.log(`  Lines: ${content.split('\n').length}`);
 
   // Use oxc adapter for module analysis
-  const { analyzeModuleIDs } = await import('./oxc-adapter');
+  const { analyzeHostBoundary, analyzeModuleIDs } = await import('./oxc-adapter');
   const scan = await analyzeModuleIDs(content);
+  const boundary = analyzeHostBoundary(content);
   const found = new Set<string>([
     ...scan.static,
     ...scan.dynamicLiteral,
@@ -549,6 +835,7 @@ export async function analyze(bundlePath: string, options?: AnalyzeOptions): Pro
 
   const violations: string[] = Array.from(found).filter((m) => {
     if (whitelist.has(m)) return false;
+    if (isHostModuleId(m)) return false;
     if (m.startsWith('./') || m.startsWith('../')) return false;
     if (/^(data:|blob:|http:|https:|file:)/.test(m)) return false;
     if (m.includes('\0')) return false;
@@ -562,12 +849,54 @@ export async function analyze(bundlePath: string, options?: AnalyzeOptions): Pro
     violations.push(`eval_calls:${scan.evalCount}`);
   }
 
+  for (const violation of boundary.violations) {
+    violations.push(violation.message);
+  }
+
+  const contract = await resolveContract(options ?? {});
+  if (contract) {
+    violations.push(
+      ...validateBoundaryAgainstContract(boundary, contract, {
+        checkMissingGuestExports: false,
+      })
+    );
+  }
+
+  if (boundary.hostCapabilities.length > 0) {
+    console.log('  Host capabilities:');
+    for (const capability of boundary.hostCapabilities) {
+      console.log(`    - ${capability}`);
+    }
+  }
+
+  if (boundary.guestExports.length > 0) {
+    console.log('  Guest exports:');
+    for (const exportName of boundary.guestExports) {
+      console.log(`    - ${exportName}`);
+    }
+  }
+
   if (violations.length > 0) {
-    const msg = `Found non-whitelisted modules: ${violations.join(', ')}`;
+    const hasOnlyModuleViolations = violations.every(
+      (violation) =>
+        found.has(violation) ||
+        violation.startsWith('dynamic_import_non_literal:') ||
+        violation.startsWith('eval_calls:')
+    );
+    const msg = hasOnlyModuleViolations
+      ? `Found non-whitelisted modules: ${violations.join(', ')}`
+      : `Found Rill boundary violations: ${violations.join(', ')}`;
     if (options?.failOnViolation) {
       throw new Error(msg);
     } else {
       console.warn(`  ⚠ Warning: ${msg}`);
     }
   }
+
+  return {
+    modules: Array.from(found).sort(),
+    hostCapabilities: boundary.hostCapabilities,
+    guestExports: boundary.guestExports,
+    violations,
+  };
 }

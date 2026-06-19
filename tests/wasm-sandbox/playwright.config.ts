@@ -1,5 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const reporter = process.env.PLAYWRIGHT_REPORTER === 'html' ? 'html' : 'line';
+
 export default defineConfig({
   testDir: './',
   testMatch: '**/*.e2e.ts',
@@ -7,7 +9,7 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
   workers: process.env.CI ? 1 : undefined,
-  reporter: 'html',
+  reporter,
   timeout: 30000,
 
   use: {
@@ -18,7 +20,12 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
+      use: {
+        ...devices['Desktop Chrome'],
+        ...(process.env.PLAYWRIGHT_CHROME_CHANNEL
+          ? { channel: process.env.PLAYWRIGHT_CHROME_CHANNEL }
+          : {}),
+      },
     },
   ],
 });

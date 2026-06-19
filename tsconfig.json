@@ -42,6 +42,7 @@
     "paths": {
       "@rill/runtime": ["./src/host/index.ts"],
       "rill": ["./src/host/index.ts"],
+      "rill/contract": ["./src/contract/index.ts"],
       "rill/*": ["./src/*"],
       "react-native": ["./src/__mocks__/react-native.ts"]
     }

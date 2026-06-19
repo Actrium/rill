@@ -505,6 +505,8 @@ build_app() {
         log_info "Using Release config for Hermes (workaround for macOS Debug hang)"
     fi
 
+    local CODE_SIGNING_ALLOWED="${RILL_E2E_CODE_SIGNING_ALLOWED:-NO}"
+
     xcodebuild \
         -workspace RillMacOSTest.xcworkspace \
         -scheme "$SCHEME" \
@@ -512,6 +514,9 @@ build_app() {
         -derivedDataPath build \
         -jobs "$JOBS" \
         ONLY_ACTIVE_ARCH=YES \
+        CODE_SIGNING_ALLOWED="$CODE_SIGNING_ALLOWED" \
+        CODE_SIGNING_REQUIRED=NO \
+        CODE_SIGN_IDENTITY="" \
         build \
         2>&1 | tee /tmp/rill-bridgeless-build.log | grep -E "^(Build |error:|warning:)" || true
 

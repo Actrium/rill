@@ -34,6 +34,12 @@ target 'RillMacOSTest-macOS' do
 
     # Silence Xcode warnings about script phases without outputs
     installer.pods_project.targets.each do |target|
+      if target.name == 'fmt'
+        target.build_configurations.each do |config|
+          config.build_settings['CLANG_CXX_LANGUAGE_STANDARD'] = 'c++17'
+        end
+      end
+
       target.build_phases.each do |phase|
         next unless phase.is_a?(Xcodeproj::Project::Object::PBXShellScriptBuildPhase)
         if phase.name&.include?('Hermes') || phase.name&.include?('Bundle React Native')

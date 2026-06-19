@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { analyzeJSXProps, analyzeModuleIDs } from './oxc-adapter';
+import { analyzeHostBoundary, analyzeJSXProps, analyzeModuleIDs } from './oxc-adapter';
 
 describe('oxcAdapter - Module ID Analysis', () => {
   describe('Basic Functionality', () => {
@@ -68,6 +68,19 @@ describe('oxcAdapter - Module ID Analysis', () => {
       expect(result).toBeDefined();
       expect(Array.isArray(result.static)).toBe(true);
       expect(Array.isArray(result.details)).toBe(true);
+    });
+
+    test('should not treat local exports as module dependencies', async () => {
+      const code = `
+        export async function refresh() {}
+        export const ping = () => {};
+        export default function Guest() {}
+      `;
+      const result = await analyzeModuleIDs(code);
+
+      expect(result.static).not.toContain('refresh');
+      expect(result.static).not.toContain('ping');
+      expect(result.static).not.toContain('Guest');
     });
 
     test('should detect require calls', async () => {
@@ -179,6 +192,62 @@ describe('oxcAdapter - Module ID Analysis', () => {
         expect(result.details[0]).toHaveProperty('moduleId');
       }
     });
+  });
+});
+
+describe('oxcAdapter - Host Boundary Analysis', () => {
+  test('should collect static named host imports and guest exports', () => {
+    const code = `
+      import { openProfile as open, closeProfile } from 'host:navigation';
+      import { track } from 'host:analytics';
+
+      export async function refresh() {}
+      export const ping = () => {};
+      export default function Guest() {}
+    `;
+
+    const result = analyzeHostBoundary(code);
+
+    expect(result.hostCapabilities).toEqual([
+      'host:analytics.track',
+      'host:navigation.closeProfile',
+      'host:navigation.openProfile',
+    ]);
+    expect(result.guestExports).toEqual(['ping', 'refresh']);
+    expect(result.hasDefaultExport).toBe(true);
+    expect(result.violations).toHaveLength(0);
+  });
+
+  test('should reject non-named host import shapes', () => {
+    const code = `
+      import nav from 'host:navigation';
+      import * as theme from 'host:theme';
+      import 'host:analytics';
+      export { readText } from 'host:clipboard';
+    `;
+
+    const result = analyzeHostBoundary(code);
+
+    expect(result.violations.map((violation) => violation.code)).toEqual([
+      'host-import-default',
+      'host-import-namespace',
+      'host-import-bare',
+      'host-reexport',
+    ]);
+  });
+
+  test('should reject dynamic import and require for host modules', () => {
+    const code = `
+      const navigation = require('host:navigation');
+      const theme = await import('host:theme');
+    `;
+
+    const result = analyzeHostBoundary(code);
+
+    expect(result.violations.map((violation) => violation.code)).toContain('host-require');
+    expect(result.violations.map((violation) => violation.code)).toContain(
+      'host-dynamic-import'
+    );
   });
 });
 

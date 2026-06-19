@@ -33,9 +33,28 @@ else
 fi
 
 # Install Playwright if needed
-if ! npx playwright --version &> /dev/null; then
+PLAYWRIGHT_CLI="$ROOT_DIR/node_modules/playwright/cli.js"
+find_node() {
+  for candidate in "${PLAYWRIGHT_NODE:-}" "${NODE:-}" node "$HOME/.local/n/bin/node" /usr/local/bin/node /opt/homebrew/bin/node /usr/bin/node; do
+    if [[ -n "$candidate" ]] && "$candidate" --version &> /dev/null; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if [[ -f "$PLAYWRIGHT_CLI" ]] && NODE_BIN="$(find_node)"; then
+  PLAYWRIGHT_CMD=("$NODE_BIN" "$PLAYWRIGHT_CLI")
+elif [[ -f "$PLAYWRIGHT_CLI" ]]; then
+  PLAYWRIGHT_CMD=(bun "$PLAYWRIGHT_CLI")
+else
+  PLAYWRIGHT_CMD=(bun x playwright)
+fi
+
+if ! "${PLAYWRIGHT_CMD[@]}" --version &> /dev/null; then
   echo "[INFO] Installing Playwright..."
-  npx playwright install chromium
+  "${PLAYWRIGHT_CMD[@]}" install chromium
 fi
 
 # Run tests

@@ -6,5 +6,10 @@
  * CLI executable entrypoint: `src/cli/bin.ts`
  */
 
-export type { AnalyzeOptions, BuildOptions } from './build';
+export type {
+  AnalyzeOptions,
+  AnalyzeResult,
+  BuildOptions,
+  GuestCapabilitiesManifest,
+} from './build';
 export { analyze, build } from './build';

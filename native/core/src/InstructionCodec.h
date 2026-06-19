@@ -29,6 +29,7 @@
 #include "InstructionDecoder.h"
 
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <unordered_map>
 #include <chrono>

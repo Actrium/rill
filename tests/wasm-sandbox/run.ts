@@ -4,7 +4,7 @@
  * Copies WASM files, starts server, and runs Playwright tests
  */
 
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { copyFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import net from 'net';
@@ -13,6 +13,30 @@ const ROOT = join(import.meta.dir, '../..');
 const E2E_DIR = import.meta.dir;
 const DIST_DIR = join(E2E_DIR, 'dist');
 const WASM_SRC = join(ROOT, 'src/host/sandbox/wasm');
+const PLAYWRIGHT_CLI = join(ROOT, 'node_modules/playwright/cli.js');
+
+function findNodeCommand(): string | undefined {
+  const home = process.env.HOME;
+  const candidates = [
+    process.env.PLAYWRIGHT_NODE,
+    process.env.NODE,
+    'node',
+    home ? join(home, '.local/n/bin/node') : undefined,
+    '/usr/local/bin/node',
+    '/opt/homebrew/bin/node',
+    '/usr/bin/node',
+  ];
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const result = spawnSync(candidate, ['--version'], { stdio: 'ignore' });
+    if (result.status === 0) {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
 
 async function copyWASMFiles() {
   console.log('Copying WASM files...');
@@ -96,19 +120,20 @@ async function main() {
 
   console.log(`Server started on http://127.0.0.1:${port}`);
 
-  // Run Playwright
-  const playwright = spawn(
-    'npx',
-    ['playwright', 'test', '--config', 'tests/wasm-sandbox/playwright.config.ts'],
-    {
-      stdio: 'inherit',
-      cwd: ROOT,
-      env: {
-        ...process.env,
-        TEST_PORT: String(port),
-      },
-    }
-  );
+  const nodeCommand = findNodeCommand();
+  const playwrightCommand = existsSync(PLAYWRIGHT_CLI) && nodeCommand ? nodeCommand : process.execPath;
+  const playwrightArgs = existsSync(PLAYWRIGHT_CLI)
+    ? [PLAYWRIGHT_CLI, 'test', '--config', 'tests/wasm-sandbox/playwright.config.ts']
+    : ['x', 'playwright', 'test', '--config', 'tests/wasm-sandbox/playwright.config.ts'];
+
+  const playwright = spawn(playwrightCommand, playwrightArgs, {
+    stdio: 'inherit',
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      TEST_PORT: String(port),
+    },
+  });
 
   playwright.on('close', async (code) => {
     server.stop();

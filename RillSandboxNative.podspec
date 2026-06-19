@@ -67,13 +67,13 @@ Pod::Spec.new do |s|
     ]
   elsif sandbox_engine == 'hermes'
     s.source_files = common_sources + [
-      "native/hermes/src/**/*.{h,cpp}"
+      "native/hermes/src/HermesSandboxJSI.{h,cpp}"
     ]
     s.public_header_files = [
       "native/core/src/SandboxEngineConfig.h",
       "native/core/src/RillSandboxNativeTurboModule.h",
       "native/core/src/RillOrchestrator.h",
-      "native/hermes/src/**/*.h"
+      "native/hermes/src/HermesSandboxJSI.h"
     ]
     # Hermes sandbox needs hermes-engine from React Native (not CocoaPods trunk which is outdated 0.11.0)
     # The app's Podfile must either:

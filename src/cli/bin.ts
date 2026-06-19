@@ -7,8 +7,16 @@
 
 import { program } from 'commander';
 import { version } from '../../package.json';
-import type { BuildOptions } from './build';
+import type { AnalyzeOptions, BuildOptions } from './build';
 import { build } from './build';
+
+type BuildCommandOptions = Omit<Partial<BuildOptions>, 'contract'> & {
+  contract?: string;
+};
+
+type AnalyzeCommandOptions = Omit<AnalyzeOptions, 'contract' | 'contractFile'> & {
+  contract?: string;
+};
 
 program
   .name('rill')
@@ -24,6 +32,8 @@ program
   .option('--sourcemap', 'Generate sourcemap')
   .option('--watch', 'Watch mode for development')
   .option('--metafile <path>', 'Output build metadata to file')
+  .option('--contract <path>', 'Contract module path exporting `contract` or default contract')
+  .option('--capability-manifest <path>', 'Output host capability manifest to file')
   .option('--no-strict', 'Disable strict post-build dependency guard (not recommended)')
   .option(
     '--strict-peer-versions',
@@ -31,7 +41,7 @@ program
   )
   .option('--footer <path>', 'Custom footer file (replaces default auto-render)')
   .option('--dev', 'Dev mode - inject source locations for DevTools navigation')
-  .action(async (entry: string, options: Partial<BuildOptions>) => {
+  .action(async (entry: string, options: BuildCommandOptions) => {
     try {
       const buildOpts: BuildOptions = {
         entry,
@@ -44,6 +54,12 @@ program
       };
       if (options.metafile !== undefined) {
         buildOpts.metafile = options.metafile;
+      }
+      if (options.contract !== undefined) {
+        buildOpts.contractFile = options.contract;
+      }
+      if (options.capabilityManifest !== undefined) {
+        buildOpts.capabilityManifest = options.capabilityManifest;
       }
       if (options.footer !== undefined) {
         buildOpts.footer = options.footer;
@@ -68,43 +84,30 @@ program
     'react/jsx-runtime',
     'rill/guest',
   ])
+  .option('--contract <path>', 'Contract module path exporting `contract` or default contract')
   .option('--fail-on-violation', 'Fail when non-whitelisted deps are found')
   .option('--treat-eval-as-violation', 'Treat eval() usage as violation')
   .option(
     '--treat-dynamic-non-literal-as-violation',
     'Treat dynamic import with non-literal specifier as violation'
   )
-  .action(
-    async (
-      bundle: string,
-      opts: {
-        whitelist?: string[];
-        failOnViolation?: boolean;
-        treatEvalAsViolation?: boolean;
-        treatDynamicNonLiteralAsViolation?: boolean;
-      }
-    ) => {
-      try {
-        const { analyze } = await import('./build');
-        const analyzeOpts: {
-          whitelist?: string[];
-          failOnViolation?: boolean;
-          treatEvalAsViolation?: boolean;
-          treatDynamicNonLiteralAsViolation?: boolean;
-        } = {};
-        if (opts.whitelist !== undefined) analyzeOpts.whitelist = opts.whitelist;
-        if (opts.failOnViolation !== undefined) analyzeOpts.failOnViolation = opts.failOnViolation;
-        if (opts.treatEvalAsViolation !== undefined)
-          analyzeOpts.treatEvalAsViolation = opts.treatEvalAsViolation;
-        if (opts.treatDynamicNonLiteralAsViolation !== undefined)
-          analyzeOpts.treatDynamicNonLiteralAsViolation = opts.treatDynamicNonLiteralAsViolation;
-        await analyze(bundle, analyzeOpts);
-      } catch (error) {
-        console.error('Analyze failed:', error instanceof Error ? error.message : String(error));
-        process.exit(1);
-      }
+  .action(async (bundle: string, opts: AnalyzeCommandOptions) => {
+    try {
+      const { analyze } = await import('./build');
+      const analyzeOpts: AnalyzeOptions = {};
+      if (opts.whitelist !== undefined) analyzeOpts.whitelist = opts.whitelist;
+      if (opts.contract !== undefined) analyzeOpts.contractFile = opts.contract;
+      if (opts.failOnViolation !== undefined) analyzeOpts.failOnViolation = opts.failOnViolation;
+      if (opts.treatEvalAsViolation !== undefined)
+        analyzeOpts.treatEvalAsViolation = opts.treatEvalAsViolation;
+      if (opts.treatDynamicNonLiteralAsViolation !== undefined)
+        analyzeOpts.treatDynamicNonLiteralAsViolation = opts.treatDynamicNonLiteralAsViolation;
+      await analyze(bundle, analyzeOpts);
+    } catch (error) {
+      console.error('Analyze failed:', error instanceof Error ? error.message : String(error));
+      process.exit(1);
     }
-  );
+  });
 
 program
   .command('init')
