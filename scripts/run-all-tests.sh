@@ -58,6 +58,7 @@ RUN_NATIVE=true
 RUN_E2E=true
 RUN_UNIT=true
 RUN_RN=false  # RN macOS E2E is opt-in (requires Xcode build)
+RUN_IOS_SIM=false  # iOS Simulator E2E is opt-in (requires Xcode simulator)
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -65,6 +66,7 @@ while [[ $# -gt 0 ]]; do
     --skip-e2e) RUN_E2E=false; shift ;;
     --skip-unit) RUN_UNIT=false; shift ;;
     --with-rn) RUN_RN=true; shift ;;
+    --with-ios-sim) RUN_IOS_SIM=true; shift ;;
     --help)
       echo ""
       echo "Usage: $0 [options]"
@@ -74,6 +76,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --skip-e2e       Skip browser E2E tests"
       echo "  --skip-unit      Skip bun unit tests"
       echo "  --with-rn        Include React Native macOS E2E tests (requires Xcode)"
+      echo "  --with-ios-sim   Include iOS Simulator E2E tests (requires Xcode simulator)"
       echo "  --help           Show this help"
       exit 0
       ;;
@@ -123,6 +126,19 @@ if [[ "$RUN_RN" == true ]]; then
     fi
   else
     skip_suite "E2E: React Native macOS" "macOS only"
+  fi
+fi
+
+# ============================================
+# 6. iOS Simulator E2E (opt-in, requires Xcode simulator)
+# ============================================
+if [[ "$RUN_IOS_SIM" == true ]]; then
+  if [[ "$(uname)" == "Darwin" ]]; then
+    if [[ -f "$ROOT_DIR/examples/ios-demo/run-e2e.sh" ]]; then
+      run_suite "E2E: iOS Simulator" "bash $ROOT_DIR/examples/ios-demo/run-e2e.sh"
+    fi
+  else
+    skip_suite "E2E: iOS Simulator" "macOS only"
   fi
 fi
 

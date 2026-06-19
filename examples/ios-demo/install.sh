@@ -180,6 +180,20 @@ ensure_codegen_placeholders() {
         "$dir/RCTUnstableModulesRequiringMainQueueSetupProvider.mm"
 }
 
+project_has_sandbox_config() {
+    local sandbox="$1"
+    local macro=""
+
+    case "$sandbox" in
+        jsc) macro="RILL_SANDBOX_JSC=1" ;;
+        hermes) macro="RILL_SANDBOX_HERMES=1" ;;
+        quickjs) macro="RILL_SANDBOX_QUICKJS=1" ;;
+        *) return 1 ;;
+    esac
+
+    grep -q "\"$macro\"" ios-demo.xcodeproj/project.pbxproj 2>/dev/null
+}
+
 # Boot simulator
 BOOT_STATE=$(xcrun simctl list devices | grep "$DEVICE_ID" | grep -o "(Booted)" || true)
 if [ -z "$BOOT_STATE" ]; then
@@ -220,7 +234,7 @@ for CONFIG in "${CONFIGS_TO_INSTALL[@]}"; do
     # Switch configuration (pod install) — skip if cached for this sandbox engine
     CACHE_FILE=".rill_pod_cache"
     CURRENT_KEY="${SANDBOX}"
-    if [ -f "$CACHE_FILE" ] && [ "$(cat "$CACHE_FILE")" = "$CURRENT_KEY" ] && [ -d "Pods" ]; then
+    if [ -f "$CACHE_FILE" ] && [ "$(cat "$CACHE_FILE")" = "$CURRENT_KEY" ] && [ -d "Pods" ] && project_has_sandbox_config "$SANDBOX"; then
         echo "[${CONFIG}] Pods cached for $SANDBOX, skipping pod install"
     else
         echo "[${CONFIG}] Configuring pods..."
@@ -397,6 +411,7 @@ if [ ${#FAILED[@]} -gt 0 ]; then
     for f in "${FAILED[@]}"; do
         echo "  - $f"
     done
+    exit 1
 fi
 
 echo ""

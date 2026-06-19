@@ -56,9 +56,22 @@ struct ConfigurationBanner: View {
 struct ReactNativeContainerView: UIViewRepresentable {
     func makeUIView(context: Context) -> UIView {
         let container = UIView()
+        let env = ProcessInfo.processInfo.environment
+        var initialProperties: [String: Any] = [:]
+
+        if env["RILL_IOS_E2E"] == "1" {
+            initialProperties["rillE2E"] = true
+        }
+
+        if let sandboxTarget = env["RILL_SANDBOX_TARGET"], !sandboxTarget.isEmpty {
+            initialProperties["rillSandbox"] = sandboxTarget
+        }
 
         let factory = ReactNativeFactory.sharedInstance()
-        let rootView = factory.createRootView(withModuleName: "RillDemo", initialProperties: nil)
+        let rootView = factory.createRootView(
+            withModuleName: "RillDemo",
+            initialProperties: initialProperties.isEmpty ? nil : initialProperties
+        )
         rootView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(rootView)
 

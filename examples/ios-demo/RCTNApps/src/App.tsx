@@ -149,10 +149,27 @@ const GUEST_CODE = `
 
 // Detect available sandbox engines (JSI globals installed by native side)
 declare const global: {
-  __JSCSandboxJSI?: { isAvailable(): boolean };
-  __HermesSandboxJSI?: { isAvailable(): boolean };
-  __QuickJSSandboxJSI?: { isAvailable(): boolean };
+  __JSCSandboxJSI?: SandboxModule;
+  __HermesSandboxJSI?: SandboxModule;
+  __QuickJSSandboxJSI?: SandboxModule;
 };
+
+interface SandboxContext {
+  eval(code: string): unknown;
+  inject(name: string, value: unknown): void;
+  extract(name: string): unknown;
+  dispose(): void;
+}
+
+interface SandboxRuntime {
+  createContext(): SandboxContext;
+  dispose(): void;
+}
+
+interface SandboxModule {
+  createRuntime(options?: { timeout?: number }): SandboxRuntime;
+  isAvailable(): boolean;
+}
 
 function getDetectedEngines(): string[] {
   const engines: string[] = [];
@@ -178,6 +195,7 @@ const RillPerformanceBridge = NativeModules.RillPerformanceBridge as
       evalInSandbox(code: string, engine: string): number;
       evalBytecodeAsset(path: string, engine: string): number;
       readAsset(path: string): string;
+      log(message: string): boolean;
     }
   | undefined;
 
@@ -442,8 +460,215 @@ function AndroidPerformanceDashboard({ sandboxEngine }: { sandboxEngine: string 
   );
 }
 
-export default function App() {
+function normalizeSandboxEngine(value: unknown): 'jsc' | 'quickjs' | 'hermes' | '' {
+  if (value === 'jsc' || value === 'quickjs' || value === 'hermes') return value;
+  return '';
+}
+
+function getSandboxModule(engineHint: string): { label: string; module: SandboxModule } {
+  const requested = normalizeSandboxEngine(engineHint);
+  const ordered: Array<[string, SandboxModule | undefined]> =
+    requested === 'jsc'
+      ? [['JSC', global.__JSCSandboxJSI]]
+      : requested === 'quickjs'
+        ? [['QuickJS', global.__QuickJSSandboxJSI]]
+        : requested === 'hermes'
+          ? [['Hermes', global.__HermesSandboxJSI]]
+          : [
+              ['QuickJS', global.__QuickJSSandboxJSI],
+              ['Hermes', global.__HermesSandboxJSI],
+              ['JSC', global.__JSCSandboxJSI],
+            ];
+
+  for (const [label, module] of ordered) {
+    if (module?.isAvailable?.()) {
+      return { label, module };
+    }
+  }
+
+  throw new Error(`No available sandbox module for ${engineHint || 'auto'}`);
+}
+
+function assertE2E(condition: unknown, message: string): asserts condition {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
+
+function logE2E(message: string) {
+  console.log(message);
+  if (!RillPerformanceBridge?.log) {
+    return;
+  }
+  try {
+    RillPerformanceBridge.log(message);
+  } catch (error) {
+    console.log(
+      `>>>RILL_IOS_E2E_RESULT<<< ${JSON.stringify({
+        name: 'native log',
+        status: 'failed',
+        error: error instanceof Error ? error.message : String(error),
+      })}`
+    );
+  }
+}
+
+async function runIOSE2EChecks(engineHint: string) {
+  const results: Array<{ name: string; status: 'passed' | 'failed'; error?: string }> = [];
+
+  const run = async (name: string, fn: () => void | Promise<void>) => {
+    try {
+      await fn();
+      results.push({ name, status: 'passed' });
+      logE2E(`>>>RILL_IOS_E2E_RESULT<<< ${JSON.stringify({ name, status: 'passed' })}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      results.push({ name, status: 'failed', error: message });
+      logE2E(
+        `>>>RILL_IOS_E2E_RESULT<<< ${JSON.stringify({ name, status: 'failed', error: message })}`
+      );
+    }
+  };
+
+  logE2E('>>>RILL_IOS_E2E_START<<<');
+  logE2E(`Target: ${engineHint || 'auto'}`);
+
+  await run('detect requested sandbox module', () => {
+    const { label } = getSandboxModule(engineHint);
+    if (engineHint) {
+      assertE2E(label.toLowerCase() === engineHint, `expected ${engineHint}, got ${label}`);
+    }
+  });
+
+  await run('eval basic expression', () => {
+    const { module } = getSandboxModule(engineHint);
+    const runtime = module.createRuntime({ timeout: 5000 });
+    const ctx = runtime.createContext();
+    try {
+      assertE2E(ctx.eval('1 + 2') === 3, '1 + 2 did not evaluate to 3');
+    } finally {
+      ctx.dispose();
+      runtime.dispose();
+    }
+  });
+
+  await run('host function callable from guest', () => {
+    const { module } = getSandboxModule(engineHint);
+    const runtime = module.createRuntime({ timeout: 5000 });
+    const ctx = runtime.createContext();
+    try {
+      let received = '';
+      ctx.inject('hostFn', (value: unknown) => {
+        received = String(value);
+        return `${received}:host`;
+      });
+      assertE2E(ctx.eval('hostFn("guest")') === 'guest:host', 'host callback result mismatch');
+      assertE2E(received === 'guest', 'host callback argument mismatch');
+    } finally {
+      ctx.dispose();
+      runtime.dispose();
+    }
+  });
+
+  await run('guest function callable from host', () => {
+    const { module } = getSandboxModule(engineHint);
+    const runtime = module.createRuntime({ timeout: 5000 });
+    const ctx = runtime.createContext();
+    try {
+      ctx.eval('function guestDouble(x) { return x * 2; }');
+      const guestDouble = ctx.extract('guestDouble') as (value: number) => number;
+      assertE2E(typeof guestDouble === 'function', 'guest function was not extracted');
+      assertE2E(guestDouble(21) === 42, 'guest function result mismatch');
+    } finally {
+      ctx.dispose();
+      runtime.dispose();
+    }
+  });
+
+  await run('complex values round-trip', () => {
+    const { module } = getSandboxModule(engineHint);
+    const runtime = module.createRuntime({ timeout: 5000 });
+    const ctx = runtime.createContext();
+    try {
+      ctx.inject('hostData', { nested: { ok: true }, list: [1, 2, 3] });
+      assertE2E(ctx.eval('hostData.nested.ok') === true, 'nested object value mismatch');
+      assertE2E(ctx.eval('hostData.list[2]') === 3, 'array value mismatch');
+    } finally {
+      ctx.dispose();
+      runtime.dispose();
+    }
+  });
+
+  await run('errors propagate to host', () => {
+    const { module } = getSandboxModule(engineHint);
+    const runtime = module.createRuntime({ timeout: 5000 });
+    const ctx = runtime.createContext();
+    try {
+      let threw = false;
+      try {
+        ctx.eval('throw new Error("ios-e2e-error")');
+      } catch {
+        threw = true;
+      }
+      assertE2E(threw, 'guest error did not propagate');
+    } finally {
+      ctx.dispose();
+      runtime.dispose();
+    }
+  });
+
+  await run('contexts are isolated', () => {
+    const { module } = getSandboxModule(engineHint);
+    const runtime = module.createRuntime({ timeout: 5000 });
+    const ctx1 = runtime.createContext();
+    const ctx2 = runtime.createContext();
+    try {
+      ctx1.eval('var sharedName = "ctx1"');
+      ctx2.eval('var sharedName = "ctx2"');
+      assertE2E(ctx1.eval('sharedName') === 'ctx1', 'ctx1 global mismatch');
+      assertE2E(ctx2.eval('sharedName') === 'ctx2', 'ctx2 global mismatch');
+    } finally {
+      ctx1.dispose();
+      ctx2.dispose();
+      runtime.dispose();
+    }
+  });
+
+  await run('disposed context rejects eval', () => {
+    const { module } = getSandboxModule(engineHint);
+    const runtime = module.createRuntime({ timeout: 5000 });
+    const ctx = runtime.createContext();
+    try {
+      ctx.dispose();
+      let threw = false;
+      try {
+        ctx.eval('1 + 1');
+      } catch {
+        threw = true;
+      }
+      assertE2E(threw, 'disposed context accepted eval');
+    } finally {
+      runtime.dispose();
+    }
+  });
+
+  await run('native performance bridge can reach sandbox', () => {
+    assertE2E(RillPerformanceBridge, 'RillPerformanceBridge is unavailable');
+    const evalMs = RillPerformanceBridge.evalInSandbox('1 + 1', engineHint);
+    assertE2E(Number.isFinite(evalMs) && evalMs >= 0, `evalInSandbox returned ${evalMs}`);
+    const rttMs = RillPerformanceBridge.measureJSIRTT(100);
+    assertE2E(Number.isFinite(rttMs) && rttMs >= 0, `measureJSIRTT returned ${rttMs}`);
+  });
+
+  const failed = results.filter((result) => result.status === 'failed');
+  logE2E(`Summary: ${results.length - failed.length} passed, ${failed.length} failed`);
+  logE2E(failed.length === 0 ? 'EXIT_CODE:0' : 'EXIT_CODE:1');
+  logE2E('>>>RILL_IOS_E2E_END<<<');
+}
+
+export default function App(props: { rillE2E?: boolean; rillSandbox?: string }) {
   const engines = useMemo(() => getDetectedEngines(), []);
+  const e2eStartedRef = useRef(false);
 
   // Create Engine and register default RN components
   const engine = useMemo(() => {
@@ -468,8 +693,22 @@ export default function App() {
   const engineLabel = engines.length > 0 ? engines.join(', ') : 'None detected';
 
   const sandboxEngine = useMemo(() => {
-    return RillDemoConfig?.sandboxEngine ?? '';
-  }, []);
+    return normalizeSandboxEngine(props.rillSandbox) || RillDemoConfig?.sandboxEngine || '';
+  }, [props.rillSandbox]);
+
+  useEffect(() => {
+    if (!props.rillE2E || e2eStartedRef.current || loadingState !== 'loaded') {
+      return;
+    }
+
+    e2eStartedRef.current = true;
+    runIOSE2EChecks(sandboxEngine).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      logE2E(`>>>RILL_IOS_E2E_RESULT<<< ${JSON.stringify({ name: 'runner', status: 'failed', error: message })}`);
+      logE2E('EXIT_CODE:1');
+      logE2E('>>>RILL_IOS_E2E_END<<<');
+    });
+  }, [props.rillE2E, loadingState, sandboxEngine]);
 
   return (
     <SafeAreaView style={styles.container}>

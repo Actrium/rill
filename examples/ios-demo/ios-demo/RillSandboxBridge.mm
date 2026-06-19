@@ -199,6 +199,15 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(readAsset:(NSString *)path) {
     return content ?: @"";
 }
 
+// ── Test logging ────────────────────────────────────────────────────────────
+
+RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(log:(NSString *)message) {
+    NSLog(@"%@", message);
+    fprintf(stderr, "%s\n", [message UTF8String]);
+    fflush(stderr);
+    return @(YES);
+}
+
 #pragma mark - Internal JSI methods
 
 /// Get the host JSI runtime on-demand (mirrors Android's javaScriptContextHolder.get()).
