@@ -452,6 +452,7 @@ function wrapSubscriptionDispatch(
       );
     }
 
+    // Reason: the Guest handler and its events cross the runtime boundary as untrusted values.
     const guestHandler = handler as (event: unknown) => void;
     const wrappedHandler = schema?.parseEvent
       ? (event: unknown): void => {
@@ -472,12 +473,14 @@ function wrapSubscriptionDispatch(
   };
 }
 
+// Reason: boundary parsers receive arbitrary cross-runtime input and return a narrowed value.
 function runBoundary(
   parse: (value: unknown) => unknown,
   value: unknown,
   moduleId: string,
   exportName: string,
   phase: HostModuleBoundaryPhase,
+  // Reason: returns the parsed (narrowed) value, or throws when the boundary rejects it.
   options: HostModuleDispatchOptions
 ): unknown {
   try {
@@ -494,10 +497,12 @@ function runBoundary(
   }
 }
 
+// Reason: type guard narrows an arbitrary runtime value to a thenable.
 function isThenable(value: unknown): value is PromiseLike<unknown> {
   return (
     value != null &&
     (typeof value === 'object' || typeof value === 'function') &&
+    // Reason: probe the value's then property without assuming its shape.
     typeof (value as { then?: unknown }).then === 'function'
   );
 }
