@@ -148,6 +148,12 @@ class RillPerformanceBridge(private val reactContext: ReactApplicationContext) :
         }
     }
 
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    fun log(message: String): Boolean {
+        Log.i("RILL_ANDROID_E2E", message)
+        return true
+    }
+
     // ── JNI declarations ────────────────────────────────────────────────────
 
     private external fun nativeMeasureJSIRTT(runtimePtr: Long, iterations: Int): Double

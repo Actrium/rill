@@ -7,7 +7,7 @@ Example applications demonstrating the rill SDK across different platforms.
 | Example | Platform | Status | Description |
 |---------|----------|--------|-------------|
 | [ios-demo](./ios-demo/) | iOS | Ready | Full iOS app with performance dashboard, 3 sandbox engines (JSC/Hermes/QuickJS), Bridgeless only |
-| [android-demo](./android-demo/) | Android | Placeholder | Android app with Hermes and QuickJS sandboxes |
+| [android-demo](./android-demo/) | Android | Ready | Android app with Hermes and QuickJS sandboxes plus emulator E2E runner |
 | [macos-demo](./macos-demo/) | macOS | Placeholder | macOS app via `react-native-macos` |
 | [windows-demo](./windows-demo/) | Windows | Placeholder | Windows app via `react-native-windows` |
 

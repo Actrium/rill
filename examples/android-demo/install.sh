@@ -220,6 +220,16 @@ ensure_gradle_wrapper() {
 
 ensure_gradle_wrapper
 
+GRADLE_COMMON_ARGS=()
+if [ -n "${RILL_ANDROID_GRADLE_INIT:-}" ]; then
+    GRADLE_COMMON_ARGS+=("-I" "$RILL_ANDROID_GRADLE_INIT")
+fi
+if [ -n "${RILL_ANDROID_GRADLE_ARGS:-}" ]; then
+    # Intentional shell splitting: callers pass Gradle CLI flags as a single env string.
+    EXTRA_GRADLE_ARGS=($RILL_ANDROID_GRADLE_ARGS)
+    GRADLE_COMMON_ARGS+=("${EXTRA_GRADLE_ARGS[@]}")
+fi
+
 # Bundle JS into APK assets (like iOS install.sh bundles into .app)
 bundle_js() {
     local ASSETS_DIR="android/app/src/main/assets"
@@ -267,14 +277,14 @@ for CONFIG in "${CONFIGS_TO_INSTALL[@]}"; do
 
     # Build
     if [ "$VERBOSE" -eq 1 ]; then
-        if ! (cd android && ./gradlew "$GRADLE_TASK" 2>&1 | tee "$BUILD_LOG"); then
+        if ! (cd android && ./gradlew "${GRADLE_COMMON_ARGS[@]}" "$GRADLE_TASK" 2>&1 | tee "$BUILD_LOG"); then
             echo ""
             echo "Build failed for $CONFIG (see $BUILD_LOG)"
             exit 1
         fi
     else
         echo "Building $CONFIG... (log: $BUILD_LOG)"
-        if ! (cd android && ./gradlew "$GRADLE_TASK" >"$BUILD_LOG" 2>&1); then
+        if ! (cd android && ./gradlew "${GRADLE_COMMON_ARGS[@]}" "$GRADLE_TASK" >"$BUILD_LOG" 2>&1); then
             echo "Build failed for $CONFIG (see $BUILD_LOG)"
             tail -n 40 "$BUILD_LOG" || true
             exit 1

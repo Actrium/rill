@@ -80,6 +80,7 @@
     "test:e2e:rn:hermes-quickjs": "bash tests/rn-macos-bridgeless/run-tests.sh hermes-quickjs",
     "test:e2e:rn:hermes-hermes": "bash tests/rn-macos-bridgeless/run-tests.sh hermes-hermes",
     "test:e2e:ios-sim": "bash examples/ios-demo/run-e2e.sh",
+    "test:e2e:android-emulator": "bash examples/android-demo/run-e2e.sh",
     "test:ci": "bash scripts/run-all-tests.sh",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",

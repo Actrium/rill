@@ -59,6 +59,7 @@ RUN_E2E=true
 RUN_UNIT=true
 RUN_RN=false  # RN macOS E2E is opt-in (requires Xcode build)
 RUN_IOS_SIM=false  # iOS Simulator E2E is opt-in (requires Xcode simulator)
+RUN_ANDROID_EMULATOR=false  # Android Emulator E2E is opt-in (requires Android SDK/AVD)
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -67,6 +68,7 @@ while [[ $# -gt 0 ]]; do
     --skip-unit) RUN_UNIT=false; shift ;;
     --with-rn) RUN_RN=true; shift ;;
     --with-ios-sim) RUN_IOS_SIM=true; shift ;;
+    --with-android-emulator) RUN_ANDROID_EMULATOR=true; shift ;;
     --help)
       echo ""
       echo "Usage: $0 [options]"
@@ -77,6 +79,8 @@ while [[ $# -gt 0 ]]; do
       echo "  --skip-unit      Skip bun unit tests"
       echo "  --with-rn        Include React Native macOS E2E tests (requires Xcode)"
       echo "  --with-ios-sim   Include iOS Simulator E2E tests (requires Xcode simulator)"
+      echo "  --with-android-emulator"
+      echo "                   Include Android Emulator E2E tests (requires Android SDK/AVD)"
       echo "  --help           Show this help"
       exit 0
       ;;
@@ -139,6 +143,17 @@ if [[ "$RUN_IOS_SIM" == true ]]; then
     fi
   else
     skip_suite "E2E: iOS Simulator" "macOS only"
+  fi
+fi
+
+# ============================================
+# 7. Android Emulator E2E (opt-in, requires Android SDK/AVD)
+# ============================================
+if [[ "$RUN_ANDROID_EMULATOR" == true ]]; then
+  if [[ -f "$ROOT_DIR/examples/android-demo/run-e2e.sh" ]]; then
+    run_suite "E2E: Android Emulator" "bash $ROOT_DIR/examples/android-demo/run-e2e.sh"
+  else
+    skip_suite "E2E: Android Emulator" "runner not found"
   fi
 fi
 
