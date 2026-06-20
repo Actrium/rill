@@ -30,9 +30,6 @@ const GUEST_BUNDLE = `
       if (ns && ns.hostModules && ns.hostModules[moduleId]) {
         return ns.hostModules[moduleId];
       }
-      if (typeof globalThis.__rill_getHostModule === 'function') {
-        return globalThis.__rill_getHostModule(moduleId);
-      }
       throw new Error('[rill] Host module not registered: ' + moduleId);
     };
   }

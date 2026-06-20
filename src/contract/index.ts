@@ -6,8 +6,6 @@
 
 export type HostModuleId = `host:${string}`;
 
-export type BoundaryDirection = 'guest->host' | 'host->guest';
-
 export interface BoundarySchema<Input, Output> {
   // Reason: Boundary schemas parse untrusted cross-runtime input.
   parseInput?: (value: unknown) => Input;

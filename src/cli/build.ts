@@ -225,14 +225,12 @@ const RUNTIME_INJECT = `
   }
 
   // Host module resolver. Bundled host:* imports are rewritten to this hook.
+  // The host populates __rill.hostModules (see Engine.injectHostModules); an
+  // unregistered capability fails closed.
   if (typeof globalThis.__rill_importHostModule !== 'function') {
     globalThis.__rill_importHostModule = function(moduleId) {
       if (__rill.hostModules && __rill.hostModules[moduleId]) {
         return __rill.hostModules[moduleId];
-      }
-
-      if (typeof globalThis.__rill_getHostModule === 'function') {
-        return globalThis.__rill_getHostModule(moduleId);
       }
 
       throw new Error('[rill] Host module not registered: ' + moduleId);
