@@ -1021,7 +1021,7 @@ export class Engine implements IEngine {
 
       // Unhandled Promise Rejection monitoring
       // This catches Promise rejections that are not handled with .catch()
-      // Note: Support varies by sandbox environment (vm/worker/none)
+      // Note: Support varies by sandbox environment (vm/worker/web)
       try {
         // Reason: Promise rejection reason and promise value can be any type
         const unhandledRejectionHandler = (event: {

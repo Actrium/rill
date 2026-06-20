@@ -19,10 +19,9 @@ export interface EngineOptions {
    * - `jsc`: Uses JavaScriptCore via JSI (Apple platforms only).
    * - `quickjs`: Uses QuickJS via JSI (cross-platform native).
    * - `wasm-quickjs`: Uses QuickJS via WASM (cross-platform, web-compatible).
-   * - `none`: Runs code directly in the host context via `eval`. Insecure, but fast and easy to debug.
    * If not set, the best available provider for the environment is chosen automatically.
    */
-  sandbox?: 'vm' | 'jsc' | 'hermes' | 'quickjs' | 'wasm-quickjs' | 'tenant-manager' | 'none';
+  sandbox?: 'vm' | 'jsc' | 'hermes' | 'quickjs' | 'wasm-quickjs' | 'tenant-manager';
 
   /**
    * TenantManager tenant configuration.

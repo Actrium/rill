@@ -151,7 +151,6 @@ const engine = new Engine({
 | `'wasm-quickjs'` | QuickJS WASM |
 | `'vm'` | Node VM |
 | `'tenant-manager'` | Native TenantManager (多租户模式) |
-| `'none'` | 无沙箱 -- 在 host 上下文中执行(仅开发) |
 
 ```ts
 const engine = new Engine({

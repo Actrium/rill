@@ -22,7 +22,7 @@ new Engine(options?: EngineOptions)
 
 | 属性 | 类型 | 默认值 | 描述 |
 |---|---|---|---|
-| `sandbox` | `'vm' \| 'jsc' \| 'quickjs' \| 'hermes' \| 'wasm-quickjs' \| 'tenant-manager' \| 'none'` | 自动检测 | 明确选择沙箱后端。 |
+| `sandbox` | `'vm' \| 'jsc' \| 'quickjs' \| 'hermes' \| 'wasm-quickjs' \| 'tenant-manager'` | 自动检测 | 明确选择沙箱后端。 |
 | `tenant manager` | `TenantConfig` | `undefined` | 使用 TenantManager 沙箱时的租户配置。 |
 | `timeout` | `number` | `5000` | 执行超时时间（毫秒）。 |
 | `debug` | `boolean` | `false` | 启用调试日志。 |

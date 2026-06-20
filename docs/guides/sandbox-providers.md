@@ -151,7 +151,6 @@ The `sandbox` field in `EngineOptions` accepts the following string values:
 | `'wasm-quickjs'` | QuickJS WASM |
 | `'vm'` | Node VM |
 | `'tenant-manager'` | Native TenantManager (multi-tenant mode) |
-| `'none'` | No sandbox -- executes in the host context (development only) |
 
 ```ts
 const engine = new Engine({

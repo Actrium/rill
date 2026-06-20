@@ -65,7 +65,6 @@ Use `EngineOptions.sandbox` to select an engine backend.
 | `quickjs` | Cross-platform | JSI native | QuickJS via JSI |
 | `wasm-quickjs` | Web / React Native | WASM | QuickJS compiled to WebAssembly |
 | `tenant manager` | Apple (iOS/macOS) | Native C++ | Multi-tenant with dedicated threads |
-| `none` | Any | None | Direct eval in host context (insecure) |
 
 ### DevTools (`rill/devtools`)
 
