@@ -27,6 +27,70 @@ static void rill_log(const char *tag, const std::string &msg) {
 
 static const char *kLogTag = "HermesSandbox";
 
+static const char *kTaskQueueShimScript = R"RILL_JS(
+(function () {
+  if (typeof globalThis.__rill_drainImmediateQueue === 'function') {
+    return;
+  }
+
+  var queue = [];
+  var cancelled = Object.create(null);
+  var nextId = 1;
+
+  function assertFunction(fn, name) {
+    if (typeof fn !== 'function') {
+      throw new TypeError(name + ' expects a function');
+    }
+  }
+
+  if (typeof globalThis.setImmediate !== 'function') {
+    globalThis.setImmediate = function (fn) {
+      assertFunction(fn, 'setImmediate');
+      var args = Array.prototype.slice.call(arguments, 1);
+      var id = nextId++;
+      queue.push({ id: id, fn: fn, args: args });
+      return id;
+    };
+  }
+
+  if (typeof globalThis.clearImmediate !== 'function') {
+    globalThis.clearImmediate = function (id) {
+      cancelled[id] = true;
+    };
+  }
+
+  if (typeof globalThis.queueMicrotask !== 'function') {
+    globalThis.queueMicrotask = function (fn) {
+      assertFunction(fn, 'queueMicrotask');
+      globalThis.setImmediate(fn);
+    };
+  }
+
+  Object.defineProperty(globalThis, '__rill_drainImmediateQueue', {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: function (limit) {
+      var executed = 0;
+      var max = typeof limit === 'number' && limit > 0 ? limit : 1000;
+      while (queue.length > 0) {
+        if (executed >= max) {
+          return executed;
+        }
+        var task = queue.shift();
+        if (cancelled[task.id]) {
+          delete cancelled[task.id];
+          continue;
+        }
+        executed++;
+        task.fn.apply(undefined, task.args);
+      }
+      return executed;
+    },
+  });
+})();
+)RILL_JS";
+
 namespace hermes_sandbox {
 
 // MARK: - Value Conversion Helpers
@@ -334,6 +398,8 @@ jsi::Value HermesSandboxContext::wrapSandboxFunctionForHost(jsi::Runtime & /*san
                 sandboxArgs.size());
           }
 
+          self->drainMicrotasks(rt);
+
           // Convert result from sandbox to host
           return self->sandboxToHost(*sandboxRt, rt, result);
         } catch (const jsi::JSError &e) {
@@ -419,6 +485,8 @@ HermesSandboxContext::HermesSandboxContext(jsi::Runtime &hostRuntime,
 
   sandboxRuntime_->global().setProperty(*sandboxRuntime_, "console",
                                         std::move(consoleObj));
+
+  installTaskQueueShim(hostRuntime);
 
   rill_log(kLogTag, "Created new Hermes sandbox context");
 }
@@ -540,6 +608,68 @@ HermesSandboxContext::getPropertyNames(jsi::Runtime &rt) {
   return props;
 }
 
+void HermesSandboxContext::installTaskQueueShim(jsi::Runtime &hostRt) {
+  try {
+    sandboxRuntime_->evaluateJavaScript(
+        std::make_shared<jsi::StringBuffer>(kTaskQueueShimScript),
+        "<rill-task-queue-shim>");
+    drainMicrotasks(hostRt);
+  } catch (const jsi::JSError &e) {
+    throw jsi::JSError(hostRt,
+                       std::string("[HermesSandbox] task queue shim: ") + e.what());
+  } catch (const std::exception &e) {
+    throw jsi::JSError(hostRt,
+                       std::string("[HermesSandbox] task queue shim: ") + e.what());
+  }
+}
+
+int HermesSandboxContext::drainImmediateQueue(jsi::Runtime &hostRt) {
+  try {
+    jsi::Value drainValue = sandboxRuntime_->global().getProperty(
+        *sandboxRuntime_, "__rill_drainImmediateQueue");
+    if (!drainValue.isObject()) {
+      return 0;
+    }
+    jsi::Object drainObject = drainValue.asObject(*sandboxRuntime_);
+    if (!drainObject.isFunction(*sandboxRuntime_)) {
+      return 0;
+    }
+    jsi::Function drainFn = drainObject.asFunction(*sandboxRuntime_);
+    jsi::Value countValue = drainFn.call(*sandboxRuntime_, 1000);
+    return countValue.isNumber() ? static_cast<int>(countValue.getNumber()) : 0;
+  } catch (const jsi::JSError &e) {
+    throw jsi::JSError(hostRt,
+                       std::string("[HermesSandbox] immediate queue: ") + e.what());
+  } catch (const std::exception &e) {
+    throw jsi::JSError(hostRt,
+                       std::string("[HermesSandbox] immediate queue: ") + e.what());
+  }
+}
+
+void HermesSandboxContext::drainMicrotasks(jsi::Runtime &hostRt) {
+  constexpr int kMaxDrainPasses = 1000;
+
+  for (int pass = 0; pass < kMaxDrainPasses; pass++) {
+    bool nativeDrained = false;
+    try {
+      nativeDrained = sandboxRuntime_->drainMicrotasks(1000);
+    } catch (const jsi::JSError &e) {
+      throw jsi::JSError(hostRt,
+                         std::string("[HermesSandbox] microtask drain: ") + e.what());
+    } catch (const std::exception &e) {
+      throw jsi::JSError(hostRt,
+                         std::string("[HermesSandbox] microtask drain: ") + e.what());
+    }
+
+    int immediateCount = drainImmediateQueue(hostRt);
+    if (nativeDrained && immediateCount == 0) {
+      return;
+    }
+  }
+
+  throw jsi::JSError(hostRt, "Hermes sandbox microtask drain exceeded safety limit");
+}
+
 jsi::Value HermesSandboxContext::eval(jsi::Runtime &rt,
                                       const std::string &code) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -552,6 +682,7 @@ jsi::Value HermesSandboxContext::eval(jsi::Runtime &rt,
     jsi::Value result =
         sandboxRuntime_->evaluateJavaScript(
             std::make_shared<jsi::StringBuffer>(code), "<sandbox>");
+    drainMicrotasks(rt);
     return sandboxToHost(*sandboxRuntime_, rt, result);
   } catch (const jsi::JSError &e) {
     throw jsi::JSError(rt, std::string("[HermesSandbox] ") + e.what());
@@ -604,6 +735,7 @@ jsi::Value HermesSandboxContext::evalBytecode(jsi::Runtime &rt,
         "<precompiled>");
 
     jsi::Value result = sandboxRuntime_->evaluatePreparedJavaScript(prepared);
+    drainMicrotasks(rt);
     return sandboxToHost(*sandboxRuntime_, rt, result);
   } catch (const jsi::JSError &e) {
     throw jsi::JSError(rt, std::string("[HermesSandbox] evalBytecode: ") + e.what());

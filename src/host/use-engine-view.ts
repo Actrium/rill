@@ -6,8 +6,9 @@
  */
 
 import type { ReactElement } from 'react';
-import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Engine } from './engine';
+
+const React = require('react') as typeof import('react');
 
 /**
  * Loading state
@@ -103,13 +104,13 @@ export function useEngineView({
   onError,
   onDestroy,
 }: UseEngineViewOptions): UseEngineViewResult {
-  const [loadingState, setLoadingState] = useState<LoadingState>('idle');
-  const [error, setError] = useState<Error | null>(null);
-  const [content, setContent] = useState<ReactElement | string | null>(null);
-  const mountedRef = useRef(true);
+  const [loadingState, setLoadingState] = React.useState<LoadingState>('idle');
+  const [error, setError] = React.useState<Error | null>(null);
+  const [content, setContent] = React.useState<ReactElement | string | null>(null);
+  const mountedRef = React.useRef(true);
 
   // Update callback
-  const handleUpdate = useCallback(() => {
+  const handleUpdate = React.useCallback(() => {
     if (!mountedRef.current) return;
 
     const receiver = engine.getReceiver();
@@ -119,7 +120,7 @@ export function useEngineView({
   }, [engine]);
 
   // Load Guest
-  useEffect(() => {
+  React.useEffect(() => {
     mountedRef.current = true;
 
     async function loadGuest() {
@@ -171,7 +172,7 @@ export function useEngineView({
   }, [engine, source, bytecodeAssetPath, initialProps, onLoad, onError, handleUpdate]);
 
   // Listen to engine events
-  useEffect(() => {
+  React.useEffect(() => {
     const unsubscribeUpdate = engine.on('update', handleUpdate);
 
     // Catch up: if loadBundle completed synchronously (native providers),
@@ -202,7 +203,7 @@ export function useEngineView({
   }, [engine, handleUpdate, onError, onDestroy]);
 
   // Cleanup
-  useEffect(() => {
+  React.useEffect(() => {
     return () => {
       mountedRef.current = false;
     };

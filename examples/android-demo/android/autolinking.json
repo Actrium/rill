@@ -1,0 +1,31 @@
+{
+  "reactNativeVersion": "0.81.5",
+  "dependencies": {
+    "rill": {
+      "root": "../../..",
+      "name": "rill",
+      "platforms": {
+        "android": {
+          "sourceDir": "../../../android",
+          "packageImportPath": "import com.rill.sandbox.RillSandboxNativePackage;",
+          "packageInstance": "new RillSandboxNativePackage()",
+          "buildTypes": ["debug", "release"],
+          "componentDescriptors": [],
+          "dependencyConfiguration": "implementation",
+          "isPureCxxDependency": false
+        }
+      }
+    }
+  },
+  "project": {
+    "android": {
+      "sourceDir": ".",
+      "appName": "app",
+      "packageName": "com.rill.demo",
+      "applicationId": "com.rill.demo",
+      "mainActivity": ".MainActivity",
+      "watchModeCommandParams": [],
+      "dependencyConfiguration": "implementation"
+    }
+  }
+}

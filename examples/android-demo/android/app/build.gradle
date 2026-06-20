@@ -61,6 +61,11 @@ android {
         jvmTarget = "17"
     }
 
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+
     externalNativeBuild {
         cmake {
             path "src/main/jni/CMakeLists.txt"

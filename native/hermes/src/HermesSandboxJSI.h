@@ -74,6 +74,9 @@ private:
   jsi::Value wrapSandboxFunctionForHost(jsi::Runtime &sandboxRt,
                                         jsi::Runtime &hostRt,
                                         jsi::Function &&func);
+  void installTaskQueueShim(jsi::Runtime &hostRt);
+  int drainImmediateQueue(jsi::Runtime &hostRt);
+  void drainMicrotasks(jsi::Runtime &hostRt);
 
   // Storage for sandbox functions that need to be called from host
   std::unordered_map<std::string, std::shared_ptr<jsi::Function>> sandboxFunctions_;

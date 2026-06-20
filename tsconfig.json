@@ -3,6 +3,7 @@
     "target": "ES2020",
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "libReplacement": false,
     "lib": ["ES2022", "DOM"],
     // === Strictness (Maximum) ===
     "strict": true,
@@ -27,6 +28,8 @@
     // === Module System ===
     "esModuleInterop": true,
     "skipLibCheck": true,
+    "types": ["react", "react-reconciler"],
+    "typeRoots": ["./node_modules/@types"],
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
@@ -53,6 +56,7 @@
     "dist",
     "coverage",
     "src/cli",
+    "src/guest/build",
     "**/__tests__",
     "**/*.test.ts",
     "**/*.test.tsx",

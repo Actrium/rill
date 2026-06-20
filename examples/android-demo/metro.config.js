@@ -13,9 +13,10 @@ const defaultConfig = getDefaultConfig(rootDir);
 // Block duplicate React instances from symlinked packages
 const escapeRegExp = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 defaultConfig.resolver.blockList = [
+  new RegExp(`${escapeRegExp(rillPath)}/node_modules/.*`),
+  new RegExp(`${escapeRegExp(rillPath)}/android/(?:\\.cxx|build)/.*`),
+  new RegExp(`${escapeRegExp(rillPath)}/tests/.*`),
   /.*node_modules\/react\/cjs\/react\.development\.js.*inline-requires-plugin.*/,
-  new RegExp(`${escapeRegExp(rillPath)}/node_modules/react/.*`),
-  new RegExp(`${escapeRegExp(rillPath)}/node_modules/react-reconciler/.*`),
 ];
 
 /** @type {import('metro-config').MetroConfig} */
@@ -27,6 +28,7 @@ const customConfig = {
   },
   watchFolders: [rillPath],
   resolver: {
+    useWatchman: false,
     unstable_enableSymlinks: true,
     nodeModulesPaths: [path.resolve(rootDir, 'node_modules')],
     resolveRequest: (context, moduleName, platform) => {

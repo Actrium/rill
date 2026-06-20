@@ -373,11 +373,11 @@
     ctx.eval(
       'Promise.resolve(42).then(function(v) { promiseResolved = true; promiseValue = v; });'
     );
-    // Note: Promises are async, so we can't directly test the resolved value synchronously
-    // But we can test that Promise exists and basic operations work
     assert(ctx.eval('typeof Promise') === 'function', 'Promise exists');
     assert(ctx.eval('typeof Promise.resolve') === 'function', 'Promise.resolve exists');
     assert(ctx.eval('typeof Promise.reject') === 'function', 'Promise.reject exists');
+    assert(ctx.extract('promiseResolved') === true, 'Promise microtasks drain after eval');
+    assert(ctx.extract('promiseValue') === 42, 'Promise microtask value is visible after eval');
   } catch (e) {
     console.log(`  ⚠ Promise tests skipped: ${e.message}`);
   }

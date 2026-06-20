@@ -500,6 +500,27 @@ async function runAndroidE2EChecks(engineHint: string) {
     }
   });
 
+  await run('eval drains promise microtasks', () => {
+    const { module } = getSandboxModule(engineHint);
+    const runtime = module.createRuntime({ timeout: 5000 });
+    const ctx = runtime.createContext();
+    try {
+      ctx.eval(`
+        globalThis.__rillPromiseValue = 'pending';
+        Promise.resolve(42).then(function(value) {
+          globalThis.__rillPromiseValue = value;
+        });
+      `);
+      assertE2E(
+        ctx.extract('__rillPromiseValue') === 42,
+        'promise microtask was not drained after eval'
+      );
+    } finally {
+      ctx.dispose();
+      runtime.dispose();
+    }
+  });
+
   await run('host function callable from guest', () => {
     const { module } = getSandboxModule(engineHint);
     const runtime = module.createRuntime({ timeout: 5000 });

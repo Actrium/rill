@@ -6,8 +6,10 @@
 
 import type { ReactElement, ReactNode } from 'react';
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
-import type { Engine } from '..';
-import { useEngineView } from '..';
+import type { Engine } from '../engine';
+import { useEngineView } from '../use-engine-view';
+
+const React = require('react') as typeof import('react');
 
 /**
  * EngineView Props
@@ -105,34 +107,36 @@ export function EngineView({
 
   // Render loading state
   if (loadingState === 'loading' || loadingState === 'idle') {
-    return (
-      <View style={[styles.container, style]}>
-        {fallback ?? (
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator size="large" color="#007AFF" />
-            <Text style={styles.loadingText}>Loading bundle...</Text>
-          </View>
-        )}
-      </View>
+    return React.createElement(
+      View,
+      { style: [styles.container, style] },
+      fallback ??
+        React.createElement(
+          View,
+          { style: styles.loadingContainer },
+          React.createElement(ActivityIndicator, { size: 'large', color: '#007AFF' }),
+          React.createElement(Text, { style: styles.loadingText }, 'Loading bundle...')
+        )
     );
   }
 
   // Render error state
   if (loadingState === 'error' && error) {
-    return (
-      <View style={[styles.container, style]}>
-        {renderError?.(error) ?? (
-          <View style={styles.errorContainer}>
-            <Text style={styles.errorTitle}>Bundle Error</Text>
-            <Text style={styles.errorMessage}>{error.message}</Text>
-          </View>
-        )}
-      </View>
+    return React.createElement(
+      View,
+      { style: [styles.container, style] },
+      renderError?.(error) ??
+        React.createElement(
+          View,
+          { style: styles.errorContainer },
+          React.createElement(Text, { style: styles.errorTitle }, 'Bundle Error'),
+          React.createElement(Text, { style: styles.errorMessage }, error.message)
+        )
     );
   }
 
   // Render Guest content
-  return <View style={[styles.container, style]}>{content}</View>;
+  return React.createElement(View, { style: [styles.container, style] }, content);
 }
 
 const styles = StyleSheet.create({

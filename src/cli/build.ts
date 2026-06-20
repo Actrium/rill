@@ -4,7 +4,6 @@
  * Bun-based guest bundler
  */
 
-import * as babel from '@babel/core';
 import type { BunPlugin } from 'bun';
 import fs from 'fs';
 import path from 'path';
@@ -302,6 +301,7 @@ const HOST_MODULE_EXTERNAL = 'host:*';
  * Create Bun plugin for pre-bundle Babel transforms (dev mode source location injection)
  */
 async function createBabelPlugin(): Promise<BunPlugin> {
+  const babel = await import('@babel/core');
   const functionSourceLocationPlugin = (await import('./babel-plugin-function-source-location'))
     .default;
 
@@ -734,9 +734,26 @@ ${footerCode}
   // Write final bundle
   await Bun.write(targetPath, wrappedCode);
 
-  // Remove Bun's original output if different from target
-  if (result.outputs[0]!.path !== targetPath) {
-    fs.unlinkSync(result.outputs[0]!.path);
+  // 拷贝 bun 输出中的非 JS 资产（图片等）到目标目录
+  // 当 outDir 与最终目标目录不同时需要拷贝；相同时图片已在目标位置，无需拷贝
+  for (const output of result.outputs) {
+    if (output.path === targetPath) continue;
+    const ext = path.extname(output.path).toLowerCase();
+    if (ext !== '.js' && ext !== '.map') {
+      const destPath = path.join(outDir, path.basename(output.path));
+      if (output.path !== destPath) {
+        fs.copyFileSync(output.path, destPath);
+      }
+      console.log(`   Asset: ${path.basename(output.path)}`);
+    }
+  }
+  // 删除 bun 原始输出中的 JS/Map 文件（非 JS 资产保留在目标目录）
+  for (const output of result.outputs) {
+    if (output.path === targetPath) continue;
+    const ext = path.extname(output.path).toLowerCase();
+    if ((ext === '.js' || ext === '.map') && fs.existsSync(output.path)) {
+      fs.unlinkSync(output.path);
+    }
   }
 
   // Post-build strict dependency guard
@@ -822,7 +839,16 @@ export async function analyze(
   // Use oxc adapter for module analysis
   const { analyzeHostBoundary, analyzeModuleIDs } = await import('./oxc-adapter');
   const scan = await analyzeModuleIDs(content);
-  const boundary = analyzeHostBoundary(content);
+  const shouldAnalyzeBoundary = content.includes('host:') || /\bexport\b/.test(content);
+  const boundary = shouldAnalyzeBoundary
+    ? analyzeHostBoundary(content)
+    : {
+        hostImports: [],
+        hostCapabilities: [],
+        guestExports: [],
+        hasDefaultExport: false,
+        violations: [],
+      };
   const found = new Set<string>([
     ...scan.static,
     ...scan.dynamicLiteral,

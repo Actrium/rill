@@ -176,6 +176,31 @@ fi
 echo "Device: $DEVICE_NAME"
 echo ""
 
+configure_node() {
+    local node_binary="${RILL_ANDROID_E2E_NODE_BINARY:-}"
+
+    if [ -z "$node_binary" ] && command -v n >/dev/null 2>&1; then
+        node_binary="$(n which 22 2>/dev/null || true)"
+    fi
+    if [ -z "$node_binary" ] && [ -x "$HOME/.n/bin/node" ]; then
+        node_binary="$HOME/.n/bin/node"
+    fi
+    if [ -z "$node_binary" ]; then
+        node_binary="$(command -v node || true)"
+    fi
+
+    if [ -z "$node_binary" ] || [ ! -x "$node_binary" ]; then
+        echo "Error: node is not installed (required for React Native bundling)"
+        exit 1
+    fi
+
+    export NODE_BINARY="$node_binary"
+    export PATH="$(dirname "$node_binary"):$PATH"
+    echo "Node: $node_binary"
+}
+
+configure_node
+
 # Ensure JS dependencies
 ensure_js_deps() {
     if [ -d "node_modules/react-native" ]; then
@@ -230,6 +255,18 @@ if [ -n "${RILL_ANDROID_GRADLE_ARGS:-}" ]; then
     GRADLE_COMMON_ARGS+=("${EXTRA_GRADLE_ARGS[@]}")
 fi
 
+run_gradle_task() {
+    local task="$1"
+    (
+        cd android
+        if [ ${#GRADLE_COMMON_ARGS[@]} -gt 0 ]; then
+            ./gradlew "${GRADLE_COMMON_ARGS[@]}" "$task"
+        else
+            ./gradlew "$task"
+        fi
+    )
+}
+
 # Bundle JS into APK assets (like iOS install.sh bundles into .app)
 bundle_js() {
     local ASSETS_DIR="android/app/src/main/assets"
@@ -241,17 +278,29 @@ bundle_js() {
     fi
 
     echo "[bundle] Creating JS bundle..."
-    npx react-native bundle \
+    local METRO_WORKERS="${RILL_ANDROID_E2E_METRO_WORKERS:-1}"
+    local METRO_TMPDIR="${RILL_ANDROID_E2E_METRO_TMPDIR:-/tmp/rill-android-demo-metro-${VARIANT}-$$}"
+    echo "[bundle] Metro workers: $METRO_WORKERS"
+    rm -rf "$METRO_TMPDIR"
+    mkdir -p "$METRO_TMPDIR"
+    watchman watch-del-all >/dev/null 2>&1 || true
+    env CI=1 TMPDIR="$METRO_TMPDIR" "$NODE_BINARY" node_modules/react-native/cli.js bundle \
         --entry-file index.tsx \
         --platform android \
         --dev "$DEV_FLAG" \
         --bundle-output "$ASSETS_DIR/index.android.bundle" \
-        --assets-dest "$ASSETS_DIR"
+        --assets-dest "$ASSETS_DIR" \
+        --max-workers "$METRO_WORKERS" \
+        --reset-cache
 
     echo "[bundle] JS bundle created"
 }
 
-bundle_js
+if [ "${RILL_ANDROID_E2E_PREBUNDLE:-0}" = "1" ]; then
+    bundle_js
+else
+    echo "[bundle] Skipping pre-bundle; Gradle will package the React Native bundle"
+fi
 
 # Capitalize first letter for Gradle task name
 capitalize() {
@@ -277,14 +326,14 @@ for CONFIG in "${CONFIGS_TO_INSTALL[@]}"; do
 
     # Build
     if [ "$VERBOSE" -eq 1 ]; then
-        if ! (cd android && ./gradlew "${GRADLE_COMMON_ARGS[@]}" "$GRADLE_TASK" 2>&1 | tee "$BUILD_LOG"); then
+        if ! run_gradle_task "$GRADLE_TASK" 2>&1 | tee "$BUILD_LOG"; then
             echo ""
             echo "Build failed for $CONFIG (see $BUILD_LOG)"
             exit 1
         fi
     else
         echo "Building $CONFIG... (log: $BUILD_LOG)"
-        if ! (cd android && ./gradlew "${GRADLE_COMMON_ARGS[@]}" "$GRADLE_TASK" >"$BUILD_LOG" 2>&1); then
+        if ! run_gradle_task "$GRADLE_TASK" >"$BUILD_LOG" 2>&1; then
             echo "Build failed for $CONFIG (see $BUILD_LOG)"
             tail -n 40 "$BUILD_LOG" || true
             exit 1

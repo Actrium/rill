@@ -10,7 +10,7 @@ namespace quickjs_sandbox {
 // Static counter for sandbox functions
 static int g_sandboxFuncCounter = 0;
 
-// Static members for HostFunctionData class
+// Static member for HostFunctionData class id
 JSClassID QuickJSSandboxContext::hostFunctionDataClassID_ = 0;
 
 void QuickJSSandboxContext::hostFunctionDataFinalizer(JSRuntime *rt,
@@ -260,6 +260,34 @@ jsi::Value QuickJSSandboxContext::eval(jsi::Runtime &rt,
       JS_FreeValue(qjsContext_, exception);
       JS_FreeValue(qjsContext_, result);
       throw jsi::JSError(rt, errorMsg);
+    }
+
+    JSContext *jobCtx = nullptr;
+    int executedJobs = 0;
+    for (;;) {
+      int ret = JS_ExecutePendingJob(qjsRuntime_, &jobCtx);
+      if (ret == 0) {
+        break;
+      }
+      if (ret < 0) {
+        std::string errorMsg = "QuickJS pending job failed";
+        if (jobCtx) {
+          JSValue exception = JS_GetException(jobCtx);
+          const char *str = JS_ToCString(jobCtx, exception);
+          if (str) {
+            errorMsg = str;
+            JS_FreeCString(jobCtx, str);
+          }
+          JS_FreeValue(jobCtx, exception);
+        }
+        JS_FreeValue(qjsContext_, result);
+        throw jsi::JSError(rt, errorMsg);
+      }
+      executedJobs++;
+      if (executedJobs > 1000) {
+        JS_FreeValue(qjsContext_, result);
+        throw jsi::JSError(rt, "QuickJS pending job drain exceeded safety limit");
+      }
     }
 
     jsi::Value jsiResult = qjsToJSI(rt, result);

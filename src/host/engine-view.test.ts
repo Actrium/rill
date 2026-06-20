@@ -1,7 +1,7 @@
 /**
  * EngineView Tests
  *
- * Uses react-test-renderer for React Native compatible testing
+ * Uses react-test-renderer for React Native compatible testing.
  * react-native imports are mocked via tsconfig paths -> src/__mocks__/react-native.ts
  */
 
@@ -11,22 +11,24 @@ describe('EngineView', () => {
   // Dynamic imports for test isolation
   let React: typeof import('react');
   let EngineView: typeof import('./preset/engine-view').EngineView;
-  let Engine: typeof import('./engine').Engine;
   let TestRenderer: typeof import('react-test-renderer');
   let act: typeof import('react-test-renderer').act;
 
   beforeAll(async () => {
-    React = await import('react');
-    const engineViewModule = await import('./preset/engine-view');
+    const ReactCjs = require('../../node_modules/react/index.js') as typeof import('react');
+    mock.module('react', () => ({ ...ReactCjs, default: ReactCjs }));
+    React = ReactCjs;
+    const engineViewModule = require('./preset/engine-view') as typeof import('./preset/engine-view');
     EngineView = engineViewModule.EngineView;
-    const engineModule = await import('./engine');
-    Engine = engineModule.Engine;
-    const testRendererModule = await import('react-test-renderer');
-    TestRenderer = testRendererModule.default;
-    act = testRendererModule.act;
+    const testRendererModule = require('react-test-renderer') as typeof import('react-test-renderer') & {
+      default?: typeof import('react-test-renderer');
+    };
+    const rendererApi = testRendererModule.default ?? testRendererModule;
+    TestRenderer = rendererApi;
+    act = rendererApi.act;
   });
 
-  let mockEngine: InstanceType<typeof Engine>;
+  let mockEngine: Record<string, unknown>;
   let loadBundleMock: ReturnType<typeof mock>;
   let createReceiverMock: ReturnType<typeof mock>;
   let getReceiverMock: ReturnType<typeof mock>;
@@ -98,7 +100,7 @@ describe('EngineView', () => {
         host: { lastEventName: null, lastEventAt: null, lastPayloadBytes: null },
         guest: { lastEventName: null, lastEventAt: null, lastPayloadBytes: null, sleeping: null, sleepingAt: null },
       })),
-    } as unknown as InstanceType<typeof Engine>;
+    };
   });
 
   // Helper to wait for promises to resolve

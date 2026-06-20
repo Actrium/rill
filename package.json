@@ -69,7 +69,8 @@
   "scripts": {
     "postinstall": "node scripts/rill_postinstall.js",
     "test": "bash scripts/run-all-tests.sh --with-rn",
-    "test:unit": "bun test",
+    "test:unit": "bash scripts/run-unit-tests.sh",
+    "test:unit:coverage": "bash scripts/run-unit-tests.sh --coverage",
     "test:native": "bash native/core/run-tests.sh && bash native/quickjs/run-tests.sh && bash native/jsc/run-tests.sh",
     "test:bundle": "bash tests/guest-bundle/run-tests.sh",
     "test:e2e:wasm": "bun tests/wasm-sandbox/run.ts",
