@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'bun:test';
 import { Engine } from '../../engine';
-import { createMockJSEngineProvider } from '../test-utils';
 
 function makeBatch(n: number) {
   return {
@@ -17,12 +16,11 @@ function makeBatch(n: number) {
 
 describe('Engine health receiverNodes', () => {
   it('reflects receiver node count after applyBatch', async () => {
-    const provider = createMockJSEngineProvider();
-    const engine = new Engine({ quickjs: provider, debug: false });
-    await engine.loadBundle('console.log("ok")');
-    const receiver = engine.createReceiver(() => {});
+    const engine = new Engine({ sandbox: 'vm', debug: false });
+    await Promise.resolve().then(() => engine.loadBundle('console.log("ok")'));
+    const receiver = engine.createReceiver();
     receiver.applyBatch(makeBatch(7));
-    const health = engine.getHealth();
+    const health = engine.getDiagnostics().health;
     expect(health.receiverNodes).toBe(7);
   });
 });

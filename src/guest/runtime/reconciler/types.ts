@@ -5,7 +5,7 @@
  */
 
 import type { HostConfig, Reconciler as ReconcilerType } from 'react-reconciler';
-import type { VNode } from '../../let/types';
+import type { VNode } from '../../../sdk/types';
 
 /**
  * Root container type

@@ -1,6 +1,6 @@
 /**
  * Bun test setup file
- * Provides compatibility layer and DOM environment
+ * Provides compatibility shims for Bun-based tests.
  *
  * IMPORTANT: Global polyfills MUST be defined before any imports
  * because module resolution happens synchronously and some modules
@@ -107,6 +107,13 @@ if (typeof globalThis.setInterval === 'undefined') {
 // Now import bun:test after polyfills are in place
 import { mock, spyOn } from 'bun:test';
 
+const reactModulePath = new URL('../../../node_modules/react/index.js', import.meta.url).pathname;
+
+mock.module('react', () => {
+  const React = require(reactModulePath) as typeof import('react');
+  return { ...React, default: React };
+});
+
 // CRITICAL: Ensure console is available before react modules try to load
 // This is a defensive measure to prevent ReferenceError: console is not defined
 // when react-jsx-dev-runtime loads
@@ -184,11 +191,10 @@ mock.module('react-native', () => ({
   },
 }));
 
-// Now import happy-dom after mocking react-native
-import { GlobalRegistrator } from '@happy-dom/global-registrator';
-
-// Register happy-dom globally for React testing
-GlobalRegistrator.register();
+if (process.env.RILL_TEST_DOM === '1') {
+  const { GlobalRegistrator } = await import('@happy-dom/global-registrator');
+  GlobalRegistrator.register();
+}
 
 // Make mock available globally for compatibility
 (globalThis as Record<string, unknown>).mock = mock;

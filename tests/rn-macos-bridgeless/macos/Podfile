@@ -1,0 +1,63 @@
+require 'pathname'
+
+ws_dir = Pathname.new(__dir__)
+ws_dir = ws_dir.parent until
+  File.exist?("#{ws_dir}/node_modules/react-native-macos/scripts/react_native_pods.rb") ||
+  ws_dir.expand_path.to_s == '/'
+require "#{ws_dir}/node_modules/react-native-macos/scripts/react_native_pods.rb"
+
+prepare_react_native_project!
+
+# rill sandbox engine: JSC (default)
+ENV['RILL_SANDBOX_ENGINE'] ||= 'jsc'
+
+target 'RillMacOSTest-macOS' do
+  platform :macos, '14.0'
+  use_native_modules!
+
+  # react-native-macos 0.79 does not fully support Fabric renderer yet.
+  # Fabric is gated behind RCT_NEW_ARCH_ENABLED until macOS support lands.
+  # Bridgeless + TurboModule work without Fabric on macOS.
+  use_react_native!(
+    :path => '../node_modules/react-native-macos',
+    :hermes_enabled => ENV['USE_HERMES'] == '1',
+    :fabric_enabled => ENV['RCT_NEW_ARCH_ENABLED'] == '1',
+    # An absolute path to your application root.
+    :app_path => "#{Pod::Config.instance.installation_root}/.."
+  )
+
+  # rill native sandbox (JSI)
+  pod 'RillSandboxNative', :path => '../node_modules/rill'
+
+  post_install do |installer|
+    react_native_post_install(installer)
+
+    # Silence Xcode warnings about script phases without outputs
+    installer.pods_project.targets.each do |target|
+      if target.name == 'fmt'
+        target.build_configurations.each do |config|
+          config.build_settings['CLANG_CXX_LANGUAGE_STANDARD'] = 'c++17'
+        end
+      end
+
+      target.build_phases.each do |phase|
+        next unless phase.is_a?(Xcodeproj::Project::Object::PBXShellScriptBuildPhase)
+        if phase.name&.include?('Hermes') || phase.name&.include?('Bundle React Native')
+          phase.always_out_of_date = '1'
+        end
+      end
+    end
+
+    installer.aggregate_targets.each do |aggregate_target|
+      aggregate_target.user_project.targets.each do |target|
+        target.build_phases.each do |phase|
+          next unless phase.is_a?(Xcodeproj::Project::Object::PBXShellScriptBuildPhase)
+          if phase.name&.include?('Bundle React Native')
+            phase.always_out_of_date = '1'
+          end
+        end
+      end
+      aggregate_target.user_project.save
+    end
+  end
+end

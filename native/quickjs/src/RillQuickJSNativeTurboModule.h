@@ -3,6 +3,8 @@
 
 #include <jsi/jsi.h>
 
+namespace jsi = facebook::jsi;
+
 namespace rill::quickjs {
 
 /**

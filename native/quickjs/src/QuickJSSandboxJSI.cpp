@@ -1,7 +1,9 @@
 #include "QuickJSSandboxJSI.h"
 #include <cstring>
-#include <iostream>
 #include <sstream>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace quickjs_sandbox {
 
@@ -26,13 +28,21 @@ void QuickJSSandboxContext::hostFunctionDataFinalizer(JSRuntime *rt,
 }
 
 void QuickJSSandboxContext::ensureClassRegistered() {
-  JSClassDef classDef = {
-      .class_name = "HostFunctionData",
-      .finalizer = hostFunctionDataFinalizer,
-  };
-  // 每个 runtime 都注册一次 class，QuickJS 允许多 runtime 注册同一个 class id
-  JS_NewClassID(&hostFunctionDataClassID_);
-  JS_NewClass(qjsRuntime_, hostFunctionDataClassID_, &classDef);
+  if (hostFunctionDataClassID_ == 0) {
+    JS_NewClassID(&hostFunctionDataClassID_);
+  }
+
+  // IMPORTANT: register on *each* JSRuntime (createRuntime() creates new runtimes).
+  if (!JS_IsRegisteredClass(qjsRuntime_, hostFunctionDataClassID_)) {
+    JSClassDef classDef = {
+        .class_name = "HostFunctionData",
+        .finalizer = hostFunctionDataFinalizer,
+    };
+    if (JS_NewClass(qjsRuntime_, hostFunctionDataClassID_, &classDef) < 0) {
+      throw jsi::JSError(*hostRuntime_,
+                         "Failed to register HostFunctionData class");
+    }
+  }
 }
 
 // MARK: - QuickJSSandboxContext Implementation
@@ -63,6 +73,12 @@ void QuickJSSandboxContext::dispose() {
   disposed_ = true;
 
   callbacks_.clear();
+  
+  // Free cached JSValue wrappers before freeing context
+  for (auto &pair : wrapperCache_) {
+    JS_FreeValue(qjsContext_, pair.second);
+  }
+  wrapperCache_.clear();
 
   if (qjsContext_) {
     JS_FreeContext(qjsContext_);
@@ -101,7 +117,12 @@ void QuickJSSandboxContext::installConsole() {
     for (int i = 0; i < argc; i++) {
       const char *str = JS_ToCString(ctx, argv[i]);
       if (str) {
-        std::cout << "[QuickJSSandbox] " << str << std::endl;
+        // Forward sandbox console.log to host's OutputDebugString
+#ifdef _WIN32
+        OutputDebugStringA("[QuickJSSandbox] ");
+        OutputDebugStringA(str);
+        OutputDebugStringA("\n");
+#endif
         JS_FreeCString(ctx, str);
       }
     }
@@ -116,9 +137,6 @@ void QuickJSSandboxContext::installConsole() {
   // Run console setup script
   JSValue result = JS_Eval(qjsContext_, consoleScript, strlen(consoleScript),
                            "<console>", JS_EVAL_TYPE_GLOBAL);
-  if (JS_IsException(result)) {
-    JS_FreeValue(qjsContext_, result);
-  }
   JS_FreeValue(qjsContext_, result);
 }
 
@@ -144,39 +162,47 @@ jsi::Value QuickJSSandboxContext::get(jsi::Runtime &rt,
         rt, name, 1,
         [this](jsi::Runtime &rt, const jsi::Value &, const jsi::Value *args,
                size_t count) -> jsi::Value {
-          if (count < 1 || !args[0].isString()) {
-            throw jsi::JSError(rt, "eval requires a string argument");
+          try {
+            if (count < 1 || !args[0].isString()) {
+              throw jsi::JSError(rt, "eval requires a string argument");
+            }
+            std::string code = args[0].asString(rt).utf8(rt);
+            return this->eval(rt, code);
+          } catch (const jsi::JSError &) {
+            throw;
+          } catch (const std::exception &e) {
+            throw jsi::JSError(rt, std::string("eval lambda: ") + e.what());
+          } catch (...) {
+            throw jsi::JSError(rt, "eval lambda: unknown exception");
           }
-          std::string code = args[0].asString(rt).utf8(rt);
-          return this->eval(rt, code);
         });
   }
 
-  if (propName == "setGlobal") {
+  if (propName == "inject") {
     return jsi::Function::createFromHostFunction(
         rt, name, 2,
         [this](jsi::Runtime &rt, const jsi::Value &, const jsi::Value *args,
                size_t count) -> jsi::Value {
           if (count < 2 || !args[0].isString()) {
             throw jsi::JSError(rt,
-                               "setGlobal requires (name: string, value: any)");
+                               "inject requires (name: string, value: any)");
           }
           std::string globalName = args[0].asString(rt).utf8(rt);
-          this->setGlobal(rt, globalName, args[1]);
+          this->inject(rt, globalName, args[1]);
           return jsi::Value::undefined();
         });
   }
 
-  if (propName == "getGlobal") {
+  if (propName == "extract") {
     return jsi::Function::createFromHostFunction(
         rt, name, 1,
         [this](jsi::Runtime &rt, const jsi::Value &, const jsi::Value *args,
                size_t count) -> jsi::Value {
           if (count < 1 || !args[0].isString()) {
-            throw jsi::JSError(rt, "getGlobal requires a string argument");
+            throw jsi::JSError(rt, "extract requires a string argument");
           }
           std::string globalName = args[0].asString(rt).utf8(rt);
-          return this->getGlobal(rt, globalName);
+          return this->extract(rt, globalName);
         });
   }
 
@@ -206,8 +232,8 @@ std::vector<jsi::PropNameID>
 QuickJSSandboxContext::getPropertyNames(jsi::Runtime &rt) {
   std::vector<jsi::PropNameID> props;
   props.push_back(jsi::PropNameID::forUtf8(rt, "eval"));
-  props.push_back(jsi::PropNameID::forUtf8(rt, "setGlobal"));
-  props.push_back(jsi::PropNameID::forUtf8(rt, "getGlobal"));
+  props.push_back(jsi::PropNameID::forUtf8(rt, "inject"));
+  props.push_back(jsi::PropNameID::forUtf8(rt, "extract"));
   props.push_back(jsi::PropNameID::forUtf8(rt, "dispose"));
   props.push_back(jsi::PropNameID::forUtf8(rt, "isDisposed"));
   return props;
@@ -215,39 +241,65 @@ QuickJSSandboxContext::getPropertyNames(jsi::Runtime &rt) {
 
 jsi::Value QuickJSSandboxContext::eval(jsi::Runtime &rt,
                                        const std::string &code) {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  try {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
 
-  if (disposed_) {
-    throw jsi::JSError(rt, "Context has been disposed");
-  }
+    if (disposed_) {
+      throw jsi::JSError(rt, "Context has been disposed");
+    }
 
-  JSValue result = JS_Eval(qjsContext_, code.c_str(), code.size(), "<eval>",
-                           JS_EVAL_TYPE_GLOBAL);
+    JSValue result = JS_Eval(qjsContext_, code.c_str(), code.size(), "<eval>",
+                             JS_EVAL_TYPE_GLOBAL);
 
-  if (JS_IsException(result)) {
-    JSValue exception = JS_GetException(qjsContext_);
-    const char *str = JS_ToCString(qjsContext_, exception);
-    std::string errorMsg = str ? str : "Unknown error";
-    if (str)
-      JS_FreeCString(qjsContext_, str);
-    JS_FreeValue(qjsContext_, exception);
+    if (JS_IsException(result)) {
+      JSValue exception = JS_GetException(qjsContext_);
+      const char *str = JS_ToCString(qjsContext_, exception);
+      std::string errorMsg = str ? str : "Unknown error";
+      if (str)
+        JS_FreeCString(qjsContext_, str);
+      JS_FreeValue(qjsContext_, exception);
+      JS_FreeValue(qjsContext_, result);
+      throw jsi::JSError(rt, errorMsg);
+    }
+
+    JSContext *jobCtx = nullptr;
+    int executedJobs = 0;
+    for (;;) {
+      int ret = JS_ExecutePendingJob(qjsRuntime_, &jobCtx);
+      if (ret == 0) {
+        break;
+      }
+      if (ret < 0) {
+        std::string errorMsg = "QuickJS pending job failed";
+        if (jobCtx) {
+          JSValue exception = JS_GetException(jobCtx);
+          const char *str = JS_ToCString(jobCtx, exception);
+          if (str) {
+            errorMsg = str;
+            JS_FreeCString(jobCtx, str);
+          }
+          JS_FreeValue(jobCtx, exception);
+        }
+        JS_FreeValue(qjsContext_, result);
+        throw jsi::JSError(rt, errorMsg);
+      }
+      executedJobs++;
+      if (executedJobs > 1000) {
+        JS_FreeValue(qjsContext_, result);
+        throw jsi::JSError(rt, "QuickJS pending job drain exceeded safety limit");
+      }
+    }
+
+    jsi::Value jsiResult = qjsToJSI(rt, result);
     JS_FreeValue(qjsContext_, result);
-    throw jsi::JSError(rt, errorMsg);
+    return jsiResult;
+  } catch (const jsi::JSError &) {
+    throw; // Re-throw JSI errors as-is
+  } catch (const std::exception &e) {
+    throw jsi::JSError(rt, std::string("eval error: ") + e.what());
+  } catch (...) {
+    throw jsi::JSError(rt, "eval error: unknown non-std exception");
   }
-
-  // Drain pending jobs (Promise microtasks) after each eval.
-  // QuickJS does not automatically execute pending jobs after JS_Eval,
-  // so Promise .then() callbacks would never fire without this.
-  JSContext *ctx;
-  int execCount = 0;
-  while (JS_ExecutePendingJob(qjsRuntime_, &ctx) > 0) {
-    execCount++;
-    if (execCount > 1000) break; // 安全阀，防止无限循环
-  }
-
-  jsi::Value jsiResult = qjsToJSI(rt, result);
-  JS_FreeValue(qjsContext_, result);
-  return jsiResult;
 }
 
 // Static callback for host functions
@@ -288,7 +340,7 @@ JSValue QuickJSSandboxContext::hostFunctionCallback(
   }
 }
 
-void QuickJSSandboxContext::setGlobal(jsi::Runtime &rt, const std::string &name,
+void QuickJSSandboxContext::inject(jsi::Runtime &rt, const std::string &name,
                                       const jsi::Value &value) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 
@@ -302,7 +354,7 @@ void QuickJSSandboxContext::setGlobal(jsi::Runtime &rt, const std::string &name,
   JS_FreeValue(qjsContext_, global);
 }
 
-jsi::Value QuickJSSandboxContext::getGlobal(jsi::Runtime &rt,
+jsi::Value QuickJSSandboxContext::extract(jsi::Runtime &rt,
                                             const std::string &name) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 
@@ -319,11 +371,60 @@ jsi::Value QuickJSSandboxContext::getGlobal(jsi::Runtime &rt,
   return result;
 }
 
-JSValue QuickJSSandboxContext::wrapFunctionForSandbox(jsi::Runtime &,
+JSValue QuickJSSandboxContext::wrapFunctionForSandbox(jsi::Runtime &rt,
                                                       jsi::Function &&func) {
+  jsi::Object funcObj = std::move(func); // Treat as object to access properties
+  
+  // 1. Try to retrieve existing Proxy ID from the function object (identity caching)
+  std::string existingId;
+  bool isCached = false;
+  
+  try {
+    if (funcObj.hasProperty(rt, "__rill_proxy_id__")) {
+      jsi::Value idVal = funcObj.getProperty(rt, "__rill_proxy_id__");
+      if (idVal.isString()) {
+        existingId = idVal.asString(rt).utf8(rt);
+        std::string callbackId = "cb_" + existingId;
+        
+        // Check if this ID exists in our callback map
+        auto it = callbacks_.find(callbackId);
+        if (it != callbacks_.end()) {
+          isCached = true;
+          // Check if we have a cached wrapper
+          auto wrapperIt = wrapperCache_.find(callbackId);
+          if (wrapperIt != wrapperCache_.end()) {
+            // Return duplicated reference to cached wrapper
+            return JS_DupValue(qjsContext_, wrapperIt->second);
+          }
+          // Wrapper was collected but callback still exists - fallthrough to recreate
+        }
+      }
+    }
+  } catch (...) {
+    // Ignore errors reading property
+  }
+  
+  // 2. Generate new ID if not cached
+  std::string callbackId;
+  if (isCached) {
+    callbackId = "cb_" + existingId;
+  } else {
+    std::string idStr = std::to_string(++callbackCounter_);
+    callbackId = "cb_" + idStr;
+    
+    // Tag the original function with the ID for future identity checks
+    try {
+      funcObj.setProperty(rt, "__rill_proxy_id__", jsi::String::createFromUtf8(rt, idStr));
+    } catch (...) {
+      // Failed to tag, continue anyway
+    }
+  }
+  
+  // Convert back to function
+  jsi::Function funcToStore = funcObj.asFunction(rt);
+  
   // Store the function
-  std::string callbackId = "cb_" + std::to_string(++callbackCounter_);
-  auto funcPtr = std::make_shared<jsi::Function>(std::move(func));
+  auto funcPtr = std::make_shared<jsi::Function>(std::move(funcToStore));
   callbacks_[callbackId] = funcPtr;
 
   // Create HostFunctionData
@@ -342,12 +443,22 @@ JSValue QuickJSSandboxContext::wrapFunctionForSandbox(jsi::Runtime &,
                                         &dataObj);
 
   JS_FreeValue(qjsContext_, dataObj);
+  
+  // Cache the wrapper for identity preservation
+  wrapperCache_[callbackId] = JS_DupValue(qjsContext_, funcVal);
+  
   return funcVal;
 }
 
 // Convert jsi::Value to QuickJS JSValue
 JSValue QuickJSSandboxContext::jsiToQJS(jsi::Runtime &rt,
-                                        const jsi::Value &value) {
+                                        const jsi::Value &value, int depth) {
+  static constexpr int kMaxDepth = 100;
+  if (depth > kMaxDepth) {
+    return JS_NewStringLen(qjsContext_,
+        "[jsiToQJS: max depth exceeded]", 30);
+  }
+
   if (value.isUndefined()) {
     return JS_UNDEFINED;
   }
@@ -386,7 +497,7 @@ JSValue QuickJSSandboxContext::jsiToQJS(jsi::Runtime &rt,
       size_t len = arr.size(rt);
       JSValue jsArr = JS_NewArray(qjsContext_);
       for (size_t i = 0; i < len; i++) {
-        JSValue elem = jsiToQJS(rt, arr.getValueAtIndex(rt, i));
+        JSValue elem = jsiToQJS(rt, arr.getValueAtIndex(rt, i), depth + 1);
         JS_SetPropertyUint32(qjsContext_, jsArr, (uint32_t)i, elem);
       }
       return jsArr;
@@ -399,7 +510,7 @@ JSValue QuickJSSandboxContext::jsiToQJS(jsi::Runtime &rt,
     for (size_t i = 0; i < len; i++) {
       std::string key = propNames.getValueAtIndex(rt, i).asString(rt).utf8(rt);
       jsi::Value propVal = obj.getProperty(rt, key.c_str());
-      JSValue qjsVal = jsiToQJS(rt, propVal);
+      JSValue qjsVal = jsiToQJS(rt, propVal, depth + 1);
       JS_SetPropertyStr(qjsContext_, jsObj, key.c_str(), qjsVal);
     }
     return jsObj;
@@ -409,7 +520,17 @@ JSValue QuickJSSandboxContext::jsiToQJS(jsi::Runtime &rt,
 }
 
 // Convert QuickJS JSValue to jsi::Value
-jsi::Value QuickJSSandboxContext::qjsToJSI(jsi::Runtime &rt, JSValue value) {
+jsi::Value QuickJSSandboxContext::qjsToJSI(jsi::Runtime &rt, JSValue value,
+                                           int depth) {
+  // Guard against stack overflow from deeply nested or circular objects.
+  // Android native thread stack is typically 1MB; each recursive frame uses
+  // ~200-400 bytes, so 100 levels (~40KB) is safe with generous margin.
+  static constexpr int kMaxDepth = 100;
+  if (depth > kMaxDepth) {
+    return jsi::String::createFromUtf8(
+        rt, "[qjsToJSI: max depth exceeded — possible circular reference]");
+  }
+
   if (JS_IsUndefined(value)) {
     return jsi::Value::undefined();
   }
@@ -451,7 +572,7 @@ jsi::Value QuickJSSandboxContext::qjsToJSI(jsi::Runtime &rt, JSValue value) {
     jsi::Array arr = jsi::Array(rt, length);
     for (uint32_t i = 0; i < length; i++) {
       JSValue elem = JS_GetPropertyUint32(qjsContext_, value, i);
-      arr.setValueAtIndex(rt, i, qjsToJSI(rt, elem));
+      arr.setValueAtIndex(rt, i, qjsToJSI(rt, elem, depth + 1));
       JS_FreeValue(qjsContext_, elem);
     }
     return std::move(arr);
@@ -517,7 +638,7 @@ jsi::Value QuickJSSandboxContext::qjsToJSI(jsi::Runtime &rt, JSValue value) {
             throw jsi::JSError(rt, errorMsg);
           }
 
-          jsi::Value jsiResult = self->qjsToJSI(rt, result);
+          jsi::Value jsiResult = self->qjsToJSI(rt, result, 0);
           JS_FreeValue(self->qjsContext_, result);
           return jsiResult;
         });
@@ -534,7 +655,7 @@ jsi::Value QuickJSSandboxContext::qjsToJSI(jsi::Runtime &rt, JSValue value) {
         const char *key = JS_AtomToCString(qjsContext_, props[i].atom);
         if (key) {
           JSValue propVal = JS_GetProperty(qjsContext_, value, props[i].atom);
-          jsiObj.setProperty(rt, key, qjsToJSI(rt, propVal));
+          jsiObj.setProperty(rt, key, qjsToJSI(rt, propVal, depth + 1));
           JS_FreeValue(qjsContext_, propVal);
           JS_FreeCString(qjsContext_, key);
         }
@@ -560,13 +681,22 @@ QuickJSSandboxRuntime::QuickJSSandboxRuntime(jsi::Runtime &hostRuntime,
     throw jsi::JSError(hostRuntime, "Failed to create QuickJS runtime");
   }
 
-  // QuickJS default stack limit is conservative and can overflow on
-  // React/Reconciler update paths (especially during setState rerenders).
-  // Keep this aligned with QuickJSRuntime to avoid false-positive overflow.
-  JS_SetMaxStackSize(qjsRuntime_, 8 * 1024 * 1024); // 8MB
+  // Match the reference QuickJSRuntime defaults used elsewhere in the repo.
+  // These settings shouldn't be required, but they help avoid runtime-specific
+  // edge cases and keep behavior consistent.
+#ifdef _WIN32
+  // WindowsDemo.vcxproj reserves 8MB thread stack. Give QuickJS 4MB so
+  // CONFIG_STACK_CHECK fires before hitting the OS guard page, while
+  // leaving ~4MB headroom for host frames above QuickJS.
+  JS_SetMaxStackSize(qjsRuntime_, 4 * 1024 * 1024); // 4MB
+#else
+  JS_SetMaxStackSize(qjsRuntime_, 1024 * 1024 * 1024); // 1GB
+#endif
+  JS_SetCanBlock(qjsRuntime_, true);
+  JS_SetRuntimeInfo(qjsRuntime_, "RillQuickJSSandbox");
 
   // Set memory limit (optional)
-  JS_SetMemoryLimit(qjsRuntime_, 64 * 1024 * 1024); // 256MB
+  JS_SetMemoryLimit(qjsRuntime_, 256 * 1024 * 1024); // 256MB
 }
 
 QuickJSSandboxRuntime::~QuickJSSandboxRuntime() { dispose(); }
@@ -576,6 +706,26 @@ void QuickJSSandboxRuntime::dispose() {
   if (disposed_)
     return;
   disposed_ = true;
+
+  // Drain pending jobs (promises, etc.) before tearing down contexts/runtime.
+  // This mirrors QuickJSRuntime::~QuickJSRuntime() and avoids freeing a runtime
+  // while jobs are still queued.
+  if (qjsRuntime_) {
+    for (;;) {
+      JSContext *ctx1 = nullptr;
+      int ret = JS_ExecutePendingJob(qjsRuntime_, &ctx1);
+      if (ret == 0) {
+        break;
+      }
+      if (ret < 0) {
+        // Best-effort: clear the exception and keep draining remaining jobs.
+        if (ctx1) {
+          JSValue exception = JS_GetException(ctx1);
+          JS_FreeValue(ctx1, exception);
+        }
+      }
+    }
+  }
 
   for (auto &ctx : contexts_) {
     ctx->dispose();
@@ -699,6 +849,14 @@ void QuickJSSandboxModule::install(jsi::Runtime &runtime) {
   jsi::Object moduleObj = jsi::Object::createFromHostObject(runtime, module);
   runtime.global().setProperty(runtime, "__QuickJSSandboxJSI",
                                std::move(moduleObj));
+#ifdef _WIN32
+  OutputDebugStringA("[QuickJSSandbox] Installed __QuickJSSandboxJSI\n");
+#endif
+}
+
+// Wrapper function for external linkage (avoids JSValue symbol conflicts)
+void installQuickJSSandbox(jsi::Runtime &runtime) {
+  QuickJSSandboxModule::install(runtime);
 }
 
 } // namespace quickjs_sandbox

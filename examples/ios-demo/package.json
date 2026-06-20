@@ -1,0 +1,30 @@
+{
+  "name": "ios-demo",
+  "version": "1.0.0",
+  "description": "ios-demo - rill hello world for iOS",
+  "main": "RCTNApps/index.tsx",
+  "scripts": {
+    "start": "react-native start --verbose",
+    "typecheck": "tsc --noEmit",
+    "test": "./run-e2e.sh"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@babel/runtime": "^7.28.4",
+    "react": "^19.2.0",
+    "react-native": "^0.83.1",
+    "react-reconciler": "0.31.0",
+    "rill": "file:../../"
+  },
+  "devDependencies": {
+    "@react-native-community/cli": "^20.1.0",
+    "@react-native/metro-config": "^0.83.1",
+    "@tsconfig/react-native": "^3.0.8",
+    "@types/node": "^22.19.3",
+    "@types/react": "^19.2.0",
+    "typescript": "^5.9.3"
+  }
+}

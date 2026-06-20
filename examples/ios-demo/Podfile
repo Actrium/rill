@@ -1,0 +1,113 @@
+# ios-demo Podfile
+# Bridgeless (New Architecture) only — supports 3 sandbox configurations: JSC, Hermes, QuickJS
+#
+# Usage examples:
+#   RILL_SANDBOX=hermes pod install
+#   RILL_SANDBOX=quickjs pod install
+#   RILL_SANDBOX=jsc pod install
+#
+# Default: hermes
+
+# Generate separate Xcode projects per pod for parallel builds and better caching
+install! 'cocoapods',
+  :generate_multiple_pod_projects => true
+
+# Get sandbox configuration from environment
+rill_sandbox = ENV['RILL_SANDBOX'] || 'hermes'
+
+# Always use Bridgeless (New Architecture)
+ENV['RCT_NEW_ARCH_ENABLED'] = '1'
+
+puts ""
+puts "╔══════════════════════════════════════════════════════════╗"
+puts "║  ios-demo Configuration                                  ║"
+puts "╠══════════════════════════════════════════════════════════╣"
+puts "║  Mode:    Bridgeless (New Architecture)                  ║"
+puts "║  Sandbox: #{rill_sandbox.ljust(46)}║"
+puts "╚══════════════════════════════════════════════════════════╝"
+puts ""
+
+puts "[ios-demo] New Architecture (Bridgeless) ENABLED"
+puts "[ios-demo] Sandbox engine: #{rill_sandbox}"
+
+# Set sandbox engine
+ENV['RILL_SANDBOX_ENGINE'] = rill_sandbox
+
+react_native_path = 'node_modules/react-native'
+
+require File.join(__dir__, react_native_path, 'scripts', 'react_native_pods')
+
+prepare_react_native_project!
+
+target 'ios-demo' do
+  platform :ios, '17.0'
+
+  use_react_native!(
+    path: react_native_path,
+    hermes_enabled: true,  # Main runtime always uses Hermes
+    fabric_enabled: true,
+    app_path: __dir__
+  )
+
+  use_native_modules!
+end
+
+post_install do |installer|
+  react_native_post_install(installer, react_native_path)
+
+  # React Native 0.83+ expects some platform headers to be discoverable under:
+  #   <react/renderer/components/view/...>
+  # On some setups the Pods header maps miss the platform/cxx headers, so add it explicitly.
+  platform_cxx_headers = File.join(__dir__, react_native_path, 'ReactCommon', 'react', 'renderer', 'components', 'view', 'platform', 'cxx')
+
+  # Apply settings to all pod project targets (generate_multiple_pod_projects mode)
+  installer.generated_projects.each do |project|
+    project.targets.each do |target|
+      target.build_configurations.each do |config|
+        # Enable precompiled prefix headers for faster compilation
+        config.build_settings['GCC_PRECOMPILE_PREFIX_HEADER'] = 'YES'
+
+        # Suppress warnings
+        config.build_settings['GCC_WARN_INHIBIT_ALL_WARNINGS'] = 'YES'
+        config.build_settings['CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS'] = 'NO'
+        config.build_settings['CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF'] = 'NO'
+        config.build_settings['GCC_WARN_64_TO_32_BIT_CONVERSION'] = 'NO'
+
+        # Ensure platform/cxx headers are on the search path (fixes missing HostPlatformViewProps.h, etc.)
+        header_search_paths = config.build_settings['HEADER_SEARCH_PATHS'] || '$(inherited)'
+        header_search_paths = [header_search_paths].flatten
+        header_search_paths << platform_cxx_headers
+        config.build_settings['HEADER_SEARCH_PATHS'] = header_search_paths.uniq
+
+        # Add preprocessor definitions for sandbox detection
+        # RCT_DEV=0 disables Metro connection banner and dev menu
+        config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= ['$(inherited)']
+        config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] << "RILL_SANDBOX_#{rill_sandbox.upcase}=1"
+        config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] << "RCT_DEV=0"
+      end
+    end
+  end
+
+  # Apply preprocessor definitions to the main app target
+  main_project_path = File.join(__dir__, 'ios-demo.xcodeproj')
+  main_project = Xcodeproj::Project.open(main_project_path)
+  main_project.targets.each do |target|
+    if target.name == 'ios-demo'
+      target.build_configurations.each do |config|
+        # Remove old RILL_ definitions and rebuild the array
+        existing = config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] || ['$(inherited)']
+        existing = [existing].flatten  # Ensure it's an array
+        existing = existing.reject { |d| d.to_s.start_with?('RILL_SANDBOX_') || d.to_s.start_with?('RCT_DEV') }
+        existing << "RILL_SANDBOX_#{rill_sandbox.upcase}=1"
+        existing << "RCT_DEV=0"
+        config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] = existing
+      end
+      puts "[ios-demo] Set preprocessor definitions: RILL_SANDBOX_#{rill_sandbox.upcase}"
+    end
+  end
+  main_project.save
+
+  puts ""
+  puts "[ios-demo] Post-install complete for: bridgeless + #{rill_sandbox}"
+  puts ""
+end

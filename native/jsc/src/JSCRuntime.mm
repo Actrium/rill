@@ -7,7 +7,7 @@
 
 #include "JSCRuntime.h"
 
-#include "../jsi/jsilib.h"
+#include <jsi/jsilib.h>
 #include <JavaScriptCore/JavaScript.h>
 #include <array>
 #include <atomic>

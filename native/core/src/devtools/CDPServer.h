@@ -1,0 +1,647 @@
+/**
+ * CDPServer.h
+ *
+ * P3-Y.1: Chrome DevTools Protocol Server
+ *
+ * Implements a WebSocket server that speaks CDP (Chrome DevTools Protocol),
+ * enabling developers to connect Chrome DevTools or VS Code debugger to
+ * inspect and debug Guest sandboxes.
+ *
+ * Features:
+ *   - WebSocket server on configurable port (default: 9229)
+ *   - /json endpoint for target discovery (chrome://inspect)
+ *   - Multi-tenant session management
+ *   - CDP message routing to domain adapters
+ *
+ * Architecture:
+ *   Chrome DevTools / VS Code
+ *          │
+ *          │ WebSocket (ws://localhost:9229)
+ *          ▼
+ *   ┌─────────────────────────────────────┐
+ *   │  CDPServer                          │
+ *   │  ├─ WebSocket Transport             │
+ *   │  ├─ Protocol Router                 │
+ *   │  └─ Session Manager                 │
+ *   ├─────────────────────────────────────┤
+ *   │  Domain Adapters                    │
+ *   │  ├─ ConsoleAdapter                  │
+ *   │  ├─ RuntimeAdapter                  │
+ *   │  ├─ DOMAdapter                      │
+ *   │  ├─ DebuggerAdapter                 │
+ *   │  └─ NetworkAdapter                  │
+ *   └─────────────────────────────────────┘
+ */
+
+#pragma once
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+#include <atomic>
+#include <optional>
+
+namespace rill::devtools {
+
+// Forward declarations
+class ConsoleAdapter;
+class RuntimeAdapter;
+class DOMAdapter;
+class DebuggerAdapter;
+class NetworkAdapter;
+
+// ============================================
+// Type Definitions
+// ============================================
+
+/**
+ * Tenant identifier type (matches TenantId from TenantContext)
+ */
+using TenantId = uint32_t;
+
+/**
+ * WebSocket connection identifier
+ * (forward-declared here for CDPTransport)
+ */
+using ConnectionId = uint64_t;
+
+// ============================================
+// WebSocket Transport Interface
+// ============================================
+
+/**
+ * Abstract interface for WebSocket transport layer.
+ *
+ * Platform-specific implementations (Apple NWListener, Android OkHttp, etc.)
+ * should subclass this interface and inject it into CDPServer via
+ * CDPServerConfig::transport.
+ *
+ * The default (nullptr) uses a no-op stub, suitable for unit testing.
+ */
+class CDPTransport {
+public:
+  virtual ~CDPTransport() = default;
+
+  /**
+   * Message callback: transport calls this when a message arrives.
+   */
+  using OnMessageCallback = std::function<void(ConnectionId connId, const std::string& message)>;
+
+  /**
+   * Connection callback: transport calls this on connect/disconnect.
+   */
+  using OnConnectCallback = std::function<void(ConnectionId connId)>;
+  using OnDisconnectCallback = std::function<void(ConnectionId connId)>;
+
+  /**
+   * Start listening on the given host:port.
+   * @return true if started successfully
+   */
+  virtual bool start(const std::string& host, uint16_t port) = 0;
+
+  /**
+   * Stop the transport and close all connections.
+   */
+  virtual void stop() = 0;
+
+  /**
+   * Send a UTF-8 message to a specific connection.
+   */
+  virtual void send(ConnectionId connId, const std::string& message) = 0;
+
+  /**
+   * Close a specific connection.
+   */
+  virtual void close(ConnectionId connId) = 0;
+
+  /**
+   * Register callbacks (called by CDPServer during setup).
+   */
+  void setOnMessage(OnMessageCallback cb) { onMessage_ = std::move(cb); }
+  void setOnConnect(OnConnectCallback cb) { onConnect_ = std::move(cb); }
+  void setOnDisconnect(OnDisconnectCallback cb) { onDisconnect_ = std::move(cb); }
+
+protected:
+  OnMessageCallback onMessage_;
+  OnConnectCallback onConnect_;
+  OnDisconnectCallback onDisconnect_;
+};
+
+/**
+ * CDP session identifier (unique per DevTools connection to a tenant)
+ */
+using SessionId = std::string;
+
+// ============================================
+// CDP Message Types
+// ============================================
+
+/**
+ * CDP request message (from DevTools to server)
+ *
+ * JSON-RPC format:
+ * {
+ *   "id": 1,
+ *   "method": "Runtime.evaluate",
+ *   "params": { ... },
+ *   "sessionId": "tenant-123"  // optional
+ * }
+ */
+struct CDPRequest {
+  int id = 0;                    // Request ID for response matching
+  std::string method;            // CDP method (e.g., "Runtime.evaluate")
+  std::string params;            // JSON params string
+  std::optional<SessionId> sessionId;  // Target tenant session (optional for global methods)
+};
+
+/**
+ * CDP response message (from server to DevTools)
+ *
+ * JSON-RPC format:
+ * {
+ *   "id": 1,
+ *   "result": { ... }
+ * }
+ * or error:
+ * {
+ *   "id": 1,
+ *   "error": { "code": -32600, "message": "Invalid Request" }
+ * }
+ */
+struct CDPResponse {
+  int id = 0;                    // Matches request ID
+  std::string result;            // JSON result (empty if error)
+  std::optional<std::string> error;  // JSON error object (if failed)
+  
+  bool isError() const { return error.has_value(); }
+};
+
+/**
+ * CDP event message (from server to DevTools, unsolicited)
+ *
+ * JSON-RPC format:
+ * {
+ *   "method": "Runtime.consoleAPICalled",
+ *   "params": { ... },
+ *   "sessionId": "tenant-123"
+ * }
+ */
+struct CDPEvent {
+  std::string method;            // Event method (e.g., "Runtime.consoleAPICalled")
+  std::string params;            // JSON params
+  std::optional<SessionId> sessionId;  // Target session (optional for global events)
+};
+
+// ============================================
+// CDP Error Codes (JSON-RPC standard + CDP specific)
+// ============================================
+
+namespace CDPErrorCode {
+  // JSON-RPC standard errors
+  constexpr int PARSE_ERROR = -32700;
+  constexpr int INVALID_REQUEST = -32600;
+  constexpr int METHOD_NOT_FOUND = -32601;
+  constexpr int INVALID_PARAMS = -32602;
+  constexpr int INTERNAL_ERROR = -32603;
+  
+  // CDP specific errors
+  constexpr int SESSION_NOT_FOUND = -32001;
+  constexpr int TARGET_NOT_FOUND = -32002;
+  constexpr int TENANT_NOT_AVAILABLE = -32003;
+}
+
+// ============================================
+// Target Information (for chrome://inspect)
+// ============================================
+
+/**
+ * CDP target information returned by /json endpoint
+ */
+struct CDPTarget {
+  std::string id;                // Unique target ID (tenant ID as string)
+  std::string type = "node";     // Target type (node, page, etc.)
+  std::string title;             // Display title (e.g., "Rill Guest: MyApp")
+  std::string url;               // Target URL/identifier
+  std::string webSocketDebuggerUrl;  // Full WebSocket URL for this target
+  std::string devtoolsFrontendUrl;   // DevTools URL (optional)
+  std::string faviconUrl;        // Favicon URL (optional)
+  
+  /**
+   * Serialize to JSON string
+   */
+  std::string toJSON() const;
+};
+
+// ============================================
+// Session State
+// ============================================
+
+/**
+ * State for a connected DevTools session
+ */
+struct CDPSession {
+  SessionId id;                  // Session identifier
+  TenantId tenantId = 0;         // Associated tenant (0 if not attached)
+  ConnectionId connectionId = 0; // WebSocket connection
+  
+  // Enabled domains
+  bool consoleEnabled = false;
+  bool runtimeEnabled = false;
+  bool debuggerEnabled = false;
+  bool domEnabled = false;
+  bool networkEnabled = false;
+  bool profilerEnabled = false;
+  
+  // Timestamps
+  uint64_t createdAt = 0;
+  uint64_t lastActivityAt = 0;
+};
+
+// ============================================
+// Callbacks & Delegates
+// ============================================
+
+/**
+ * Callback for evaluating JavaScript in a tenant's context
+ */
+using EvaluateCallback = std::function<std::string(
+  TenantId tenantId,
+  const std::string& expression,
+  bool returnByValue
+)>;
+
+/**
+ * Callback for getting component tree from Receiver
+ */
+using GetComponentTreeCallback = std::function<std::string(TenantId tenantId)>;
+
+/**
+ * Server configuration
+ */
+struct CDPServerConfig {
+  uint16_t port = 9229;          // WebSocket port
+  std::string host = "127.0.0.1"; // Bind address (localhost only for security)
+  bool enabled = true;           // Enable/disable server
+  size_t maxConnections = 10;    // Max concurrent connections
+  uint32_t pingIntervalMs = 30000; // WebSocket ping interval
+  
+  // Callbacks (must be set before start)
+  EvaluateCallback onEvaluate;
+  GetComponentTreeCallback onGetComponentTree;
+
+  // WebSocket transport (nullptr = no-op stub for testing)
+  std::shared_ptr<CDPTransport> transport;
+};
+
+// ============================================
+// CDPServer Class
+// ============================================
+
+/**
+ * Chrome DevTools Protocol Server
+ *
+ * Thread-safety:
+ *   - All public methods are thread-safe
+ *   - Internal state protected by mutex
+ *   - WebSocket I/O runs on dedicated thread
+ */
+class CDPServer {
+public:
+  /**
+   * Create CDP server with configuration
+   */
+  explicit CDPServer(CDPServerConfig config = {});
+  
+  /**
+   * Destructor - stops server if running
+   */
+  ~CDPServer();
+  
+  // Non-copyable, non-movable
+  CDPServer(const CDPServer&) = delete;
+  CDPServer& operator=(const CDPServer&) = delete;
+  CDPServer(CDPServer&&) = delete;
+  CDPServer& operator=(CDPServer&&) = delete;
+  
+  // ============================================
+  // Lifecycle
+  // ============================================
+  
+  /**
+   * Start the WebSocket server
+   * @return true if started successfully
+   */
+  bool start();
+  
+  /**
+   * Stop the WebSocket server
+   * Closes all connections gracefully
+   */
+  void stop();
+  
+  /**
+   * Check if server is running
+   */
+  bool isRunning() const;
+  
+  /**
+   * Get server port
+   */
+  uint16_t getPort() const { return config_.port; }
+  
+  // ============================================
+  // Tenant Management
+  // ============================================
+  
+  /**
+   * Register a tenant as a debuggable target
+   * @param id Tenant ID
+   * @param title Display title for DevTools
+   * @param url Optional URL/identifier
+   */
+  void registerTenant(TenantId id, const std::string& title, const std::string& url = "");
+  
+  /**
+   * Unregister a tenant
+   * Closes any sessions connected to this tenant
+   */
+  void unregisterTenant(TenantId id);
+  
+  /**
+   * Check if tenant is registered
+   */
+  bool hasTenant(TenantId id) const;
+  
+  /**
+   * Get all registered tenant IDs
+   */
+  std::vector<TenantId> getTenantIds() const;
+  
+  // ============================================
+  // Event Emission
+  // ============================================
+  
+  /**
+   * Send CDP event to all sessions connected to a tenant
+   * @param tenantId Target tenant
+   * @param event CDP event to send
+   */
+  void sendEvent(TenantId tenantId, const CDPEvent& event);
+  
+  /**
+   * Send CDP event to a specific session
+   */
+  void sendEventToSession(const SessionId& sessionId, const CDPEvent& event);
+  
+  /**
+   * Broadcast event to all connected sessions
+   */
+  void broadcastEvent(const CDPEvent& event);
+  
+  // ============================================
+  // URL Helpers
+  // ============================================
+  
+  /**
+   * Get WebSocket URL for a tenant
+   * @return URL like "ws://127.0.0.1:9229/tenant/123"
+   */
+  std::string getWebSocketUrl(TenantId id) const;
+  
+  /**
+   * Get DevTools URL for a tenant
+   * @return URL like "devtools://devtools/bundled/inspector.html?ws=..."
+   */
+  std::string getDevToolsUrl(TenantId id) const;
+  
+  /**
+   * Get /json endpoint URL
+   */
+  std::string getTargetListUrl() const;
+  
+  // ============================================
+  // Statistics
+  // ============================================
+  
+  /**
+   * Get number of active connections
+   */
+  size_t getConnectionCount() const;
+  
+  /**
+   * Get number of active sessions
+   */
+  size_t getSessionCount() const;
+  
+  /**
+   * Get total messages received
+   */
+  uint64_t getMessagesReceived() const { return messagesReceived_.load(); }
+  
+  /**
+   * Get total messages sent
+   */
+  uint64_t getMessagesSent() const { return messagesSent_.load(); }
+
+  // ============================================
+  // HTTP Handling (for /json endpoint)
+  // ============================================
+
+  /**
+   * Handle HTTP request (for /json target discovery)
+   * @return JSON response body, empty string for 404
+   */
+  std::string handleHttpRequest(const std::string& path);
+
+private:
+  // ============================================
+  // Internal Types
+  // ============================================
+  
+  struct Connection {
+    ConnectionId id = 0;
+    std::string remoteAddress;
+    uint64_t connectedAt = 0;
+    // Platform-specific socket handle stored separately
+  };
+  
+  struct TenantInfo {
+    TenantId id = 0;
+    std::string title;
+    std::string url;
+    uint64_t registeredAt = 0;
+  };
+  
+  // ============================================
+  // Message Handling
+  // ============================================
+  
+  /**
+   * Handle incoming WebSocket message
+   */
+  void handleMessage(ConnectionId connId, const std::string& message);
+  
+  /**
+   * Parse CDP request from JSON
+   */
+  std::optional<CDPRequest> parseRequest(const std::string& json);
+  
+  /**
+   * Route request to appropriate domain adapter
+   */
+  CDPResponse routeRequest(const CDPRequest& request, const CDPSession& session);
+  
+  /**
+   * Send response to connection
+   */
+  void sendResponse(ConnectionId connId, const CDPResponse& response);
+  
+  /**
+   * Send event to connection
+   */
+  void sendToConnection(ConnectionId connId, const std::string& json);
+  
+  /**
+   * Build target list JSON for /json endpoint
+   */
+  std::string buildTargetListJSON() const;
+  
+  // ============================================
+  // Session Management
+  // ============================================
+  
+  /**
+   * Create new session for connection
+   */
+  SessionId createSession(ConnectionId connId, TenantId tenantId);
+  
+  /**
+   * Get session by ID
+   */
+  CDPSession* getSession(const SessionId& id);
+  
+  /**
+   * Remove session
+   */
+  void removeSession(const SessionId& id);
+  
+  /**
+   * Get or create session from request (caller must hold mutex_)
+   */
+  CDPSession* getOrCreateSessionLocked(ConnectionId connId, const CDPRequest& request);
+  
+  // ============================================
+  // Domain Handlers
+  // ============================================
+  
+  CDPResponse handleRuntimeMethod(const CDPRequest& req, CDPSession& session);
+  CDPResponse handleConsoleMethod(const CDPRequest& req, CDPSession& session);
+  CDPResponse handleDebuggerMethod(const CDPRequest& req, CDPSession& session);
+  CDPResponse handleDOMMethod(const CDPRequest& req, CDPSession& session);
+  CDPResponse handleNetworkMethod(const CDPRequest& req, CDPSession& session);
+  CDPResponse handleProfilerMethod(const CDPRequest& req, CDPSession& session);
+  CDPResponse handleTargetMethod(const CDPRequest& req, CDPSession& session);
+  
+  // ============================================
+  // Utility
+  // ============================================
+  
+  /**
+   * Generate unique connection ID
+   */
+  ConnectionId generateConnectionId();
+  
+  /**
+   * Generate unique session ID
+   */
+  SessionId generateSessionId(TenantId tenantId);
+  
+  /**
+   * Get current timestamp in milliseconds
+   */
+  static uint64_t currentTimeMs();
+  
+  /**
+   * Build error response
+   */
+  static CDPResponse makeError(int requestId, int code, const std::string& message);
+  
+  /**
+   * Build success response
+   */
+  static CDPResponse makeSuccess(int requestId, const std::string& resultJson = "{}");
+  
+  // ============================================
+  // State
+  // ============================================
+  
+  CDPServerConfig config_;
+  
+  mutable std::mutex mutex_;
+  
+  // Server state
+  std::atomic<bool> running_{false};
+  std::unique_ptr<std::thread> serverThread_;
+  
+  // Connections
+  std::unordered_map<ConnectionId, Connection> connections_;
+  std::atomic<ConnectionId> nextConnectionId_{1};
+  
+  // Sessions
+  std::unordered_map<SessionId, CDPSession> sessions_;
+  std::unordered_map<ConnectionId, SessionId> connectionToSession_;
+  
+  // Registered tenants
+  std::unordered_map<TenantId, TenantInfo> tenants_;
+  
+  // Statistics
+  std::atomic<uint64_t> messagesReceived_{0};
+  std::atomic<uint64_t> messagesSent_{0};
+};
+
+// ============================================
+// Helper: Build CDP JSON messages
+// ============================================
+
+namespace cdp {
+
+/**
+ * Build CDP event JSON
+ */
+std::string buildEventJSON(const std::string& method, 
+                           const std::string& params,
+                           const std::optional<SessionId>& sessionId = std::nullopt);
+
+/**
+ * Build CDP response JSON
+ */
+std::string buildResponseJSON(int id, const std::string& result);
+
+/**
+ * Build CDP error response JSON
+ */
+std::string buildErrorJSON(int id, int code, const std::string& message);
+
+/**
+ * Escape string for JSON
+ */
+std::string escapeJSON(const std::string& str);
+
+/**
+ * Parse JSON string value
+ */
+std::optional<std::string> parseJSONString(const std::string& json, const std::string& key);
+
+/**
+ * Parse JSON int value
+ */
+std::optional<int> parseJSONInt(const std::string& json, const std::string& key);
+
+} // namespace cdp
+
+} // namespace rill::devtools

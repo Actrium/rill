@@ -2,9 +2,10 @@
   "name": "rill",
   "version": "0.1.0",
   "repository": "https://github.com/GoAskAway/rill.git",
-  "main": "./src/host/index.ts",
+  "main": "./src/index.ts",
   "devDependencies": {
     "@babel/core": "^7.28.5",
+    "@babel/preset-env": "^7.28.6",
     "@biomejs/biome": "^2.3.9",
     "@happy-dom/global-registrator": "^15.0.0",
     "@playwright/test": "^1.57.0",
@@ -12,14 +13,14 @@
     "@types/react": "19.0.0",
     "@types/react-reconciler": "^0.32.3",
     "@types/react-test-renderer": "^18.3.0",
-    "@vitest/browser-webdriverio": "4.0.16",
+    "@vitest/browser-webdriverio": "4.1.9",
     "commander": "^14.0.2",
     "oxc-parser": "^0.26.0",
     "react": "19.0.0",
     "react-reconciler": "0.31.0",
     "react-test-renderer": "19.0.0",
     "typescript": "^5.9.3",
-    "vitest": "4.0.16",
+    "vitest": "4.1.9",
     "webdriverio": "^8.36.1"
   },
   "peerDependencies": {
@@ -28,14 +29,16 @@
     "react-native-web": ">=0.19.0"
   },
   "exports": {
-    ".": "./src/host/index.ts",
-    "./let": "./src/guest/let/index.ts",
+    ".": "./src/index.ts",
+    "./host": "./src/host/index.ts",
+    "./guest": "./src/sdk/index.ts",
     "./host/preset": "./src/host/preset/index.ts",
-    "./sandbox": "./src/sandbox/index.ts",
-    "./sandbox/native": "./src/sandbox/native/index.ts",
-    "./sandbox/web": "./src/sandbox/web/index.ts",
     "./devtools": "./src/devtools/index.ts",
+    "./contract": "./src/contract/index.ts",
     "./cli": "./src/cli/index.ts"
+  },
+  "bin": {
+    "rill": "./src/cli/bin.ts"
   },
   "description": "A lightweight, headless, sandboxed dynamic UI rendering engine for React Native",
   "engines": {
@@ -45,7 +48,11 @@
   "files": [
     "src",
     "native",
+    "android",
+    "scripts/rill_postinstall.js",
+    "scripts/rill_post_install.rb",
     "react-native.config.js",
+    "RillSandboxNative.podspec",
     "README.md",
     "LICENSE"
   ],
@@ -60,19 +67,33 @@
     }
   },
   "scripts": {
-    "test": "bun test",
-    "test:native": "bash native/quickjs/run-tests.sh && bash native/jsc/run-tests.sh",
-    "test:e2e": "bun tests/e2e-sandbox-web/run.ts",
-    "test:e2e:wasm": "bun tests/e2e-wasm-sandbox/run.ts",
-    "test:e2e:rn": "bash tests/rn-macos-e2e/run-tests.sh all",
-    "test:all": "bash scripts/run-all-tests.sh --with-rn",
+    "postinstall": "node scripts/rill_postinstall.js",
+    "test": "bash scripts/run-all-tests.sh --with-rn",
+    "test:unit": "bash scripts/run-unit-tests.sh",
+    "test:unit:coverage": "bash scripts/run-unit-tests.sh --coverage",
+    "test:native": "bash native/core/run-tests.sh && bash native/quickjs/run-tests.sh && bash native/jsc/run-tests.sh",
+    "test:bundle": "bash tests/guest-bundle/run-tests.sh",
+    "test:e2e:wasm": "bun tests/wasm-sandbox/run.ts",
+    "test:e2e:rn": "bash tests/rn-macos-bridgeless/run-tests.sh all",
+    "test:e2e:rn:jsc-jsc": "bash tests/rn-macos-bridgeless/run-tests.sh jsc-jsc",
+    "test:e2e:rn:jsc-quickjs": "bash tests/rn-macos-bridgeless/run-tests.sh jsc-quickjs",
+    "test:e2e:rn:hermes-jsc": "bash tests/rn-macos-bridgeless/run-tests.sh hermes-jsc",
+    "test:e2e:rn:hermes-quickjs": "bash tests/rn-macos-bridgeless/run-tests.sh hermes-quickjs",
+    "test:e2e:rn:hermes-hermes": "bash tests/rn-macos-bridgeless/run-tests.sh hermes-hermes",
+    "test:e2e:ios-sim": "bash examples/ios-demo/run-e2e.sh",
+    "test:e2e:android-emulator": "bash examples/android-demo/run-e2e.sh",
+    "test:ci": "bash scripts/run-all-tests.sh",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
     "format:check": "biome format .",
-    "typecheck": "bun tsc --noEmit",
+    "check:types": "bun tsc --noEmit",
     "check:unknown": "bun scripts/check-unknown.ts",
-    "precommit": "bun check:unknown && bun typecheck && bun lint && bun test"
+    "check:build:apple": "bash scripts/check-apple-build.sh",
+    "preflight": "bun run check:unknown && bun run check:types && bun run lint && bun run test:unit"
   },
-  "types": "./src/host/index.ts"
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@babel/runtime": "^7.28.6"
+  }
 }

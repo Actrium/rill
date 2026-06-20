@@ -3,6 +3,9 @@
  */
 
 import type { Receiver } from '../../../receiver';
+import type { ReviewedUnknown } from '../../../types';
+
+type TestEvent = { event: string; payload: ReviewedUnknown };
 
 /**
  * Wait for a condition to become true
@@ -80,10 +83,10 @@ export function getAllNodes(receiver: Receiver): any[] {
  * @returns The event object
  */
 export async function waitForEvent(
-  events: Array<{ event: string; payload: unknown }>,
+  events: TestEvent[],
   eventName: string,
   timeout = 5000
-): Promise<{ event: string; payload: unknown }> {
+): Promise<TestEvent> {
   const startTime = Date.now();
 
   while (Date.now() - startTime < timeout) {
@@ -106,12 +109,12 @@ export async function waitForEvent(
  * @returns Array of event objects
  */
 export async function waitForEvents(
-  events: Array<{ event: string; payload: unknown }>,
+  events: TestEvent[],
   eventNames: string[],
   timeout = 5000
-): Promise<Array<{ event: string; payload: unknown }>> {
+): Promise<TestEvent[]> {
   const startTime = Date.now();
-  const foundEvents: Array<{ event: string; payload: unknown }> = [];
+  const foundEvents: TestEvent[] = [];
 
   while (Date.now() - startTime < timeout) {
     for (const eventName of eventNames) {
@@ -140,7 +143,7 @@ export async function waitForEvents(
  *
  * @param events - Array of events to clear
  */
-export function clearEvents(events: Array<{ event: string; payload: unknown }>): void {
+export function clearEvents(events: TestEvent[]): void {
   events.length = 0;
 }
 
@@ -151,8 +154,8 @@ export function clearEvents(events: Array<{ event: string; payload: unknown }>):
  * @returns The last event or undefined
  */
 export function getLastEvent(
-  events: Array<{ event: string; payload: unknown }>
-): { event: string; payload: unknown } | undefined {
+  events: TestEvent[]
+): TestEvent | undefined {
   return events[events.length - 1];
 }
 
@@ -164,9 +167,9 @@ export function getLastEvent(
  * @returns Array of matching events
  */
 export function getEventsByName(
-  events: Array<{ event: string; payload: unknown }>,
+  events: TestEvent[],
   eventName: string
-): Array<{ event: string; payload: unknown }> {
+): TestEvent[] {
   return events.filter((e) => e.event === eventName);
 }
 
@@ -215,7 +218,7 @@ export async function retry<T>(
  * @returns Result of the callback
  */
 // biome-ignore lint/suspicious/noExplicitAny: Test helper accepts any node type
-export async function simulatePress(node: any, propName = 'onPress'): Promise<unknown> {
+export async function simulatePress(node: any, propName = 'onPress'): Promise<ReviewedUnknown> {
   if (!node) {
     throw new Error('Node is null or undefined');
   }

@@ -10,7 +10,7 @@ describe('RillErrorBoundary', () => {
   let React: typeof import('react');
   let TestRenderer: typeof import('react-test-renderer');
   let act: typeof import('react-test-renderer').act;
-  let sdk: typeof import('../../let/sdk');
+  let sdk: typeof import('../../../sdk/sdk');
 
   afterAll(() => {
     // Cleanup globalThis.React
@@ -26,11 +26,11 @@ describe('RillErrorBoundary', () => {
     // Set React on globalThis for RillErrorBoundary
     (globalThis as Record<string, unknown>).React = React;
 
-    sdk = await import('../../let/sdk');
+    sdk = await import('../../../sdk/sdk');
   });
 
   afterEach(() => {
-    delete (globalThis as Record<string, unknown>).__sendEventToHost;
+    delete (globalThis as Record<string, unknown>).__rill_emitEvent;
   });
 
   test('should render children when no error', () => {
@@ -163,14 +163,14 @@ describe('RillErrorBoundary', () => {
     }
   });
 
-  test('should send error to host when __sendEventToHost is available', () => {
+  test('should send error to host when __rill_emitEvent is available', () => {
     const originalError = console.error;
     console.error = () => {};
 
     try {
       const sentEvents: Array<{ name: string; payload: unknown }> = [];
 
-      (globalThis as Record<string, unknown>).__sendEventToHost = (
+      (globalThis as Record<string, unknown>).__rill_emitEvent = (
         name: string,
         payload: unknown
       ) => {

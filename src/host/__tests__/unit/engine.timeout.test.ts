@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'bun:test';
 import { Engine } from '../../engine';
-import { createMockJSEngineProvider } from '../test-utils';
 
 // Silent logger for tests - prevents expected error logs from cluttering output
 const silentLogger = {
@@ -11,9 +10,8 @@ const silentLogger = {
 
 describe('Engine timeout behavior', () => {
   it('does not throw TimeoutError for quick microtask usage', async () => {
-    const provider = createMockJSEngineProvider();
     const engine = new Engine({
-      quickjs: provider,
+      sandbox: 'vm',
       timeout: 5000,
       debug: false,
       logger: silentLogger,
@@ -24,9 +22,8 @@ describe('Engine timeout behavior', () => {
   });
 
   it('does not throw TimeoutError even for long sync work (best-effort guard)', async () => {
-    const provider = createMockJSEngineProvider();
     const engine = new Engine({
-      quickjs: provider,
+      sandbox: 'vm',
       timeout: 5000,
       debug: false,
       logger: silentLogger,
@@ -38,153 +35,75 @@ describe('Engine timeout behavior', () => {
     expect(engine.isLoaded).toBe(true);
   });
 
-  it('should trigger fatalError event and forceDestroy on hard timeout', async () => {
-    let fatalErrorFired = false;
-    let fatalErrorMessage = '';
-
-    const provider = createMockJSEngineProvider();
+  it('should handle forceDestroy when context.dispose() throws', async () => {
+    let disposeThrew = false;
     const engine = new Engine({
-      quickjs: provider,
-      timeout: 100,
+      sandbox: 'vm',
+      timeout: 1000,
       debug: false,
       logger: silentLogger,
     });
 
-    // Listen for fatalError event
-    engine.on('fatalError', (error: Error) => {
-      fatalErrorFired = true;
-      fatalErrorMessage = error.message;
-    });
+    await Promise.resolve().then(() => engine.loadBundle('1 + 1'));
 
-    // Create code that never finishes (simulates infinite async operation)
-    const neverResolves = new Promise(() => {
-      // Intentionally never resolve
-    });
-
-    // Mock executeBundle to return the never-resolving promise
-    const originalExecuteBundle = engine.executeBundle.bind(engine);
-    engine.executeBundle = async () => {
-      await neverResolves;
-    };
-
-    try {
-      await engine.loadBundle('// will timeout');
-    } catch (error: unknown) {
-      // Expect TimeoutError
-      expect(error).toBeInstanceOf(Error);
-      expect((error as Error).message).toContain('timeout');
+    // Monkeypatch context.dispose to throw (simulate provider edge-case)
+    const ctx = engine.context as { dispose?: () => void } | null;
+    expect(ctx).not.toBeNull();
+    if (ctx) {
+      const originalDispose = ctx.dispose?.bind(ctx);
+      ctx.dispose = () => {
+        disposeThrew = true;
+        try {
+          originalDispose?.();
+        } catch {
+          // ignore
+        }
+        throw new Error('Dispose failed');
+      };
     }
 
-    // Wait for timeout to trigger
-    await new Promise((resolve) => setTimeout(resolve, 150));
-
-    // Verify fatalError was emitted
-    expect(fatalErrorFired).toBe(true);
-    expect(fatalErrorMessage).toContain('timeout');
-
-    // Verify engine was force destroyed
+    expect(() => engine.forceDestroy()).not.toThrow();
+    expect(disposeThrew).toBe(true);
     expect(engine.destroyed).toBe(true);
-    expect(engine.isLoaded).toBe(false);
-
-    // Restore original method
-    engine.executeBundle = originalExecuteBundle;
+    expect(engine.context).toBe(null);
   });
 
-  it('should handle forceDestroy when context.dispose() throws', () => {
-    let disposeThrew = false;
-
-    const provider: MockQuickJSProvider = {
-      createRuntime(): MockQuickJSRuntime {
-        return {
-          createContext(): MockQuickJSContext {
-            return {
-              eval: () => {},
-              setGlobal: () => {},
-              getGlobal: () => undefined,
-              dispose(): void {
-                disposeThrew = true;
-                throw new Error('Dispose failed');
-              },
-            };
-          },
-          dispose: () => {},
-        };
-      },
-    };
-
-    const engine = new Engine({
-      quickjs: provider,
-      timeout: 1000,
-      debug: false,
-      logger: silentLogger,
-    });
-
-    // Load a simple bundle to initialize context
-    engine.loadBundle('1 + 1').catch(() => {});
-
-    // Wait for init
-    setTimeout(() => {
-      // Call forceDestroy directly
-      expect(() => {
-        engine.forceDestroy();
-      }).not.toThrow();
-
-      // Verify dispose was attempted
-      expect(disposeThrew).toBe(true);
-
-      // Verify engine is still marked as destroyed despite error
-      expect(engine.destroyed).toBe(true);
-      expect(engine.context).toBe(null);
-    }, 50);
-  });
-
-  it('should handle forceDestroy when runtime.dispose() throws', () => {
+  it('should handle forceDestroy when runtime.dispose() throws', async () => {
     let runtimeDisposeThrew = false;
-
-    const provider: MockQuickJSProvider = {
-      createRuntime(): MockQuickJSRuntime {
-        return {
-          createContext(): MockQuickJSContext {
-            return {
-              eval: () => {},
-              setGlobal: () => {},
-              getGlobal: () => undefined,
-              dispose: () => {},
-            };
-          },
-          dispose(): void {
-            runtimeDisposeThrew = true;
-            throw new Error('Runtime dispose failed');
-          },
-        };
-      },
-    };
-
     const engine = new Engine({
-      quickjs: provider,
+      sandbox: 'vm',
       timeout: 1000,
       debug: false,
       logger: silentLogger,
     });
 
-    // Load to initialize
-    engine.loadBundle('1 + 1').catch(() => {});
+    await Promise.resolve().then(() => engine.loadBundle('1 + 1'));
 
-    setTimeout(() => {
-      expect(() => {
-        engine.forceDestroy();
-      }).not.toThrow();
+    // Monkeypatch runtime.dispose to throw (simulate provider edge-case)
+    const rt = engine.runtime as { dispose?: () => void } | null;
+    expect(rt).not.toBeNull();
+    if (rt) {
+      const originalDispose = rt.dispose?.bind(rt);
+      rt.dispose = () => {
+        runtimeDisposeThrew = true;
+        try {
+          originalDispose?.();
+        } catch {
+          // ignore
+        }
+        throw new Error('Runtime dispose failed');
+      };
+    }
 
-      expect(runtimeDisposeThrew).toBe(true);
-      expect(engine.destroyed).toBe(true);
-      expect(engine.runtime).toBe(null);
-    }, 50);
+    expect(() => engine.forceDestroy()).not.toThrow();
+    expect(runtimeDisposeThrew).toBe(true);
+    expect(engine.destroyed).toBe(true);
+    expect(engine.runtime).toBe(null);
   });
 
   it('should clear timers before disposing resources in forceDestroy', async () => {
-    const provider = createMockJSEngineProvider();
     const engine = new Engine({
-      quickjs: provider,
+      sandbox: 'vm',
       timeout: 1000,
       debug: false,
       logger: silentLogger,

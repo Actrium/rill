@@ -3,6 +3,10 @@
  */
 
 import { expect } from 'bun:test';
+import type { ReviewedUnknown } from '../../../types';
+
+type TestEvent = { event: string; payload: ReviewedUnknown };
+type ConsoleEntry = { level: string; args: ReviewedUnknown[] };
 
 /**
  * Assert that no memory leak occurred
@@ -30,9 +34,9 @@ export function expectNoMemoryLeak(initialSize: number, finalSize: number, toler
  * @param payloadMatcher - Optional function to match payload
  */
 export function expectEventReceived(
-  events: Array<{ event: string; payload: unknown }>,
+  events: TestEvent[],
   eventName: string,
-  payloadMatcher?: (payload: unknown) => boolean
+  payloadMatcher?: (payload: ReviewedUnknown) => boolean
 ): void {
   const matchingEvents = events.filter((e) => e.event === eventName);
 
@@ -51,7 +55,7 @@ export function expectEventReceived(
  * @param eventName - Name of the event that should not exist
  */
 export function expectEventNotReceived(
-  events: Array<{ event: string; payload: unknown }>,
+  events: TestEvent[],
   eventName: string
 ): void {
   const matchingEvents = events.filter((e) => e.event === eventName);
@@ -65,7 +69,7 @@ export function expectEventNotReceived(
  * @param expectedOrder - Expected order of event names
  */
 export function expectEventsInOrder(
-  events: Array<{ event: string; payload: unknown }>,
+  events: TestEvent[],
   expectedOrder: string[]
 ): void {
   const actualOrder = events.map((e) => e.event);
@@ -82,7 +86,7 @@ export function expectEventsInOrder(
  * @param expectedCount - Expected count
  */
 export function expectEventCount(
-  events: Array<{ event: string; payload: unknown }>,
+  events: TestEvent[],
   eventName: string,
   expectedCount: number
 ): void {
@@ -98,7 +102,7 @@ export function expectEventCount(
  * @param messageMatcher - String or regex to match
  */
 export function expectConsoleOutput(
-  consoleOutput: Array<{ level: string; args: unknown[] }>,
+  consoleOutput: ConsoleEntry[],
   level: string,
   messageMatcher: string | RegExp
 ): void {
@@ -121,7 +125,7 @@ export function expectConsoleOutput(
  * @param consoleOutput - Array of console outputs
  */
 export function expectNoConsoleErrors(
-  consoleOutput: Array<{ level: string; args: unknown[] }>
+  consoleOutput: ConsoleEntry[]
 ): void {
   const errors = consoleOutput.filter((log) => log.level === 'error');
 
@@ -141,7 +145,7 @@ export function expectNoConsoleErrors(
  * @param consoleOutput - Array of console outputs
  */
 export function expectNoConsoleWarnings(
-  consoleOutput: Array<{ level: string; args: unknown[] }>
+  consoleOutput: ConsoleEntry[]
 ): void {
   const warnings = consoleOutput.filter((log) => log.level === 'warn');
   expect(warnings.length).toBe(0);

@@ -12,14 +12,28 @@ exclude = [
   "**/*.native.js",
   "**/native/**/sandbox_test.js",
   "**/*.rn.test.ts",
-  "tests/rn-integration/**"
+  "tests/rn-integration/**",
+  "guest/build/**",
+  "src/guest/build/**",
+  "android/build/**",
+  "examples/**/Pods/**",
+  "examples/**/build/**",
+  "examples/**/android/build/**",
+  "examples/**/android/app/build/**",
+  "native/**/build/**",
+  "native/**/build-wasm/**",
+  "tests/**/macos/Pods/**",
+  "tests/**/macos/build/**",
+  "coverage/**",
+  "test-results/**"
 ]
 
-# Coverage settings
-coverage = true
+# Coverage is intentionally opt-in via `bun test --coverage`.
+# Keeping it off by default prevents Bun from walking large native build outputs
+# during local preflight runs after Android/iOS simulator tests.
+coverage = false
 coverageReporter = ["text", "lcov"]
 
 # Increased timeout to handle Worker-based hard timeout tests that need time to interrupt
 # and to wait for WorkerQuickJSProvider initialization with quickjs-emscripten WASM module
 timeout = 15000
-

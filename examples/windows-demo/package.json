@@ -1,0 +1,41 @@
+{
+  "name": "windows-demo",
+  "version": "1.0.0",
+  "description": "windows-demo - rill hello world for Windows",
+  "main": "RCTNApps/index.tsx",
+  "scripts": {
+    "bundle": "react-native bundle --entry-file index.js --platform windows --dev false --bundle-output windows/WindowsDemo.Package/Bundle/index.windows.bundle --assets-dest windows/WindowsDemo.Package/Bundle",
+    "bundle:dev": "react-native bundle --entry-file index.js --platform windows --dev true --bundle-output windows/WindowsDemo.Package/Bundle/index.windows.bundle --assets-dest windows/WindowsDemo.Package/Bundle",
+    "windows": "npx @react-native-community/cli run-windows --no-packager",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@babel/runtime": "^7.28.4",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-windows": "^0.81.2",
+    "react-reconciler": "0.31.0",
+    "rill": "file:../../"
+  },
+  "devDependencies": {
+    "@react-native-community/cli": "^20.1.0",
+    "@react-native/babel-preset": "^0.81.0",
+    "@react-native/metro-config": "^0.81.0",
+    "@rnx-kit/jest-preset": "^0.1.17",
+    "@tsconfig/react-native": "^3.0.8",
+    "@types/node": "^22.19.3",
+    "@types/react": "~19.1.0",
+    "typescript": "^5.9.3"
+  },
+  "react-native-windows": {
+    "init-windows": {
+      "name": "WindowsDemo",
+      "namespace": "WindowsDemo",
+      "template": "cpp-app"
+    }
+  }
+}

@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Scheme
+   LastUpgradeVersion = "1600"
+   version = "1.7">
+   <BuildAction
+      parallelizeBuildables = "YES"
+      buildImplicitDependencies = "YES">
+      <PreActions>
+         <ExecutionAction
+            ActionType = "Xcode.IDEStandardExecutionActionsCore.ExecutionActionType.ShellScriptAction">
+            <ActionContent
+               title = "Configure ios-demo"
+               scriptText = "# Configuration check for ios-demo&#10;TARGET_SANDBOX=&quot;hermes&quot;&#10;&#10;CURRENT_SANDBOX=$(grep -o &apos;RILL_SANDBOX_[A-Z]*=1&apos; &quot;${PROJECT_DIR}/ios-demo.xcodeproj/project.pbxproj&quot; 2&gt;/dev/null | head -1 | sed &apos;s/RILL_SANDBOX_//;s/=1//&apos; | tr &apos;[:upper:]&apos; &apos;[:lower:]&apos;)&#10;&#10;if [ &quot;$CURRENT_SANDBOX&quot; != &quot;$TARGET_SANDBOX&quot; ]; then&#10;    echo &quot;error: Configuration mismatch!&quot;&#10;    echo &quot;error: Current sandbox: $CURRENT_SANDBOX&quot;&#10;    echo &quot;error: Expected sandbox: $TARGET_SANDBOX&quot;&#10;    echo &quot;error: Run in Terminal: cd ${PROJECT_DIR} &amp;&amp; ./switch-config.sh $TARGET_SANDBOX&quot;&#10;    exit 1&#10;fi&#10;"
+               shellToInvoke = "/bin/bash">
+               <EnvironmentBuildable>
+                  <BuildableReference
+                     BuildableIdentifier = "primary"
+                     BlueprintIdentifier = "B31ECC4A2F187B9D002E8C93"
+                     BuildableName = "ios-demo.app"
+                     BlueprintName = "ios-demo"
+                     ReferencedContainer = "container:ios-demo.xcodeproj">
+                  </BuildableReference>
+               </EnvironmentBuildable>
+            </ActionContent>
+         </ExecutionAction>
+      </PreActions>
+      <BuildActionEntries>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "B31ECC4A2F187B9D002E8C93"
+               BuildableName = "ios-demo.app"
+               BlueprintName = "ios-demo"
+               ReferencedContainer = "container:ios-demo.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+      </BuildActionEntries>
+   </BuildAction>
+   <TestAction
+      buildConfiguration = "Debug"
+      selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
+      selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
+      shouldUseLaunchSchemeArgsEnv = "YES">
+      <Testables>
+      </Testables>
+   </TestAction>
+   <LaunchAction
+      buildConfiguration = "Debug"
+      selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
+      selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
+      launchStyle = "0"
+      useCustomWorkingDirectory = "NO"
+      ignoresPersistentStateOnLaunch = "NO"
+      debugDocumentVersioning = "YES"
+      debugServiceExtension = "internal"
+      allowLocationSimulation = "YES">
+      <BuildableProductRunnable
+         runnableDebuggingMode = "0">
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "B31ECC4A2F187B9D002E8C93"
+            BuildableName = "ios-demo.app"
+            BlueprintName = "ios-demo"
+            ReferencedContainer = "container:ios-demo.xcodeproj">
+         </BuildableReference>
+      </BuildableProductRunnable>
+   </LaunchAction>
+   <ProfileAction
+      buildConfiguration = "Release"
+      shouldUseLaunchSchemeArgsEnv = "YES"
+      savedToolIdentifier = ""
+      useCustomWorkingDirectory = "NO"
+      debugDocumentVersioning = "YES">
+      <BuildableProductRunnable
+         runnableDebuggingMode = "0">
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "B31ECC4A2F187B9D002E8C93"
+            BuildableName = "ios-demo.app"
+            BlueprintName = "ios-demo"
+            ReferencedContainer = "container:ios-demo.xcodeproj">
+         </BuildableReference>
+      </BuildableProductRunnable>
+   </ProfileAction>
+   <AnalyzeAction
+      buildConfiguration = "Debug">
+   </AnalyzeAction>
+   <ArchiveAction
+      buildConfiguration = "Release"
+      revealArchiveInOrganizer = "YES">
+   </ArchiveAction>
+</Scheme>

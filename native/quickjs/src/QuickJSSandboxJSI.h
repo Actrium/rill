@@ -16,8 +16,8 @@ using namespace facebook;
  *
  * Exposed to JS as a HostObject with SYNCHRONOUS methods:
  * - eval(code: string): unknown
- * - setGlobal(name: string, value: unknown): void
- * - getGlobal(name: string): unknown
+ * - inject(name: string, value: unknown): void
+ * - extract(name: string): unknown
  * - dispose(): void
  */
 class QuickJSSandboxContext : public jsi::HostObject {
@@ -32,9 +32,9 @@ public:
   std::vector<jsi::PropNameID> getPropertyNames(jsi::Runtime &rt) override;
 
   jsi::Value eval(jsi::Runtime &rt, const std::string &code);
-  void setGlobal(jsi::Runtime &rt, const std::string &name,
+  void inject(jsi::Runtime &rt, const std::string &name,
                  const jsi::Value &value);
-  jsi::Value getGlobal(jsi::Runtime &rt, const std::string &name);
+  jsi::Value extract(jsi::Runtime &rt, const std::string &name);
   void dispose();
 
   bool isDisposed() const { return disposed_; }
@@ -53,16 +53,16 @@ private:
     std::string callbackId;
   };
   std::unordered_map<std::string, std::shared_ptr<jsi::Function>> callbacks_;
+  std::unordered_map<std::string, JSValue> wrapperCache_; // Cache JSValue wrappers for identity
   int callbackCounter_;
 
   // JS class for HostFunctionData opaque storage
   static JSClassID hostFunctionDataClassID_;
-  static bool classRegistered_;
   static void hostFunctionDataFinalizer(JSRuntime *rt, JSValue val);
   void ensureClassRegistered();
 
-  JSValue jsiToQJS(jsi::Runtime &rt, const jsi::Value &value);
-  jsi::Value qjsToJSI(jsi::Runtime &rt, JSValue value);
+  JSValue jsiToQJS(jsi::Runtime &rt, const jsi::Value &value, int depth = 0);
+  jsi::Value qjsToJSI(jsi::Runtime &rt, JSValue value, int depth = 0);
   JSValue wrapFunctionForSandbox(jsi::Runtime &rt, jsi::Function &&func);
 
   void checkException();

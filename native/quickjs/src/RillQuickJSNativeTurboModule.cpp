@@ -1,5 +1,5 @@
 #include "RillQuickJSNativeTurboModule.h"
-#include "QuickJSRuntimeFactory.h"
+#include "QuickJSSandboxJSI.h"
 
 namespace rill::quickjs {
 
@@ -14,7 +14,7 @@ void RillQuickJSNativeTurboModule::initialize(jsi::Runtime &runtime) {
   }
 
   // Install QuickJS sandbox JSI bindings
-  QuickJSRuntimeFactory::install(runtime);
+  quickjs_sandbox::QuickJSSandboxModule::install(runtime);
 
   initialized_ = true;
 }

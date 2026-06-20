@@ -1,0 +1,54 @@
+/**
+ * Type declarations for QuickJS WASM module
+ */
+
+import type { ReviewedUnknown } from '../../types';
+
+interface QuickJSWASMModule {
+  // Emscripten utilities
+  ccall: (
+    name: string,
+    returnType: string | null,
+    argTypes: string[],
+    args: ReviewedUnknown[]
+  ) => ReviewedUnknown;
+  cwrap: (
+    name: string,
+    returnType: string | null,
+    argTypes: string[]
+  ) => (...args: ReviewedUnknown[]) => ReviewedUnknown;
+  // biome-ignore lint/complexity/noBannedTypes: Emscripten API requires Function type
+  addFunction: (fn: Function, signature: string) => number;
+  removeFunction: (ptr: number) => void;
+  UTF8ToString: (ptr: number) => string;
+  stringToUTF8: (str: string, outPtr: number, maxBytes: number) => void;
+  _malloc: (size: number) => number;
+  _free: (ptr: number) => void;
+  HEAPU8: Uint8Array;
+
+  // QuickJS C API bindings
+  _qjs_init: () => number;
+  _qjs_destroy: () => void;
+  _qjs_eval: (codePtr: number) => number;
+  _qjs_eval_void: (codePtr: number) => number;
+  _qjs_inject_json: (namePtr: number, valuePtr: number) => number;
+  _qjs_extract_json: (namePtr: number) => number;
+  _qjs_set_host_callback: (fnPtr: number) => void;
+  _qjs_install_host_functions: () => void;
+  _qjs_set_timer_callback: (fnPtr: number) => void;
+  _qjs_install_timer_functions: () => void;
+  _qjs_fire_timer: (timerId: number) => void;
+  _qjs_install_console: () => void;
+  _qjs_execute_pending_jobs: () => number;
+  _qjs_free_string: (ptr: number) => void;
+  _qjs_get_memory_usage: () => number;
+}
+
+type QuickJSWASMFactoryModuleArg = {
+  locateFile?: (path: string, scriptDirectory?: string) => string;
+};
+
+type QuickJSWASMFactory = (moduleArg?: QuickJSWASMFactoryModuleArg) => Promise<QuickJSWASMModule>;
+
+declare const createQuickJSSandbox: QuickJSWASMFactory;
+export default createQuickJSSandbox;

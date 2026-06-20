@@ -1,11 +1,8 @@
 /**
  * Shared Style Type Definitions
  *
- * Shared between Guest (@rill/let) and Host (runtime) sides.
+ * Shared between Guest (rill/guest) and Host (runtime) sides.
  * These types define the style system used across the boundary.
- *
- * Note: If @rill/let needs to be published independently, these types
- * should be bundled/inlined during the build process.
  */
 
 // ============================================
@@ -284,6 +281,8 @@ export type DimensionValue = number | string | 'auto' | null | undefined;
 // Event Types
 // ============================================
 
+import type { ReviewedUnknown } from './types';
+
 /**
  * Layout Event
  */
@@ -321,8 +320,8 @@ export type ImageSource =
  */
 export interface NativeSyntheticEvent<T> {
   nativeEvent: T;
-  currentTarget: unknown;
-  target: unknown;
+  currentTarget: ReviewedUnknown;
+  target: ReviewedUnknown;
   bubbles: boolean;
   cancelable: boolean;
   defaultPrevented: boolean;
@@ -340,15 +339,15 @@ export interface NativeSyntheticEvent<T> {
  */
 export interface GestureResponderEvent
   extends NativeSyntheticEvent<{
-    changedTouches: unknown[];
+    changedTouches: ReviewedUnknown[];
     identifier: string;
     locationX: number;
     locationY: number;
     pageX: number;
     pageY: number;
-    target: unknown;
+    target: ReviewedUnknown;
     timestamp: number;
-    touches: unknown[];
+    touches: ReviewedUnknown[];
   }> {}
 
 /**

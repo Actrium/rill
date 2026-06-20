@@ -12,10 +12,10 @@
  * Provides error capturing and reporting to host DevTools
  */
 export const DEVTOOLS_SHIM = `
-if (typeof globalThis.__sendEventToHost === 'function') {
+if (typeof globalThis.__rill_emitEvent === 'function') {
   globalThis.__rill_devtools_guest = {
     captureError: function(error, context) {
-      globalThis.__sendEventToHost('devtools:error', {
+      globalThis.__rill_emitEvent('devtools:error', {
         message: error?.message || String(error),
         stack: error?.stack,
         context: context

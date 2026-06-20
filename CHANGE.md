@@ -1,104 +1,92 @@
-# 修复：Android 上 Host→Guest 消息不通
-****
-## 日期
+# Android Host -> Guest / Microtask 修复记录
 
-2026-05-15
+## 结论
 
-## 问题描述
+`fix/some` 现在按 `main` 的最新 Bridge 架构处理 Host -> Guest 消息：
 
-Android 上 Host 发消息给 Guest 完全不通，iOS 正常。表现为：
-- Guest 通过 `useEventBridge` 发起请求（如 GET_APP_INFO），Host 收到并处理后调用 `engine.sendEvent()` 发送响应
-- 响应事件经过 Bridge 编解码、guestReceiver 到达沙箱，但 Guest 的 `useHostEvent` 回调从未触发
-- Promise 的 `.then()` 永远不会执行，导致 UI 不更新
+1. Host 调用 `Engine.sendEvent()` 或 `sendToSandbox()`
+2. `Bridge.sendToGuest()` 完成 HostMessage 编解码
+3. Engine 将消息注入 `globalThis.__hostMessage`
+4. Engine 通过 `evalCode('globalThis.__rill_handleMessage(__hostMessage)')` 在 Guest runtime 内执行分发
+5. Guest 侧 `__rill.dispatchEvent()` 调用 `useHostEvent()` 注册的 listener
 
-## 根因
+因此旧分支里直接引入 `__rillUseHostEvent` / `__rillHandleHostEvent` 的方案不再是当前最佳路径。当前架构已经避免了从 Host 直接调用 Guest function shell 的问题，真正需要补齐的是各 native sandbox adapter 在 `eval()` 和跨 runtime 函数调用后的调度语义。
 
-两个问题叠加导致：
+## Bug 本质
 
-### 问题1：QuickJS JSI 的 `getGlobal` 返回的函数引用无法从 Host 侧直接调用
+Android QuickJS 的 `JS_Eval()` 成功执行同步代码后，不会自动执行 pending jobs。`Promise.resolve().then(...)` 这类 microtask 会留在 QuickJS runtime 队列里。
 
-`context.getGlobal('__handleHostEvent')` 返回的函数，typeof 是 `'function'`，调用不报错，但函数体**完全不执行**。
+Host -> Guest event 的 listener 可以被同步调用，但 listener 内部或 React 调度链路里排入的 Promise microtask 不会及时执行，表现为：
 
-原因：QuickJS JSI 绑定层通过 `HostObject` 暴露 `getGlobal` 方法，它把沙箱内的函数包装成 JSI `Function` 返回给 Host 侧。但这个 JSI Function 只是壳，调用时不会切回 QuickJS 沙箱上下文执行原始函数体。JSC 没有这个问题。
+- `.then()` 不触发
+- 状态更新或后续回调没有落地
+- Android QuickJS 与 JSC/Hermes 行为不一致
 
-额外问题：`globals-setup.ts` 会覆盖 `__handleHostEvent`，其内部使用空的 `__hostEventListeners`，而 SDK 通过 `__rillUseHostEvent` 注册的回调在 `__rillHostEventListeners` 中。必须调用 `__rillHandleHostEvent`（injectRuntimeAPI 版本）才能找到回调。
+继续跑 Android emulator E2E 后，还发现 Hermes JSI adapter 存在同类缺口：隔离 Hermes runtime 没有基础 `setImmediate` / `queueMicrotask` shim，且 `eval()` 后没有显式 drain。React/RN scheduler 或 Promise 链路触发 `setImmediate` 时会报 `Property 'setImmediate' doesn't exist`。
 
-### 问题2：QuickJS 的 `context.eval()` 不自动执行 pending 微任务
+这不是业务协议问题，而是 sandbox adapter 没有完整承担“宿主事件循环 checkpoint”的职责：同步 `eval()` 返回前必须把本 runtime 内已经排入的 microtask/immediate 队列推进到稳定状态。
 
-通过 `context.eval()` 成功调用 `__rillHandleHostEvent` 后，回调执行了，`Promise.resolve()` 也被调用了，但 `.then()` 回调永远不触发。
+## 过程慢的原因
 
-原因：QuickJS 的 `JS_Eval()` 执行完代码后不会自动执行排队的微任务（Promise 的 `.then` 回调）。JSC 会自动处理，所以 iOS 没问题。QuickJS 需要显式调用 `JS_ExecutePendingJob()` 来 drain 微任务队列。
+实测慢主要不是测试断言本身，而是 runner 有重复和卡死点：
 
-## 解决方案
+- 本机工作区存在大量 macOS `compressed,dataless` 文件，表现为 `stat` 大小正常但读取为 0 字节或阻塞。受影响文件包括 `package-lock.json`、`src/sdk/sdk.ts`、`src/cli/oxc-adapter.js`、QuickJS WASM、Biome/Playwright/React/oxc native binding 等。结果是 `bun install` 卡在 resolving、`git status`/`rg`/Metro 扫描变慢、Node/Bun `require()` 返回空导出或 native binary `ENOEXEC`
+- `examples/android-demo/install.sh` 先手动执行一次 Metro bundle，Gradle release 构建的 React Native task 又会再 bundle 一次
+- 前置 `react-native/cli.js bundle` 在连续 quickjs/hermes 两个 flavor 时出现 Node/Jest worker 不退出，表现为长时间无输出
+- 首次 Android release 构建还要生成 CMake/NDK、Metro、dex、APK 产物，`examples/android-demo/android/app/build` 会增长到 GB 级，冷构建天然慢
+- 早期动态 autolinking 会经由 `file:` dependency 扫到 repo 根和 native build artifacts，进一步放大卡顿
+- Android demo 的 Metro `watchFolders` 指向 rill symlink realpath 后，若未显式关闭 `resolver.useWatchman`，Watchman 会尝试解析 repo 根并触发 `Resource deadlock avoided`；若未 block 根 `node_modules`，Metro 还会扫到根依赖里的 dataless `package.json`
+- 原 `bun test`/coverage 默认会触发仓库级发现和覆盖率扫描，遇到 GB 级 native/Android 生成物和 dataless 文件时非常慢；全量 unit 应改为显式测试文件列表
 
-### 修复1：`dispatchMessageToGuest` 中改用 `context.eval()` 调用沙箱函数
+修复后 Android runner 默认跳过前置 bundle，只让 Gradle/RN 官方 task 负责把 JS bundle 打进 APK；热缓存下完整 quickjs+hermes emulator E2E 已能在几十秒内完成。
 
-文件：`src/host/Engine.ts`
+## 修复
 
-HOST_EVENT 和 CALL_FUNCTION 分支，从 `getGlobal` + 直接调用改为 `context.eval()` + JSON 字面量传参：
+- `native/quickjs/src/QuickJSSandboxJSI.cpp`
+  - `QuickJSSandboxContext::eval()` 在成功 `JS_Eval()` 后循环调用 `JS_ExecutePendingJob()`
+  - 队列为空时返回
+  - pending job 抛错时转成 `jsi::JSError`
+  - 超过安全阈值时报错，避免无限 drain
 
-```js
-// 之前（不工作）
-const fn = context.getGlobal('__handleHostEvent');
-fn(eventName, payload);
+- `native/hermes/src/HermesSandboxJSI.cpp`
+  - sandbox runtime 初始化时注入基础 `queueMicrotask` / `setImmediate` / `clearImmediate` shim
+  - `eval()` / `evalBytecode()` 后循环调用 Hermes `drainMicrotasks()` 并 drain 内部 immediate 队列
+  - Host 调用 Guest function 返回前同样 drain，覆盖 Guest function 内部排 Promise/Immediate 的情况
+  - 保留安全阈值，避免无限调度循环
 
-// 之后（工作）
-context.eval(`globalThis.__rillHandleHostEvent("${eventName}", ${payloadJson})`);
-```
+- `native/quickjs/test/sandbox_test.js`
+  - 新增精确回归断言：`ctx.eval('Promise.resolve(42).then(...)')` 后立即 `ctx.extract()` 必须看到 microtask 已执行
+  - 旧实现会失败，修复后通过
 
-关键点：
-- 使用 `__rillHandleHostEvent` 而非 `__handleHostEvent`
-- payload 通过 `JSON.stringify` 嵌入 eval 字符串，因为 `setGlobal` 设置的对象作为参数传给沙箱内函数时也有问题
+- `examples/android-demo/App.tsx`
+  - Android emulator E2E 增加同一组真实设备/模拟器断言
+  - QuickJS/Hermes flavor 都会跑到该检查
 
-### 修复1a：`injectRuntimeAPI` 注入独立事件总线
+- Android/iOS demo runner 稳定性
+  - Android demo 使用静态 autolinking，避免 RN CLI 扫描 repo 生成物卡住
+  - Metro 关闭 Watchman，block rill 根 `node_modules` 和 native/test build artifacts
+  - Android install 默认跳过手动 pre-bundle，避免与 Gradle React Native bundle task 重复
+  - Android Gradle 降并发、增加 HTTP timeout、禁 release lint 阻断
+  - iOS/Android runner 明确选择 Node 22，限制 Metro/Xcode/Gradle 并发
 
-文件：`src/host/Engine.ts`
+- 本机测试/工具链稳定性
+  - 恢复 dataless 的 tracked 源文件和测试 fixture，避免 Git/Metro/编译器读到空内容
+  - 重铺本机损坏的 `react` / `react-test-renderer` / `oxc-parser` / `@biomejs` / `playwright` 依赖内容
+  - `bunfig.toml` 默认关闭 coverage；新增 `scripts/run-unit-tests.sh`，只收集 `src` 下测试文件并传给 Bun
+  - `src/cli/build.ts` 延迟加载 Babel，并在无 `host:`/`export` 代码时跳过 Host boundary 深扫
+  - `src/host/__tests__/setup.ts` 不再默认加载 `happy-dom`，避免 Bun 在非 DOM 测试中触发 `ECANCELED`
 
-新增 `__rillUseHostEvent` / `__rillHandleHostEvent` / `__rillHostEventListeners`，与 globals-setup.ts 的 `__useHostEvent` / `__handleHostEvent` / `__hostEventListeners` 分离。
+## 验证范围
 
-原因：globals-setup.ts 在 Guest bundle 中执行，会覆盖 `__handleHostEvent`，其内部使用独立的 `__hostEventListeners` Map（此时为空）。SDK 注册回调走的是 injectRuntimeAPI 注入的 `__rillUseHostEvent`，回调存在 `__rillHostEventListeners` 中。如果 Engine 调用的是被覆盖后的 `__handleHostEvent`，会在空的 `__hostEventListeners` 中查找，找不到任何回调。
+本轮在 `fix/some` 上已通过：
 
-### 修复1b：`sdk.ts` 优先使用 `__rillUseHostEvent` 注册回调
+- `bun run preflight`
+- `bun run test:native`
+- `bun run test:bundle`
+- `bun run test:e2e:wasm`
+- `RILL_ANDROID_E2E_AVD=Pixel_API_35 bun run test:e2e:android-emulator`
 
-文件：`src/guest/let/sdk.ts`
+未在本轮重新声明通过：
 
-`useHostEvent` 和 `useRemoteRef` 中，从直接取 `__useHostEvent` 改为优先取 `__rillUseHostEvent`，fallback 到 `__useHostEvent`：
-
-```js
-// 之前
-if ('__useHostEvent' in globalThis) {
-  const unsubscribe = g.__useHostEvent(eventName, stableCallback);
-}
-
-// 之后
-const subscribe = g.__rillUseHostEvent ?? g.__useHostEvent;
-if (typeof subscribe === 'function') {
-  const unsubscribe = subscribe(eventName, stableCallback);
-}
-```
-
-原因：虽然 injectRuntimeAPI 会执行 `globalThis.__useHostEvent = globalThis.__rillUseHostEvent` 覆盖旧版本，但在 QuickJS 的 eval 执行时序下，`__useHostEvent` 可能仍指向 globals-setup.ts 的旧版本（使用空的 `__hostEventListeners`）。优先取 `__rillUseHostEvent` 确保回调注册到 `__rillHostEventListeners`，与 Engine.ts eval 调用的 `__rillHandleHostEvent` 对齐。
-
-### 修复2：C++ 层 `eval()` 后自动 drain 微任务
-
-文件：`native/quickjs/src/QuickJSSandboxJSI.cpp`
-
-在 `JS_Eval()` 之后加上微任务 drain 循环：
-
-```cpp
-JSContext *ctx;
-int execCount = 0;
-while (JS_ExecutePendingJob(qjsRuntime_, &ctx) > 0) {
-  execCount++;
-  if (execCount > 1000) break; // 安全阀
-}
-```
-
-## 涉及文件
-
-| 文件 | 修改内容 |
-|------|----------|
-| `src/host/Engine.ts` | 1. `dispatchMessageToGuest` 的 HOST_EVENT/CALL_FUNCTION 分支改用 `context.eval()` + JSON 字面量 |
-| | 2. `injectRuntimeAPI` 注入 `__rillUseHostEvent` / `__rillHandleHostEvent` 独立事件总线 |
-| `src/guest/let/sdk.ts` | `useHostEvent` / `useRemoteRef` 优先使用 `__rillUseHostEvent` 注册回调 |
-| `native/quickjs/src/QuickJSSandboxJSI.cpp` | `eval()` 方法后加 `JS_ExecutePendingJob` 循环 |
+- `bun run test:e2e:rn`
+- `bun run test:e2e:ios-sim`

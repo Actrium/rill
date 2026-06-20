@@ -1,26 +1,26 @@
 import { describe, expect, it, mock } from 'bun:test';
+import { HostMsg } from '../../types';
 import { Engine } from '../../engine';
-import { createMockJSEngineProvider } from '../test-utils';
 
 describe('Engine observability metrics', () => {
   it('tracks errors and exposes getHealth', async () => {
-    const provider = createMockJSEngineProvider();
-    const engine = new Engine({ quickjs: provider, debug: false });
-    await expect(engine.loadBundle('throw new Error("boom")')).rejects.toThrow();
-    const health = engine.getHealth();
+    const engine = new Engine({ sandbox: 'vm', debug: false });
+    await expect(
+      Promise.resolve().then(() => engine.loadBundle('throw new Error("boom")'))
+    ).rejects.toThrow();
+    const health = engine.getDiagnostics().health;
     expect(health.errorCount).toBeGreaterThan(0);
     expect(typeof health.lastErrorAt === 'number' || health.lastErrorAt === null).toBeTruthy();
     engine.destroy();
   });
 
   it('emits metrics for sendToSandbox and receiver', async () => {
-    const provider = createMockJSEngineProvider();
     const onMetric = mock();
-    const engine = new Engine({ quickjs: provider, debug: false, onMetric });
-    await engine.loadBundle('console.log("hi")');
-    engine.createReceiver(() => {});
+    const engine = new Engine({ sandbox: 'vm', debug: false, onMetric });
+    await Promise.resolve().then(() => engine.loadBundle('console.log("hi")'));
+    engine.createReceiver();
     // Use sendToSandbox directly to ensure we wait for the async operation
-    await engine.sendToSandbox({ type: 'HOST_EVENT', eventName: 'PING', payload: null });
+    await engine.sendToSandbox({ type: HostMsg.HOST_EVENT, eventName: 'PING', payload: null });
     // render metrics
     engine.getReceiver()!.render();
     const names = onMetric.mock.calls.map((c) => c[0]);
@@ -33,14 +33,14 @@ describe('Engine observability metrics', () => {
     // biome-ignore lint/suspicious/noExplicitAny: Test telemetry data has dynamic structure
     const metrics: any[] = [];
     const engine = new Engine({
-      quickjs: createMockJSEngineProvider(),
+      sandbox: 'vm',
       onMetric: (n, v, e) => metrics.push({ n, v, e }),
       debug: false,
     });
     await engine.loadBundle('/* noop */');
     expect(metrics.find((m) => m.n === 'engine.initializeRuntime')).toBeTruthy();
     expect(metrics.find((m) => m.n === 'engine.executeBundle')).toBeTruthy();
-    const health = engine.getHealth();
+    const health = engine.getDiagnostics().health;
     expect('loaded' in health && 'receiverNodes' in health).toBe(true);
     engine.destroy();
   });
@@ -49,7 +49,7 @@ describe('Engine observability metrics', () => {
 describe('Engine setMaxListeners', () => {
   it('should set and get maxListeners', async () => {
     const engine = new Engine({
-      quickjs: createMockJSEngineProvider(),
+      sandbox: 'vm',
       debug: false,
     });
     await engine.loadBundle('/* noop */');
@@ -67,7 +67,7 @@ describe('Engine setMaxListeners', () => {
 
   it('should warn when listeners exceed maxListeners limit', async () => {
     const engine = new Engine({
-      quickjs: createMockJSEngineProvider(),
+      sandbox: 'vm',
       debug: false,
     });
     await engine.loadBundle('/* noop */');
@@ -99,7 +99,7 @@ describe('Engine console.debug and console.info', () => {
     };
 
     const engine = new Engine({
-      quickjs: createMockJSEngineProvider(),
+      sandbox: 'vm',
       debug: true,
       logger: customLogger,
     });
@@ -119,7 +119,7 @@ describe('Engine console.debug and console.info', () => {
     };
 
     const engine = new Engine({
-      quickjs: createMockJSEngineProvider(),
+      sandbox: 'vm',
       debug: true,
       logger: customLogger,
     });
@@ -139,7 +139,7 @@ describe('Engine console.debug and console.info', () => {
     };
 
     const engine = new Engine({
-      quickjs: createMockJSEngineProvider(),
+      sandbox: 'vm',
       debug: false,
       logger: customLogger,
     });
@@ -159,7 +159,7 @@ describe('Engine console.debug and console.info', () => {
     };
 
     const engine = new Engine({
-      quickjs: createMockJSEngineProvider(),
+      sandbox: 'vm',
       debug: false,
       logger: customLogger,
     });

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../jsi/instrumentation.h"
+#include <jsi/instrumentation.h>
 
 namespace jsi = facebook::jsi;
 
@@ -30,7 +30,7 @@ public:
 
   void dumpProfilerSymbolsToFile(const std::string &) const override;
 
-  void dumpOpcodeStats(std::ostream &) const override {}
+  void dumpOpcodeStats(std::ostream &) const {}
 
   void startTrackingHeapObjectStackTraces(
       std::function<void(uint64_t lastSeenObjectID,

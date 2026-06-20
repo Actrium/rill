@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'bun:test';
-import { DefaultProvider } from '../../../sandbox/index';
+import { DefaultProvider } from '../../sandbox/index';
 import { Engine } from '../../engine';
 
 // Check if a timeout-capable provider is available
-// VMProvider uses node:vm timeout, WorkerProvider requires async cancellation
-const testProvider = DefaultProvider.create({ timeout: 100 });
-const canInterruptLoop = testProvider.constructor.name === 'VMProvider';
+// VMProvider uses node:vm timeout; Web/WASM providers don't have hard interrupts.
+const testProvider = new DefaultProvider({ timeout: 100 });
+const canInterruptLoop = testProvider.resolvedProvider.constructor.name === 'VMProvider';
 
 describe('DefaultProvider (auto) - Node/Web', () => {
-  it('simple eval without passing quickjs', async () => {
+  it('simple eval without passing provider', async () => {
     const engine = new Engine({ debug: false });
     await engine.loadBundle('var a = 1 + 2;');
     expect(engine.isLoaded).toBe(true);

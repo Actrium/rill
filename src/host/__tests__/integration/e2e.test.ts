@@ -12,10 +12,9 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import React from 'react';
 import { CallbackRegistry, OperationCollector } from '../../../guest/runtime/reconciler';
-import { Engine } from '../../Engine';
+import { Engine } from '../../engine';
 import { Receiver } from '../../receiver';
 import { ComponentRegistry } from '../../registry';
-import { createMockJSEngineProvider } from '../test-utils';
 
 // TS type imports
 interface OperationBatch {
@@ -60,7 +59,7 @@ describe('E2E Integration Tests', () => {
       // Silent logger to prevent expected error logs from cluttering output
       const silentLogger = { log: () => {}, warn: () => {}, error: () => {} };
       engine = new Engine({
-        quickjs: createMockJSEngineProvider(),
+        sandbox: 'vm',
         debug: false,
         logger: silentLogger,
       });
@@ -82,7 +81,7 @@ describe('E2E Integration Tests', () => {
       // Simple guest code
       const guestCode = `
         // Simulate guest execution
-        __sendToHost({
+        __rill_sendBatch({
           version: 1,
           batchId: 1,
           operations: [
@@ -96,9 +95,8 @@ describe('E2E Integration Tests', () => {
 
       // Create Receiver to receive operations
       let updateCount = 0;
-      const receiver = engine.createReceiver(() => {
-        updateCount++;
-      });
+      engine.on('update', () => { updateCount++; });
+      const receiver = engine.createReceiver();
 
       // Load and execute guest
       await engine.loadBundle(guestCode, { theme: 'dark' });
@@ -113,11 +111,11 @@ describe('E2E Integration Tests', () => {
 
     it('should handle config access', async () => {
       const guestCode = `
-        const config = __getConfig();
+        const config = __rill_getConfig();
         console.log('Config:', config);
 
         if (config.theme === 'dark') {
-          __sendToHost({
+          __rill_sendBatch({
             version: 1,
             batchId: 1,
             operations: [
@@ -128,7 +126,7 @@ describe('E2E Integration Tests', () => {
         }
       `;
 
-      const receiver = engine.createReceiver(() => {});
+      const receiver = engine.createReceiver();
       await engine.loadBundle(guestCode, { theme: 'dark' });
 
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -139,7 +137,7 @@ describe('E2E Integration Tests', () => {
     it('should handle multiple batches', async () => {
       const guestCode = `
         // First batch of operations
-        __sendToHost({
+        __rill_sendBatch({
           version: 1,
           batchId: 1,
           operations: [
@@ -149,7 +147,7 @@ describe('E2E Integration Tests', () => {
         });
 
         // Second batch of operations
-        __sendToHost({
+        __rill_sendBatch({
           version: 1,
           batchId: 2,
           operations: [
@@ -159,7 +157,7 @@ describe('E2E Integration Tests', () => {
         });
       `;
 
-      const receiver = engine.createReceiver(() => {});
+      const receiver = engine.createReceiver();
       await engine.loadBundle(guestCode);
 
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -169,7 +167,7 @@ describe('E2E Integration Tests', () => {
 
     it('should handle node updates', async () => {
       const guestCode = `
-        __sendToHost({
+        __rill_sendBatch({
           version: 1,
           batchId: 1,
           operations: [
@@ -179,7 +177,7 @@ describe('E2E Integration Tests', () => {
         });
 
         // Update node
-        __sendToHost({
+        __rill_sendBatch({
           version: 1,
           batchId: 2,
           operations: [
@@ -189,9 +187,8 @@ describe('E2E Integration Tests', () => {
       `;
 
       let updateCount = 0;
-      const receiver = engine.createReceiver(() => {
-        updateCount++;
-      });
+      engine.on('update', () => { updateCount++; });
+      const receiver = engine.createReceiver();
 
       await engine.loadBundle(guestCode);
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -203,7 +200,7 @@ describe('E2E Integration Tests', () => {
 
     it('should handle node removal', async () => {
       const guestCode = `
-        __sendToHost({
+        __rill_sendBatch({
           version: 1,
           batchId: 1,
           operations: [
@@ -215,7 +212,7 @@ describe('E2E Integration Tests', () => {
         });
 
         // Remove child node
-        __sendToHost({
+        __rill_sendBatch({
           version: 1,
           batchId: 2,
           operations: [
@@ -225,7 +222,7 @@ describe('E2E Integration Tests', () => {
         });
       `;
 
-      const receiver = engine.createReceiver(() => {});
+      const receiver = engine.createReceiver();
       await engine.loadBundle(guestCode);
 
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -296,7 +293,8 @@ describe('E2E Integration Tests', () => {
         childId: 1,
       });
 
-      collector.flush((batch) => {
+      collector.flush((raw) => {
+        const batch = typeof raw === 'string' ? JSON.parse(raw) : raw;
         receivedBatches.push(batch);
         receiver.applyBatch(batch);
       });
@@ -328,7 +326,8 @@ describe('E2E Integration Tests', () => {
         childId: 1,
       });
 
-      collector.flush((batch) => {
+      collector.flush((raw) => {
+        const batch = typeof raw === 'string' ? JSON.parse(raw) : raw;
         receivedBatches.push(batch);
         receiver.applyBatch(batch);
       });
@@ -372,7 +371,8 @@ describe('E2E Integration Tests', () => {
       collector.add({ op: 'APPEND', id: 2, parentId: 1, childId: 2 });
       collector.add({ op: 'APPEND', id: 1, parentId: 0, childId: 1 });
 
-      collector.flush((batch) => {
+      collector.flush((raw) => {
+        const batch = typeof raw === 'string' ? JSON.parse(raw) : raw;
         receiver.applyBatch(batch);
       });
 
@@ -392,7 +392,7 @@ describe('E2E Integration Tests', () => {
       // Silent logger to prevent expected error logs from cluttering output
       const silentLogger = { log: () => {}, warn: () => {}, error: () => {} };
       engine = new Engine({
-        quickjs: createMockJSEngineProvider(),
+        sandbox: 'vm',
         debug: false,
         logger: silentLogger,
       });
@@ -409,11 +409,11 @@ describe('E2E Integration Tests', () => {
     it('should send events from host to sandbox', async () => {
       const guestCode = `
         // Set up event handler
-        globalThis.__handleHostEvent = function(eventName, payload) {
+        globalThis.__rill.dispatchEvent = function(eventName, payload) {
           console.log('Received event:', eventName, payload);
 
           if (eventName === 'REFRESH') {
-            __sendToHost({
+            __rill_sendBatch({
               version: 1,
               batchId: 99,
               operations: [
@@ -425,7 +425,7 @@ describe('E2E Integration Tests', () => {
         };
 
         // Initial render
-        __sendToHost({
+        __rill_sendBatch({
           version: 1,
           batchId: 1,
           operations: [
@@ -435,7 +435,7 @@ describe('E2E Integration Tests', () => {
         });
       `;
 
-      const receiver = engine.createReceiver(() => {});
+      const receiver = engine.createReceiver();
       await engine.loadBundle(guestCode);
 
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -452,36 +452,34 @@ describe('E2E Integration Tests', () => {
 
     it('should handle config updates', async () => {
       const guestCode = `
-        let currentTheme = __getConfig().theme || 'light';
+        const { View, Text, useConfig } = require('rill/guest');
 
-        globalThis.__handleHostMessage = function(message) {
-          if (message.type === 'CONFIG_UPDATE') {
-            currentTheme = message.config.theme || currentTheme;
-            console.log('Theme updated to:', currentTheme);
-          }
-        };
+        function App() {
+          const config = useConfig();
+          const theme = (config && config.theme) ? config.theme : 'light';
+          return React.createElement(
+            View,
+            { testID: 'root' },
+            React.createElement(Text, { testID: 'theme', text: String(theme) })
+          );
+        }
 
-        __sendToHost({
-          version: 1,
-          batchId: 1,
-          operations: [
-            { op: 'CREATE', id: 1, type: 'View', props: {} },
-            { op: 'APPEND', id: 1, parentId: 0, childId: 1 }
-          ]
-        });
+        RillReconciler.render(React.createElement(App), __rill_sendBatch);
       `;
 
-      engine.createReceiver(() => {});
+      const receiver = engine.createReceiver();
       await engine.loadBundle(guestCode, { theme: 'light' });
 
       await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(receiver.findByTestId('theme')?.props.text).toBe('light');
 
       // Update config
       engine.updateConfig({ theme: 'dark' });
 
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      expect(engine.isLoaded).toBe(true);
+      expect(receiver.findByTestId('theme')?.props.text).toBe('dark');
     });
   });
 
@@ -492,7 +490,7 @@ describe('E2E Integration Tests', () => {
       // Silent logger to prevent expected error logs from cluttering output
       const silentLogger = { log: () => {}, warn: () => {}, error: () => {} };
       engine = new Engine({
-        quickjs: createMockJSEngineProvider(),
+        sandbox: 'vm',
         debug: false,
         logger: silentLogger,
       });
@@ -505,7 +503,7 @@ describe('E2E Integration Tests', () => {
     it('should not crash host when guest throws error', async () => {
       const guestCode = `
         // Normal initialization
-        __sendToHost({
+        __rill_sendBatch({
           version: 1,
           batchId: 1,
           operations: [
@@ -520,7 +518,7 @@ describe('E2E Integration Tests', () => {
         }, 10);
       `;
 
-      const receiver = engine.createReceiver(() => {});
+      const receiver = engine.createReceiver();
 
       // Load should not fail
       await engine.loadBundle(guestCode);
@@ -541,7 +539,7 @@ describe('E2E Integration Tests', () => {
       });
 
       const guestCode = `
-        __sendToHost({
+        __rill_sendBatch({
           version: 1,
           batchId: 1,
           operations: [
@@ -553,7 +551,7 @@ describe('E2E Integration Tests', () => {
         });
       `;
 
-      const receiver = engine.createReceiver(() => {});
+      const receiver = engine.createReceiver();
       await engine.loadBundle(guestCode);
 
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -593,7 +591,8 @@ describe('E2E Integration Tests', () => {
         });
       }
 
-      collector.flush((batch) => {
+      collector.flush((raw) => {
+        const batch = typeof raw === 'string' ? JSON.parse(raw) : raw;
         batchCount++;
         totalOperations += batch.operations.length;
       });
@@ -613,7 +612,8 @@ describe('E2E Integration Tests', () => {
           props: {},
         });
       }
-      collector.flush((batch) => {
+      collector.flush((raw) => {
+        const batch = typeof raw === 'string' ? JSON.parse(raw) : raw;
         batchCount++;
         totalOperations += batch.operations.length;
       });
@@ -627,7 +627,8 @@ describe('E2E Integration Tests', () => {
           props: {},
         });
       }
-      collector.flush((batch) => {
+      collector.flush((raw) => {
+        const batch = typeof raw === 'string' ? JSON.parse(raw) : raw;
         batchCount++;
         totalOperations += batch.operations.length;
       });
@@ -649,7 +650,7 @@ describe('E2E Integration Tests', () => {
 describe('Full Stack Simulation', () => {
   it('should simulate complete render cycle', async () => {
     // 1. Create Engine
-    const engine = new Engine({ quickjs: createMockJSEngineProvider(), debug: false });
+    const engine = new Engine({ sandbox: 'vm', debug: false });
     engine.register({
       View: MockView,
       Text: MockText,
@@ -658,9 +659,8 @@ describe('Full Stack Simulation', () => {
 
     // 2. Create Receiver
     let renderCount = 0;
-    const receiver = engine.createReceiver(() => {
-      renderCount++;
-    });
+    engine.on('update', () => { renderCount++; });
+    const receiver = engine.createReceiver();
 
     // 3. Simulate guest code
     const guestCode = `
@@ -732,7 +732,7 @@ describe('Full Stack Simulation', () => {
       operations.push({ op: 'APPEND', id: buttonId, parentId: rootId, childId: buttonId });
       operations.push({ op: 'APPEND', id: rootId, parentId: 0, childId: rootId });
 
-      __sendToHost({
+      __rill_sendBatch({
         version: 1,
         batchId: 1,
         operations: operations

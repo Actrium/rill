@@ -53,28 +53,38 @@ export class OperationMerger {
     if (operations.length <= 1) return operations;
 
     const result: Operation[] = [];
-    const created = new Set<number>();
+    // Track created node IDs and their index in result for O(1) removal
+    const createdIndex = new Map<number, number>();
     const lastInsertForChild = new Map<number, Extract<Operation, { op: 'INSERT' }>>();
     const lastReorderForParent = new Map<number, Extract<Operation, { op: 'REORDER' }>>();
-    const updateMap = new Map<number, Extract<Operation, { op: 'UPDATE' }>>();
+    // Track UPDATE operations with their index in result
+    const updateIndex = new Map<
+      number,
+      { op: Extract<Operation, { op: 'UPDATE' }>; idx: number }
+    >();
+    // Track removed indices for lazy cleanup
+    const removedIndices = new Set<number>();
 
     for (const op of operations) {
       switch (op.op) {
         case 'UPDATE': {
           // Merge multiple updates on the same node
-          const existing = updateMap.get(op.id);
+          const existing = updateIndex.get(op.id);
           if (existing) {
             // Merge props
-            existing.props = { ...existing.props, ...op.props };
-            // Merge removedProps
+            existing.op.props = { ...existing.op.props, ...op.props };
+            // Merge removedProps using Set for O(1) dedup
             if (op.removedProps) {
-              existing.removedProps = [...(existing.removedProps || []), ...op.removedProps].filter(
-                (key, index, arr) => arr.indexOf(key) === index
-              );
+              const removedSet = new Set(existing.op.removedProps || []);
+              for (const key of op.removedProps) {
+                removedSet.add(key);
+              }
+              existing.op.removedProps = Array.from(removedSet);
             }
           } else {
             const newOp = { ...op };
-            updateMap.set(op.id, newOp);
+            const idx = result.length;
+            updateIndex.set(op.id, { op: newOp, idx });
             result.push(newOp);
           }
           break;
@@ -82,20 +92,20 @@ export class OperationMerger {
 
         case 'DELETE': {
           // If node was created in this batch and then deleted before flush, drop both
-          if (created.has(op.id)) {
-            // remove the CREATE from result
-            const idx = result.findIndex((o) => o.op === 'CREATE' && o.id === op.id);
-            if (idx !== -1) result.splice(idx, 1);
-            created.delete(op.id);
+          const createIdx = createdIndex.get(op.id);
+          if (createIdx !== undefined) {
+            // Mark CREATE for removal (lazy cleanup)
+            removedIndices.add(createIdx);
+            createdIndex.delete(op.id);
             // also drop this DELETE
             break;
           }
           // When deleting a node, remove all previous updates for that node
-          updateMap.delete(op.id);
-          // Also remove UPDATE operations for this node from result
-          const deleteIndex = result.findIndex((o) => o.op === 'UPDATE' && o.id === op.id);
-          if (deleteIndex !== -1) {
-            result.splice(deleteIndex, 1);
+          const updateEntry = updateIndex.get(op.id);
+          if (updateEntry) {
+            // Mark UPDATE for removal (lazy cleanup)
+            removedIndices.add(updateEntry.idx);
+            updateIndex.delete(op.id);
           }
           result.push(op);
           break;
@@ -103,7 +113,7 @@ export class OperationMerger {
 
         case 'CREATE': {
           // If a node was previously deleted in this batch and recreated, just treat as CREATE
-          created.add(op.id);
+          createdIndex.set(op.id, result.length);
           result.push(op);
           break;
         }
@@ -134,6 +144,10 @@ export class OperationMerger {
       result.push(rop);
     }
 
+    // Filter out removed operations (lazy cleanup - single pass)
+    if (removedIndices.size > 0) {
+      return result.filter((_, i) => !removedIndices.has(i));
+    }
     return result;
   }
 }

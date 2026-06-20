@@ -4,10 +4,11 @@
  * Bun-based guest bundler
  */
 
-import * as babel from '@babel/core';
 import type { BunPlugin } from 'bun';
 import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
+import { isHostModuleId, type RillContractShape, validateContract } from '../contract';
 
 /**
  * Build options
@@ -55,6 +56,21 @@ export interface BuildOptions {
   metafile?: string;
 
   /**
+   * Contract object used to validate host:* imports and Guest exports.
+   */
+  contract?: RillContractShape;
+
+  /**
+   * Path to a contract module. The module must export `contract` or a default contract.
+   */
+  contractFile?: string;
+
+  /**
+   * Capability manifest output path.
+   */
+  capabilityManifest?: string;
+
+  /**
    * Custom footer file path (replaces default auto-render footer)
    * Used for custom render logic (e.g., askc usePanels hook)
    */
@@ -67,6 +83,28 @@ export interface BuildOptions {
   dev?: boolean;
 }
 
+export interface AnalyzeOptions {
+  whitelist?: string[];
+  failOnViolation?: boolean;
+  treatEvalAsViolation?: boolean;
+  treatDynamicNonLiteralAsViolation?: boolean;
+  contract?: RillContractShape;
+  contractFile?: string;
+}
+
+export interface AnalyzeResult {
+  modules: string[];
+  hostCapabilities: string[];
+  guestExports: string[];
+  violations: string[];
+}
+
+export interface GuestCapabilitiesManifest {
+  contractVersion: string | null;
+  hostCapabilities: string[];
+  guestExports: string[];
+}
+
 /**
  * Runtime injection code
  * Sets up necessary global environment before bundle execution
@@ -76,91 +114,130 @@ const RUNTIME_INJECT = `
 (function() {
   'use strict';
 
+  // Initialize __rill namespace
+  if (!globalThis.__rill) { globalThis.__rill = {}; }
+  var __rill = globalThis.__rill;
+
   // Callback registry - persist across re-executions
-  if (!globalThis.__callbacks) {
-    globalThis.__callbacks = new Map();
-    globalThis.__callbackId = 0;
+  if (!__rill.callbacks) {
+    __rill.callbacks = new Map();
+  }
+  if (typeof __rill.callbackId !== 'number') {
+    __rill.callbackId = 0;
   }
 
   // Register callback
-  globalThis.__registerCallback = function(fn) {
-    var id = 'fn_' + (++globalThis.__callbackId);
-    globalThis.__callbacks.set(id, fn);
-    return id;
-  };
+  if (typeof __rill.registerCallback !== 'function') {
+    __rill.registerCallback = function(fn) {
+      var id = 'fn_' + (++__rill.callbackId);
+      __rill.callbacks.set(id, fn);
+      return id;
+    };
+  }
 
   // Invoke callback
-  globalThis.__invokeCallback = function(fnId, args) {
-    var fn = globalThis.__callbacks.get(fnId);
-    if (fn) {
-      try {
-        return fn.apply(null, args || []);
-      } catch (e) {
-        console.error('[rill] Callback execution error for', fnId);
-        console.error('[rill] Error type:', typeof e);
-        console.error('[rill] Error message:', e && e.message ? e.message : String(e));
-        console.error('[rill] Error stack:', e && e.stack ? e.stack : 'no stack');
-        console.error('[rill] Error name:', e && e.name ? e.name : 'no name');
-        throw e;
+  if (typeof __rill.invokeCallback !== 'function') {
+    __rill.invokeCallback = function(fnId, args) {
+      var fn = __rill.callbacks.get(fnId);
+      if (fn) {
+        try {
+          return fn.apply(null, args || []);
+        } catch (e) {
+          console.error('[rill] Callback execution error for', fnId);
+          console.error('[rill] Error message:', e && e.message ? e.message : String(e));
+          console.error('[rill] Error stack:', e && e.stack ? e.stack : 'no stack');
+          throw e;
+        }
+      } else {
+        console.warn('[rill] Callback not found:', fnId);
       }
-    } else {
-      console.warn('[rill] Callback not found:', fnId);
-      console.warn('[rill] Available callbacks:', Array.from(globalThis.__callbacks.keys()).join(', '));
-    }
-  };
+    };
+  }
 
   // Remove callback
-  globalThis.__removeCallback = function(fnId) {
-    globalThis.__callbacks.delete(fnId);
-  };
+  if (typeof __rill.removeCallback !== 'function') {
+    __rill.removeCallback = function(fnId) {
+      __rill.callbacks.delete(fnId);
+    };
+  }
 
   // Host event listeners
-  var __hostEventListeners = new Map();
+  if (!__rill.eventListeners) {
+    __rill.eventListeners = new Map();
+  }
+  var __eventListeners = __rill.eventListeners;
 
   // Register host event listener
-  globalThis.__useHostEvent = function(eventName, callback) {
-    if (!__hostEventListeners.has(eventName)) {
-      __hostEventListeners.set(eventName, new Set());
-    }
-    __hostEventListeners.get(eventName).add(callback);
-  };
+  if (typeof globalThis.__rill_onHostEvent !== 'function') {
+    globalThis.__rill_onHostEvent = function(eventName, callback) {
+      if (!__eventListeners.has(eventName)) {
+        __eventListeners.set(eventName, new Set());
+      }
+      var set = __eventListeners.get(eventName);
+      set.add(callback);
+      return function() {
+        try { set.delete(callback); } catch (_) {}
+      };
+    };
+  }
 
   // Handle host event
-  globalThis.__handleHostEvent = function(eventName, payload) {
-    var listeners = __hostEventListeners.get(eventName);
-    if (listeners) {
-      listeners.forEach(function(listener) {
-        try {
-          listener(payload);
-        } catch (e) {
-          console.error('[rill] Host event listener error:', e);
-        }
-      });
-    }
-  };
+  if (typeof __rill.dispatchEvent !== 'function') {
+    __rill.dispatchEvent = function(eventName, payload) {
+      var listeners = __eventListeners.get(eventName);
+      if (listeners) {
+        listeners.forEach(function(listener) {
+          try {
+            listener(payload);
+          } catch (e) {
+            console.error('[rill] Host event listener error:', e);
+          }
+        });
+      }
+    };
+  }
 
   // Handle host message
-  globalThis.__handleHostMessage = function(message) {
-    switch (message.type) {
-      case 'CALL_FUNCTION':
-        globalThis.__invokeCallback(message.fnId, message.args);
-        break;
-      case 'HOST_EVENT':
-        globalThis.__handleHostEvent(message.eventName, message.payload);
-        break;
-      case 'CONFIG_UPDATE':
-        if (globalThis.__config) {
-          Object.assign(globalThis.__config, message.config);
-        }
-        break;
-      case 'DESTROY':
-        __hostEventListeners.clear();
-        break;
-    }
-  };
+  if (typeof globalThis.__rill_handleMessage !== 'function') {
+    globalThis.__rill_handleMessage = function(message) {
+      switch (message.type) {
+        case 'CALL_FUNCTION':
+          __rill.invokeCallback(message.fnId, message.args);
+          break;
+        case 'HOST_EVENT':
+          __rill.dispatchEvent(message.eventName, message.payload);
+          break;
+        case 'CONFIG_UPDATE':
+          if (__rill.config) {
+            Object.assign(__rill.config, message.config);
+          }
+          break;
+        case 'DESTROY':
+          __eventListeners.clear();
+          break;
+      }
+    };
+  }
 
   // Config storage
-  globalThis.__config = globalThis.__getConfig ? globalThis.__getConfig() : {};
+  if (!__rill.config) {
+    __rill.config = globalThis.__rill_getConfig ? globalThis.__rill_getConfig() : {};
+  }
+
+  // Host module resolver. Bundled host:* imports are rewritten to this hook.
+  if (typeof globalThis.__rill_importHostModule !== 'function') {
+    globalThis.__rill_importHostModule = function(moduleId) {
+      if (__rill.hostModules && __rill.hostModules[moduleId]) {
+        return __rill.hostModules[moduleId];
+      }
+
+      if (typeof globalThis.__rill_getHostModule === 'function') {
+        return globalThis.__rill_getHostModule(moduleId);
+      }
+
+      throw new Error('[rill] Host module not registered: ' + moduleId);
+    };
+  }
 
 })();
 `;
@@ -174,7 +251,7 @@ const RUNTIME_INJECT = `
 const AUTO_RENDER_FOOTER = `
 /* Auto-render */
 (function() {
-  if (typeof __sendToHost === 'function' && typeof globalThis.__RillGuest !== 'undefined') {
+  if (typeof __rill_sendBatch === 'function' && typeof globalThis.__rill !== 'undefined' && globalThis.__rill.guest) {
     try {
       var React = globalThis.React;
       if (!React) {
@@ -188,7 +265,7 @@ const AUTO_RENDER_FOOTER = `
         return;
       }
 
-      var GuestExport = globalThis.__RillGuest;
+      var GuestExport = globalThis.__rill.guest;
       var Component = typeof GuestExport === 'function'
         ? GuestExport
         : (GuestExport.default || GuestExport);
@@ -199,7 +276,7 @@ const AUTO_RENDER_FOOTER = `
       }
 
       console.log('[rill] Auto-rendering guest component');
-      RillReconciler.render(React.createElement(Component), __sendToHost);
+      RillReconciler.render(React.createElement(Component), __rill_sendBatch);
     } catch (error) {
       console.error('[rill] Auto-render failed:', error);
     }
@@ -215,14 +292,16 @@ const EXTERNALS: Record<string, string> = {
   'react/jsx-runtime': 'ReactJSXRuntime',
   'react/jsx-dev-runtime': 'ReactJSXDevRuntime',
   'react-native': 'ReactNative',
-  'rill/sdk': 'RillSDK',
-  '@rill/let': 'RillLet', // deprecated alias
+  'rill/guest': 'RillGuest',
 };
+
+const HOST_MODULE_EXTERNAL = 'host:*';
 
 /**
  * Create Bun plugin for pre-bundle Babel transforms (dev mode source location injection)
  */
 async function createBabelPlugin(): Promise<BunPlugin> {
+  const babel = await import('@babel/core');
   const functionSourceLocationPlugin = (await import('./babel-plugin-function-source-location'))
     .default;
 
@@ -280,14 +359,233 @@ try { if (typeof __ReactJSXDevRuntime === 'undefined' && typeof ReactJSXDevRunti
 try { if (typeof __ReactNative === 'undefined' && typeof ReactNative !== 'undefined') { var __ReactNative = ReactNative; } } catch {}
 `;
 
+type HostBoundaryScanResult = import('./oxc-adapter').HostBoundaryScanResult;
+
+interface ContractOptions {
+  contract?: RillContractShape;
+  contractFile?: string;
+}
+
+interface CollectedHostBoundary {
+  hostModuleIds: string[];
+  hostCapabilities: string[];
+  guestExports: string[];
+  violations: string[];
+}
+
+async function resolveContract(options: ContractOptions): Promise<RillContractShape | undefined> {
+  if (options.contract) {
+    validateContract(options.contract);
+    return options.contract;
+  }
+
+  if (!options.contractFile) {
+    return undefined;
+  }
+
+  const contractPath = path.resolve(process.cwd(), options.contractFile);
+  if (!fs.existsSync(contractPath)) {
+    throw new Error(`Contract file not found: ${contractPath}`);
+  }
+
+  const contractModule = await import(pathToFileURL(contractPath).href);
+  const contract = contractModule.contract ?? contractModule.default;
+
+  if (!contract) {
+    throw new Error(`Contract file must export "contract" or default: ${contractPath}`);
+  }
+
+  validateContract(contract);
+  return contract;
+}
+
+function createHostBoundaryCollector(entryPath: string): {
+  plugin: BunPlugin;
+  getResult: () => CollectedHostBoundary;
+} {
+  const hostModuleIds = new Set<string>();
+  const hostCapabilities = new Set<string>();
+  const guestExports = new Set<string>();
+  const violations: string[] = [];
+  let analyzerPromise: Promise<typeof import('./oxc-adapter')> | undefined;
+
+  const getAnalyzer = () => {
+    analyzerPromise ??= import('./oxc-adapter');
+    return analyzerPromise;
+  };
+
+  return {
+    plugin: {
+      name: 'rill-host-boundary-analysis',
+      setup(build) {
+        build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async (args) => {
+          if (args.path.includes(`${path.sep}node_modules${path.sep}`)) {
+            return undefined;
+          }
+
+          const contents = await Bun.file(args.path).text();
+          const { analyzeHostBoundary } = await getAnalyzer();
+          const scan = analyzeHostBoundary(contents);
+          const isEntry = path.resolve(args.path) === entryPath;
+
+          mergeHostBoundaryScan(args.path, scan, {
+            hostModuleIds,
+            hostCapabilities,
+            guestExports: isEntry ? guestExports : undefined,
+            violations,
+          });
+
+          return undefined;
+        });
+      },
+    },
+
+    getResult() {
+      return {
+        hostModuleIds: Array.from(hostModuleIds).sort(),
+        hostCapabilities: Array.from(hostCapabilities).sort(),
+        guestExports: Array.from(guestExports).sort(),
+        violations: [...violations],
+      };
+    },
+  };
+}
+
+function mergeHostBoundaryScan(
+  filePath: string,
+  scan: HostBoundaryScanResult,
+  target: {
+    hostModuleIds: Set<string>;
+    hostCapabilities: Set<string>;
+    guestExports?: Set<string>;
+    violations: string[];
+  }
+): void {
+  for (const hostImport of scan.hostImports) {
+    target.hostModuleIds.add(hostImport.moduleId);
+  }
+
+  for (const capability of scan.hostCapabilities) {
+    target.hostCapabilities.add(capability);
+  }
+
+  if (target.guestExports) {
+    for (const exportName of scan.guestExports) {
+      target.guestExports.add(exportName);
+    }
+  }
+
+  for (const violation of scan.violations) {
+    target.violations.push(`${path.relative(process.cwd(), filePath)}: ${violation.message}`);
+  }
+}
+
+function validateBoundaryAgainstContract(
+  boundary: Pick<CollectedHostBoundary, 'hostCapabilities' | 'guestExports'>,
+  contract: RillContractShape,
+  options: { checkMissingGuestExports?: boolean } = {}
+): string[] {
+  const violations: string[] = [];
+
+  for (const capability of boundary.hostCapabilities) {
+    const [moduleId, exportName] = splitCapabilityName(capability);
+    if (!moduleId || !exportName) continue;
+
+    const moduleSpec = contract.hostModules[moduleId as keyof typeof contract.hostModules];
+
+    if (!moduleSpec) {
+      violations.push(`Host module "${moduleId}" is not declared in contract.`);
+      continue;
+    }
+
+    if (!(exportName in moduleSpec)) {
+      violations.push(`Host capability "${capability}" is not declared in contract.`);
+    }
+  }
+
+  for (const exportName of boundary.guestExports) {
+    if (!(exportName in contract.guestExports)) {
+      violations.push(`Guest export "${exportName}" is not declared in contract.`);
+    }
+  }
+
+  if (options.checkMissingGuestExports ?? true) {
+    for (const exportName of Object.keys(contract.guestExports)) {
+      if (!boundary.guestExports.includes(exportName)) {
+        violations.push(`Guest export "${exportName}" is declared in contract but not exported.`);
+      }
+    }
+  }
+
+  return violations;
+}
+
+function splitCapabilityName(capability: string): [string | null, string | null] {
+  const dotIndex = capability.lastIndexOf('.');
+  if (dotIndex <= 0 || dotIndex === capability.length - 1) {
+    return [null, null];
+  }
+
+  return [capability.slice(0, dotIndex), capability.slice(dotIndex + 1)];
+}
+
+function throwBoundaryViolations(violations: string[]): void {
+  if (violations.length === 0) {
+    return;
+  }
+
+  throw new Error(`Rill boundary violations:\n- ${violations.join('\n- ')}`);
+}
+
+function rewriteHostModuleRequires(code: string, moduleIds: string[]): string {
+  let rewritten = code;
+
+  for (const moduleId of moduleIds) {
+    const pattern = new RegExp(`require\\(["']${escapeRegExp(moduleId)}["']\\)`, 'g');
+    rewritten = rewritten.replace(
+      pattern,
+      `globalThis.__rill_importHostModule(${JSON.stringify(moduleId)})`
+    );
+  }
+
+  return rewritten;
+}
+
+function createGuestCapabilitiesManifest(
+  boundary: Pick<CollectedHostBoundary, 'hostCapabilities' | 'guestExports'>,
+  contract?: RillContractShape
+): GuestCapabilitiesManifest {
+  return {
+    contractVersion: contract?.version ?? null,
+    hostCapabilities: [...boundary.hostCapabilities].sort(),
+    guestExports: [...boundary.guestExports].sort(),
+  };
+}
+
+// Reason: JSON artifact writer accepts arbitrary serializable manifest-like values.
+function writeJsonFile(filePath: string, value: unknown): void {
+  const fullPath = path.resolve(process.cwd(), filePath);
+  const directory = path.dirname(fullPath);
+  if (!fs.existsSync(directory)) {
+    fs.mkdirSync(directory, { recursive: true });
+  }
+  fs.writeFileSync(fullPath, JSON.stringify(value, null, 2));
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
  * Execute build using Bun.build
  */
 export async function build(options: BuildOptions): Promise<void> {
   const startTime = Date.now();
 
-  const { entry, outfile, minify, sourcemap, watch, metafile, footer } = options;
+  const { entry, outfile, minify, sourcemap, watch, metafile, footer, capabilityManifest } =
+    options;
   const strict = options.strict ?? true;
+  const contract = await resolveContract(options);
 
   // Validate entry file
   const entryPath = path.resolve(process.cwd(), entry);
@@ -312,6 +610,8 @@ export async function build(options: BuildOptions): Promise<void> {
 
   // Create plugins array
   const plugins: BunPlugin[] = [];
+  const hostBoundaryCollector = createHostBoundaryCollector(entryPath);
+  plugins.push(hostBoundaryCollector.plugin);
 
   // In dev mode, add Babel plugin for source location injection
   if (options.dev) {
@@ -328,7 +628,7 @@ export async function build(options: BuildOptions): Promise<void> {
     naming: `${outFileName.replace(/\.js$/, '')}.[ext]`,
     minify,
     sourcemap: sourcemap ? 'external' : 'none',
-    external: Object.keys(EXTERNALS),
+    external: [...Object.keys(EXTERNALS), HOST_MODULE_EXTERNAL],
     plugins,
     define: {
       'process.env.NODE_ENV': '"production"',
@@ -344,6 +644,12 @@ export async function build(options: BuildOptions): Promise<void> {
     throw new Error('Bun build failed');
   }
 
+  const hostBoundary = hostBoundaryCollector.getResult();
+  throwBoundaryViolations([
+    ...hostBoundary.violations,
+    ...(contract ? validateBoundaryAgainstContract(hostBoundary, contract) : []),
+  ]);
+
   // Post-process: wrap in IIFE with globals mapping
   const targetPath = path.join(outDir, outFileName);
   let bundleCode = await Bun.file(result.outputs[0]!.path).text();
@@ -353,7 +659,7 @@ export async function build(options: BuildOptions): Promise<void> {
 
   // Analyze JSX props for JSI optimization
   console.log('\nAnalyzing JSX props for JSI optimization...');
-  let jsxAnalysis: import('./oxcAdapter').JSXAnalysisResult = {
+  let jsxAnalysis: import('./oxc-adapter').JSXAnalysisResult = {
     propHints: [],
     stats: {
       totalElements: 0,
@@ -363,7 +669,7 @@ export async function build(options: BuildOptions): Promise<void> {
     },
   };
   try {
-    const { analyzeJSXProps } = await import('./oxcAdapter');
+    const { analyzeJSXProps } = await import('./oxc-adapter');
     jsxAnalysis = analyzeJSXProps(bundleCode);
 
     if (jsxAnalysis.stats) {
@@ -388,14 +694,16 @@ export async function build(options: BuildOptions): Promise<void> {
     const requirePattern = new RegExp(`require\\(["']${mod.replace('/', '\\/')}["']\\)`, 'g');
     bundleCode = bundleCode.replace(requirePattern, globalName);
   }
+  bundleCode = rewriteHostModuleRequires(bundleCode, hostBoundary.hostModuleIds);
 
   // For CJS output, module.exports carries the default export
-  // After transforming externals, capture default into globalThis.__RillGuest
+  // After transforming externals, capture default into globalThis.__rill.guest
   const captureExports = `
 try {
   var __rillModuleExports = (typeof module !== 'undefined' && module && module.exports) ? module.exports : (typeof exports !== 'undefined' ? exports : undefined);
   if (__rillModuleExports) {
-    globalThis.__RillGuest = __rillModuleExports.default || __rillModuleExports;
+    if (!globalThis.__rill) { globalThis.__rill = {}; }
+    globalThis.__rill.guest = __rillModuleExports.default || __rillModuleExports;
   }
 } catch {}
 `;
@@ -452,7 +760,7 @@ ${footerCode}
   if (strict) {
     try {
       await analyze(targetPath, {
-        whitelist: ['react', 'react-native', 'react/jsx-runtime', '@rill/let'],
+        whitelist: ['react', 'react-native', 'react/jsx-runtime', 'rill/guest'],
         failOnViolation: true,
         treatEvalAsViolation: true,
         treatDynamicNonLiteralAsViolation: true,
@@ -465,55 +773,14 @@ ${footerCode}
     }
   }
 
-  // Validate bundle can be loaded with Function constructor
+  // Validate bundle syntax via AST parse (no execution, no mock globals needed)
   try {
-    const mockExports: Record<string, unknown> = {};
-    const mockGlobals: Record<string, unknown> = {
-      React: { createElement: () => ({}) },
-      ReactJSXRuntime: { jsx: () => ({}), jsxs: () => ({}) },
-      ReactJSXDevRuntime: { jsx: () => ({}), jsxs: () => ({}) },
-      ReactNative: {},
-      RillReconciler: { render: () => {}, unmount: () => {} },
-      RillLet: {
-        View: 'View',
-        Text: 'Text',
-        useHostEvent: () => {},
-        useConfig: () => ({}),
-        useSendToHost: () => () => {},
-      },
-      RillSDK: {
-        View: 'View',
-        Text: 'Text',
-        useHostEvent: () => {},
-        useConfig: () => ({}),
-        useSendToHost: () => () => {},
-      },
-      module: { exports: mockExports },
-      exports: mockExports,
-      __React: null,
-      __ReactJSXRuntime: null,
-      __ReactJSXDevRuntime: null,
-      __ReactNative: null,
-    };
-    // Alias externals to __React* variants
-    mockGlobals.__React = mockGlobals.React;
-    mockGlobals.__ReactJSXRuntime = mockGlobals.ReactJSXRuntime;
-    mockGlobals.__ReactJSXDevRuntime = mockGlobals.ReactJSXDevRuntime;
-    mockGlobals.__ReactNative = mockGlobals.ReactNative;
-
-    // Mock require function that returns mock globals based on module name
-    const mockRequire = (name: string) => {
-      if (name === 'react') return mockGlobals.React;
-      if (name === 'react/jsx-runtime') return mockGlobals.ReactJSXRuntime;
-      if (name === 'react/jsx-dev-runtime') return mockGlobals.ReactJSXDevRuntime;
-      if (name === 'react-native') return mockGlobals.ReactNative;
-      if (name === 'rill/sdk') return mockGlobals.RillSDK;
-      if (name === '@rill/let') return mockGlobals.RillLet;
-      return {};
-    };
-    const globalNames = ['require', ...Object.keys(mockGlobals)];
-    const globalValues = [mockRequire, ...Object.values(mockGlobals)];
-    new Function(...globalNames, wrappedCode)(...globalValues);
+    const oxc = require('oxc-parser');
+    const result = oxc.parseSync(wrappedCode, { sourceType: 'script' });
+    if (result.errors && result.errors.length > 0) {
+      const msgs = result.errors.map((e: { message: string }) => e.message).join('\n  ');
+      throw new Error(`Syntax errors:\n  ${msgs}`);
+    }
     console.log('   Syntax validation: PASS');
   } catch (validationErr) {
     console.error('\n❌ Bundle validation failed:');
@@ -542,6 +809,11 @@ ${footerCode}
     fs.writeFileSync(path.resolve(process.cwd(), metafile), JSON.stringify(metaInfo, null, 2));
     console.log(`   Metafile: ${metafile}`);
   }
+
+  if (capabilityManifest) {
+    writeJsonFile(capabilityManifest, createGuestCapabilitiesManifest(hostBoundary, contract));
+    console.log(`   Capability manifest: ${capabilityManifest}`);
+  }
 }
 
 /**
@@ -549,13 +821,8 @@ ${footerCode}
  */
 export async function analyze(
   bundlePath: string,
-  options?: {
-    whitelist?: string[];
-    failOnViolation?: boolean;
-    treatEvalAsViolation?: boolean;
-    treatDynamicNonLiteralAsViolation?: boolean;
-  }
-): Promise<void> {
+  options?: AnalyzeOptions
+): Promise<AnalyzeResult> {
   const fullPath = path.resolve(process.cwd(), bundlePath);
   if (!fs.existsSync(fullPath)) {
     throw new Error(`Bundle not found: ${fullPath}`);
@@ -570,8 +837,18 @@ export async function analyze(
   console.log(`  Lines: ${content.split('\n').length}`);
 
   // Use oxc adapter for module analysis
-  const { analyzeModuleIDs } = await import('./oxcAdapter');
+  const { analyzeHostBoundary, analyzeModuleIDs } = await import('./oxc-adapter');
   const scan = await analyzeModuleIDs(content);
+  const shouldAnalyzeBoundary = content.includes('host:') || /\bexport\b/.test(content);
+  const boundary = shouldAnalyzeBoundary
+    ? analyzeHostBoundary(content)
+    : {
+        hostImports: [],
+        hostCapabilities: [],
+        guestExports: [],
+        hasDefaultExport: false,
+        violations: [],
+      };
   const found = new Set<string>([
     ...scan.static,
     ...scan.dynamicLiteral,
@@ -579,11 +856,12 @@ export async function analyze(
   ] as string[]);
 
   const whitelist = new Set(
-    options?.whitelist ?? ['react', 'react-native', 'react/jsx-runtime', '@rill/let']
+    options?.whitelist ?? ['react', 'react-native', 'react/jsx-runtime', 'rill/guest']
   );
 
   const violations: string[] = Array.from(found).filter((m) => {
     if (whitelist.has(m)) return false;
+    if (isHostModuleId(m)) return false;
     if (m.startsWith('./') || m.startsWith('../')) return false;
     if (/^(data:|blob:|http:|https:|file:)/.test(m)) return false;
     if (m.includes('\0')) return false;
@@ -597,12 +875,54 @@ export async function analyze(
     violations.push(`eval_calls:${scan.evalCount}`);
   }
 
+  for (const violation of boundary.violations) {
+    violations.push(violation.message);
+  }
+
+  const contract = await resolveContract(options ?? {});
+  if (contract) {
+    violations.push(
+      ...validateBoundaryAgainstContract(boundary, contract, {
+        checkMissingGuestExports: false,
+      })
+    );
+  }
+
+  if (boundary.hostCapabilities.length > 0) {
+    console.log('  Host capabilities:');
+    for (const capability of boundary.hostCapabilities) {
+      console.log(`    - ${capability}`);
+    }
+  }
+
+  if (boundary.guestExports.length > 0) {
+    console.log('  Guest exports:');
+    for (const exportName of boundary.guestExports) {
+      console.log(`    - ${exportName}`);
+    }
+  }
+
   if (violations.length > 0) {
-    const msg = `Found non-whitelisted modules: ${violations.join(', ')}`;
+    const hasOnlyModuleViolations = violations.every(
+      (violation) =>
+        found.has(violation) ||
+        violation.startsWith('dynamic_import_non_literal:') ||
+        violation.startsWith('eval_calls:')
+    );
+    const msg = hasOnlyModuleViolations
+      ? `Found non-whitelisted modules: ${violations.join(', ')}`
+      : `Found Rill boundary violations: ${violations.join(', ')}`;
     if (options?.failOnViolation) {
       throw new Error(msg);
     } else {
       console.warn(`  ⚠ Warning: ${msg}`);
     }
   }
+
+  return {
+    modules: Array.from(found).sort(),
+    hostCapabilities: boundary.hostCapabilities,
+    guestExports: boundary.guestExports,
+    violations,
+  };
 }

@@ -1,14 +1,14 @@
 /**
  * @rill/shared - Protocol Layer
  *
- * Host ↔ Guest 共享的协议层
- * - Bridge（通信层）
- * - 类型定义
- * - 序列化规则
- * - CallbackRegistry（跨边界函数引用管理）
+ * Host ↔ Guest
+ * - Bridge（）
+ * -
+ * -
+ * - CallbackRegistry（）
  */
 
-// Bridge（Host ↔ Guest 通信层）
+// Bridge（Host ↔ Guest ）
 export {
   Bridge,
   type BridgeOptions,
@@ -17,34 +17,33 @@ export {
   type PromiseManagerOptions,
   type PromiseSettleResult,
 } from './bridge';
-// CallbackRegistry 实现（跨边界函数引用管理）
+// CallbackRegistry （）
 export {
   CallbackRegistry as CallbackRegistryImpl,
   globalCallbackRegistry,
-} from './CallbackRegistry';
-// Serialization utilities (共享序列化工具)
+} from './callback-registry';
+// Serialization utilities ()
 export {
   createDecoder,
   createEncoder,
   decodeObject,
   encodeObject,
 } from './serialization';
-// TypeRules 系统
+// TypeRules
 export {
+  type CodecCallbacks,
   DEFAULT_TYPE_RULES,
   type TransportStrategy,
   type TypeRule,
-  type TypeRuleContext,
-} from './TypeRules';
-// 类型定义
+} from './type-rules';
 export type {
   AppendOperation,
   BaseOperation,
-  // Bridge 完整类型
+  // Bridge
   BridgeValue,
   BridgeValueArray,
   BridgeValueObject,
-  // 接口
+  //
   CallbackRegistry,
   CallFunctionMessage,
   ConfigUpdateMessage,
@@ -53,25 +52,24 @@ export type {
   DestroyMessage,
   HostEventMessage,
   HostMessage,
-  // 消息类型
-  HostMessageType,
   InsertOperation,
-  // JSI 类型
+  // JSI
   JSIPrimitive,
   JSISafe,
   JSISafeArray,
   JSISafeObject,
   Operation,
   OperationBatch,
-  // 操作类型
+  //
   OperationType,
   PromiseSettleMessage,
   RefCallOperation,
   RefMethodResultMessage,
   RemoveOperation,
   ReorderOperation,
-  // 需要 Bridge 处理的类型
+  //  Bridge
   RequiresBridge,
+  ReviewedUnknown,
   SendToHost,
   SerializedCreateOperation,
   SerializedDate,
@@ -90,15 +88,17 @@ export type {
   SerializedSet,
   SerializedSpecialType,
   SerializedUpdateOperation,
-  // 序列化类型
+  //
   SerializedValue,
   SerializedValueArray,
   SerializedValueObject,
   TextOperation,
   UpdateOperation,
 } from './types';
+//
 // Type Guards
 export {
+  HostMsg,
   isJSIPrimitive,
   isSerializedDate,
   isSerializedError,

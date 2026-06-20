@@ -18,6 +18,7 @@
         "**/*.test.tsx",
         "**/*.bench.ts",
         "tests/**",
+        "examples/**",
         "src/guest/build/**",
         "src/host/engine/sandbox-runtime-bundle.ts"
       ],

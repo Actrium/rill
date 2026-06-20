@@ -4,7 +4,8 @@
  * Provides just enough to allow EngineView tests to run
  */
 import type { CSSProperties, ReactNode, SyntheticEvent } from 'react';
-import { createElement, forwardRef } from 'react';
+
+const React = require('react') as typeof import('react');
 
 // Type exports (simplified versions)
 export type ViewStyle = CSSProperties;
@@ -21,22 +22,22 @@ export type NativeSyntheticEvent<T> = SyntheticEvent & { nativeEvent: T };
 
 // Basic View mock
 // biome-ignore lint/suspicious/noExplicitAny: Mock component with flexible types
-export const View = forwardRef<any, any>((props, ref) =>
-  createElement('View', { ...props, ref }, props.children)
+export const View = React.forwardRef<any, any>((props, ref) =>
+  React.createElement('View', { ...props, ref }, props.children)
 );
 View.displayName = 'View';
 
 // Basic Text mock
 // biome-ignore lint/suspicious/noExplicitAny: Mock component with flexible types
-export const Text = forwardRef<any, any>((props, ref) =>
-  createElement('Text', { ...props, ref }, props.children)
+export const Text = React.forwardRef<any, any>((props, ref) =>
+  React.createElement('Text', { ...props, ref }, props.children)
 );
 Text.displayName = 'Text';
 
 // ActivityIndicator mock
 // biome-ignore lint/suspicious/noExplicitAny: Mock component with flexible types
-export const ActivityIndicator = forwardRef<any, any>((props, ref) =>
-  createElement('ActivityIndicator', { ...props, ref })
+export const ActivityIndicator = React.forwardRef<any, any>((props, ref) =>
+  React.createElement('ActivityIndicator', { ...props, ref })
 );
 ActivityIndicator.displayName = 'ActivityIndicator';
 
@@ -81,6 +82,12 @@ export const Dimensions = {
   addEventListener: () => ({ remove: () => {} }),
 };
 
+// TurboModuleRegistry mock
+export const TurboModuleRegistry = {
+  get: (_name: string) => null,
+  getEnforcing: (_name: string) => ({}),
+};
+
 // Common components
 export const TouchableOpacity = View;
 export const TouchableHighlight = View;
@@ -113,4 +120,5 @@ export default {
   KeyboardAvoidingView,
   Switch,
   Button,
+  TurboModuleRegistry,
 };

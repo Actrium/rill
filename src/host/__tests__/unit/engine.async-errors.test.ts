@@ -1,12 +1,10 @@
 import { describe, expect, it } from 'bun:test';
 import { Engine } from '../../engine';
-import { createMockJSEngineProvider } from '../test-utils';
 
 describe('Engine async error handling', () => {
   describe('setInterval error handling', () => {
     it('should catch and emit errors from setInterval callbacks', async () => {
-      const provider = createMockJSEngineProvider();
-      const engine = new Engine({ quickjs: provider, timeout: 5000, debug: false });
+      const engine = new Engine({ sandbox: 'vm', timeout: 5000, debug: false });
 
       const errorsCaught: Error[] = [];
 
@@ -21,7 +19,7 @@ describe('Engine async error handling', () => {
 
       // Directly test the setInterval error handling by calling it
       // Access the guest setInterval that Engine injected
-      const guestSetInterval = (await engine.context?.getGlobal('setInterval')) as (
+      const guestSetInterval = (await engine.context?.extract('setInterval')) as (
         fn: () => void,
         delay: number
       ) => number;
@@ -42,11 +40,11 @@ describe('Engine async error handling', () => {
         expect(errorsCaught[0].message).toBe('Interval callback error');
 
         // Verify errorCount was incremented
-        expect(engine.errorCount).toBeGreaterThan(0);
-        expect(engine.lastErrorAt).toBeGreaterThan(0);
+        expect(engine.getDiagnostics().health.errorCount).toBeGreaterThan(0);
+        expect(engine.getDiagnostics().health.lastErrorAt).not.toBeNull();
 
         // Clear the interval
-        const guestClearInterval = (await engine.context?.getGlobal('clearInterval')) as (
+        const guestClearInterval = (await engine.context?.extract('clearInterval')) as (
           id: number
         ) => void;
         if (guestClearInterval) {
@@ -58,8 +56,7 @@ describe('Engine async error handling', () => {
     });
 
     it('should not crash when interval callback throws non-Error', async () => {
-      const provider = createMockJSEngineProvider();
-      const engine = new Engine({ quickjs: provider, timeout: 5000, debug: false });
+      const engine = new Engine({ sandbox: 'vm', timeout: 5000, debug: false });
 
       const errorsCaught: Error[] = [];
       engine.on('error', (error: Error) => {
@@ -68,7 +65,7 @@ describe('Engine async error handling', () => {
 
       await engine.loadBundle(`// init`);
 
-      const guestSetInterval = (await engine.context?.getGlobal('setInterval')) as (
+      const guestSetInterval = (await engine.context?.extract('setInterval')) as (
         fn: () => void,
         delay: number
       ) => number;
@@ -84,7 +81,7 @@ describe('Engine async error handling', () => {
         expect(errorsCaught[0]).toBeInstanceOf(Error);
         expect(errorsCaught[0].message).toBe('string error');
 
-        const guestClearInterval = (await engine.context?.getGlobal('clearInterval')) as (
+        const guestClearInterval = (await engine.context?.extract('clearInterval')) as (
           id: number
         ) => void;
         if (guestClearInterval) {
@@ -143,19 +140,18 @@ describe('Engine async error handling', () => {
   });
 
   // Note: handleCallFunction error handling tests removed - functionality moved to Bridge
-  // See: src/runtime/bridge/Bridge.test.ts and src/bridge/CallbackRegistry.ts
+  // See: src/shared/bridge/bridge.test.ts and src/shared/callback-registry.ts
 
   describe('error event emission', () => {
     it('should increment errorCount when errors occur', async () => {
-      const provider = createMockJSEngineProvider();
-      const engine = new Engine({ quickjs: provider, timeout: 5000, debug: false });
+      const engine = new Engine({ sandbox: 'vm', timeout: 5000, debug: false });
 
       await engine.loadBundle(`// init`);
 
-      const initialErrorCount = engine.errorCount;
+      const initialErrorCount = engine.getDiagnostics().health.errorCount;
 
       // Trigger an interval error
-      const guestSetInterval = (await engine.context?.getGlobal('setInterval')) as (
+      const guestSetInterval = (await engine.context?.extract('setInterval')) as (
         fn: () => void,
         delay: number
       ) => number;
@@ -167,10 +163,10 @@ describe('Engine async error handling', () => {
 
         await new Promise((resolve) => setTimeout(resolve, 50));
 
-        expect(engine.errorCount).toBeGreaterThan(initialErrorCount);
-        expect(engine.lastErrorAt).toBeGreaterThan(0);
+        expect(engine.getDiagnostics().health.errorCount).toBeGreaterThan(initialErrorCount);
+        expect(engine.getDiagnostics().health.lastErrorAt).not.toBeNull();
 
-        const guestClearInterval = (await engine.context?.getGlobal('clearInterval')) as (
+        const guestClearInterval = (await engine.context?.extract('clearInterval')) as (
           id: number
         ) => void;
         if (guestClearInterval) {
@@ -184,8 +180,7 @@ describe('Engine async error handling', () => {
 
   describe('Unhandled Promise Rejection', () => {
     it('should emit error events when errors occur', async () => {
-      const provider = createMockJSEngineProvider();
-      const engine = new Engine({ quickjs: provider, timeout: 5000, debug: false });
+      const engine = new Engine({ sandbox: 'vm', timeout: 5000, debug: false });
 
       const errorsCaught: Error[] = [];
       engine.on('error', (error: Error) => {
@@ -207,15 +202,14 @@ describe('Engine async error handling', () => {
     });
 
     it('should track error count correctly', async () => {
-      const provider = createMockJSEngineProvider();
-      const engine = new Engine({ quickjs: provider, timeout: 5000, debug: false });
+      const engine = new Engine({ sandbox: 'vm', timeout: 5000, debug: false });
 
       await engine.loadBundle(`// init`);
 
-      const initialErrorCount = engine.errorCount;
+      const initialErrorCount = engine.getDiagnostics().health.errorCount;
 
       // Trigger an error through setTimeout
-      const guestSetTimeout = (await engine.context?.getGlobal('setTimeout')) as (
+      const guestSetTimeout = (await engine.context?.extract('setTimeout')) as (
         fn: () => void,
         delay: number
       ) => number;
@@ -229,8 +223,8 @@ describe('Engine async error handling', () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Error count should increase
-      expect(engine.errorCount).toBeGreaterThan(initialErrorCount);
-      expect(engine.lastErrorAt).toBeGreaterThan(0);
+      expect(engine.getDiagnostics().health.errorCount).toBeGreaterThan(initialErrorCount);
+      expect(engine.getDiagnostics().health.lastErrorAt).not.toBeNull();
 
       engine.destroy();
     });

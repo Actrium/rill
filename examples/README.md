@@ -1,125 +1,37 @@
-# Rill Guest Example
+# Rill Examples
 
-This directory contains a simple Rill guest example demonstrating the core SDK features.
+Example applications demonstrating the rill SDK across different platforms.
 
-## simple-guest
+## Examples
 
-A complete guest example showing:
+| Example | Platform | Status | Description |
+|---------|----------|--------|-------------|
+| [ios-demo](./ios-demo/) | iOS | Ready | Full iOS app with performance dashboard, 3 sandbox engines (JSC/Hermes/QuickJS), Bridgeless only |
+| [android-demo](./android-demo/) | Android | Ready | Android app with Hermes and QuickJS sandboxes plus emulator E2E runner |
+| [macos-demo](./macos-demo/) | macOS | Placeholder | macOS app via `react-native-macos` |
+| [windows-demo](./windows-demo/) | Windows | Placeholder | Windows app via `react-native-windows` |
 
-- **Components**: View, Text, ScrollView, TouchableOpacity
-- **State**: useState, useEffect
-- **Host Communication**:
-  - `useHostEvent` - Listen to host events
-  - `useSendToHost` - Send messages to host
-  - `useConfig` - Get configuration from host
-- **Theming**: Light/dark mode support
+## Dependency Resolution
 
-## Quick Start
+Examples reference `rill` via relative `file:` paths, not npm registry:
 
-```bash
-cd examples/simple-guest
+| Example | rill dependency |
+|---------|----------------|
+| `ios-demo/RCTNApps` | `"rill": "file:../../../"` |
 
-# Install dependencies
-bun install
+This ensures examples always use the local checkout of rill.
 
-# Build guest bundle
-bun run build
+## Package Exports Reference
 
-# Build with sourcemap (development)
-bun run build:dev
-```
-
-Output: `dist/bundle.js`
-
-## Guest SDK API
+Guest bundles import from `rill/guest`:
 
 ```tsx
-import {
-  // Components
-  View,
-  Text,
-  ScrollView,
-  TouchableOpacity,
-  Image,
-  ActivityIndicator,
-  Button,
-  TextInput,
-  FlatList,
-  Switch,
-
-  // Hooks
-  useHostEvent,      // Listen to host events
-  useSendToHost,     // Send messages to host
-  useConfig,         // Get configuration from host
-} from 'rill/sdk';
+import { View, Text, useHostEvent, useSendToHost, useConfig } from 'rill/guest';
 ```
 
-### useHostEvent
+Host apps import from `rill/host` and `rill/host/preset`:
 
 ```tsx
-// Listen to host events
-useHostEvent('REFRESH', () => {
-  console.log('Host requested refresh');
-});
-
-// Typed payload
-useHostEvent<{ theme: 'light' | 'dark' }>('THEME_CHANGE', (payload) => {
-  console.log('Theme:', payload.theme);
-});
-```
-
-### useSendToHost
-
-```tsx
-const sendToHost = useSendToHost();
-
-// Send message to host
-sendToHost('MY_EVENT', { data: 'value' });
-```
-
-### useConfig
-
-```tsx
-interface Config {
-  title: string;
-  userId: string;
-}
-
-const config = useConfig<Config>();
-console.log(config.title);
-```
-
-## Verify Example
-
-```bash
-cd examples
-bun run verify-examples.ts
-```
-
-## Host Integration
-
-For host-side integration (Engine, EngineView), see:
-
-- `rill/host/preset` - Host UI components (works for both React Native and Web)
-
-Host integration example:
-
-```tsx
-import { Engine } from 'rill';
+import { Engine } from 'rill/host';
 import { DefaultComponents, EngineView } from 'rill/host/preset';
-
-const engine = new Engine({
-  sandbox: createSandboxProvider(),
-  timeout: 5000,
-});
-
-engine.register(DefaultComponents);
-
-<EngineView
-  engine={engine}
-  source="https://cdn.example.com/guest.js"
-  initialProps={{ userId: '123' }}
-  onLoad={() => console.log('Loaded')}
-  onError={(err) => console.error(err)}
-/>
 ```

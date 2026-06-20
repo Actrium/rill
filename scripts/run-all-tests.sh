@@ -58,6 +58,8 @@ RUN_NATIVE=true
 RUN_E2E=true
 RUN_UNIT=true
 RUN_RN=false  # RN macOS E2E is opt-in (requires Xcode build)
+RUN_IOS_SIM=false  # iOS Simulator E2E is opt-in (requires Xcode simulator)
+RUN_ANDROID_EMULATOR=false  # Android Emulator E2E is opt-in (requires Android SDK/AVD)
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -65,6 +67,8 @@ while [[ $# -gt 0 ]]; do
     --skip-e2e) RUN_E2E=false; shift ;;
     --skip-unit) RUN_UNIT=false; shift ;;
     --with-rn) RUN_RN=true; shift ;;
+    --with-ios-sim) RUN_IOS_SIM=true; shift ;;
+    --with-android-emulator) RUN_ANDROID_EMULATOR=true; shift ;;
     --help)
       echo ""
       echo "Usage: $0 [options]"
@@ -74,6 +78,9 @@ while [[ $# -gt 0 ]]; do
       echo "  --skip-e2e       Skip browser E2E tests"
       echo "  --skip-unit      Skip bun unit tests"
       echo "  --with-rn        Include React Native macOS E2E tests (requires Xcode)"
+      echo "  --with-ios-sim   Include iOS Simulator E2E tests (requires Xcode simulator)"
+      echo "  --with-android-emulator"
+      echo "                   Include Android Emulator E2E tests (requires Android SDK/AVD)"
       echo "  --help           Show this help"
       exit 0
       ;;
@@ -82,56 +89,71 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ============================================
-# 1. Unit Tests (bun test)
+# 1. Unit Tests
 # ============================================
 if [[ "$RUN_UNIT" == true ]]; then
-  run_suite "Unit Tests (bun test)" "bun test"
+  run_suite "Unit Tests" "bun run test:unit"
 fi
 
 # ============================================
-# 2. Native Tests (QuickJS + JSC)
+# 2. Guest Bundle Tests
+# ============================================
+if [[ "$RUN_UNIT" == true ]]; then
+  if [[ -f "$ROOT_DIR/tests/guest-bundle/run-tests.sh" ]]; then
+    run_suite "Guest Bundle (build + verify)" "bash $ROOT_DIR/tests/guest-bundle/run-tests.sh"
+  fi
+fi
+
+# ============================================
+# 3. Native Tests
 # ============================================
 if [[ "$RUN_NATIVE" == true ]]; then
-  # QuickJS (cross-platform)
-  if [[ -f "$ROOT_DIR/native/quickjs/run-tests.sh" ]]; then
-    run_suite "Native: QuickJS Sandbox" "bash $ROOT_DIR/native/quickjs/run-tests.sh"
-  fi
-
-  # JSC (macOS only)
-  if [[ "$(uname)" == "Darwin" ]]; then
-    if [[ -f "$ROOT_DIR/native/jsc/run-tests.sh" ]]; then
-      run_suite "Native: JSC Sandbox" "bash $ROOT_DIR/native/jsc/run-tests.sh"
-    fi
-  else
-    skip_suite "Native: JSC Sandbox" "macOS only"
-  fi
+  run_suite "Native Tests (C++)" "bun run test:native"
 fi
 
 # ============================================
-# 3. Browser E2E Tests (Playwright)
+# 4. E2E: WASM Sandbox (Playwright)
 # ============================================
 if [[ "$RUN_E2E" == true ]]; then
-  # Web Worker E2E
-  if [[ -f "$ROOT_DIR/tests/e2e-sandbox-web/run-tests.sh" ]]; then
-    run_suite "E2E: Web Worker Sandbox" "bash $ROOT_DIR/tests/e2e-sandbox-web/run-tests.sh"
-  fi
-
-  # WASM E2E
-  if [[ -f "$ROOT_DIR/tests/e2e-wasm-sandbox/run-tests.sh" ]]; then
-    run_suite "E2E: WASM Sandbox" "bash $ROOT_DIR/tests/e2e-wasm-sandbox/run-tests.sh"
+  if [[ -f "$ROOT_DIR/tests/wasm-sandbox/run-tests.sh" ]]; then
+    run_suite "E2E: WASM Sandbox" "bash $ROOT_DIR/tests/wasm-sandbox/run-tests.sh"
   fi
 fi
 
 # ============================================
-# 4. React Native E2E (opt-in)
+# 5. React Native E2E (opt-in, requires Xcode)
 # ============================================
 if [[ "$RUN_RN" == true ]]; then
   if [[ "$(uname)" == "Darwin" ]]; then
-    if [[ -f "$ROOT_DIR/tests/rn-macos-e2e/run-tests.sh" ]]; then
-      run_suite "E2E: React Native macOS" "bash $ROOT_DIR/tests/rn-macos-e2e/run-tests.sh all"
+    if [[ -f "$ROOT_DIR/tests/rn-macos-bridgeless/run-tests.sh" ]]; then
+      run_suite "E2E: React Native macOS (Bridgeless)" "bash $ROOT_DIR/tests/rn-macos-bridgeless/run-tests.sh all"
     fi
   else
     skip_suite "E2E: React Native macOS" "macOS only"
+  fi
+fi
+
+# ============================================
+# 6. iOS Simulator E2E (opt-in, requires Xcode simulator)
+# ============================================
+if [[ "$RUN_IOS_SIM" == true ]]; then
+  if [[ "$(uname)" == "Darwin" ]]; then
+    if [[ -f "$ROOT_DIR/examples/ios-demo/run-e2e.sh" ]]; then
+      run_suite "E2E: iOS Simulator" "bash $ROOT_DIR/examples/ios-demo/run-e2e.sh"
+    fi
+  else
+    skip_suite "E2E: iOS Simulator" "macOS only"
+  fi
+fi
+
+# ============================================
+# 7. Android Emulator E2E (opt-in, requires Android SDK/AVD)
+# ============================================
+if [[ "$RUN_ANDROID_EMULATOR" == true ]]; then
+  if [[ -f "$ROOT_DIR/examples/android-demo/run-e2e.sh" ]]; then
+    run_suite "E2E: Android Emulator" "bash $ROOT_DIR/examples/android-demo/run-e2e.sh"
+  else
+    skip_suite "E2E: Android Emulator" "runner not found"
   fi
 fi
 

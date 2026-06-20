@@ -9,29 +9,12 @@
 // ============================================
 
 declare global {
-  // Operation tracking (used by OperationCollector)
-  // eslint-disable-next-line no-var
-  var __OP_COUNTS: Record<string, number> | undefined;
-  // eslint-disable-next-line no-var
-  var __TOTAL_OPS: number | undefined;
-
-  // Host config tracking (used by host-config.ts)
-  // eslint-disable-next-line no-var
-  var __APPEND_INITIAL_CALLED: number | undefined;
-  // eslint-disable-next-line no-var
-  var __APPEND_CHILD_CALLED: number | undefined;
-  // eslint-disable-next-line no-var
-  var __APPEND_TO_CONTAINER_CALLED: number | undefined;
-
-  // Callback registry (used by host-config.ts)
-  // eslint-disable-next-line no-var
-  var __callbacks: Map<string, (...args: unknown[]) => unknown> | undefined;
-
   // DevTools flags
   // eslint-disable-next-line no-var
   var __RILL_DEVTOOLS_ENABLED: boolean | undefined;
   // eslint-disable-next-line no-var
-  var __sendEventToHost: ((eventName: string, payload?: unknown) => void) | undefined;
+  // Reason: DevTools payload can be any serializable type
+  var __rill_emitEvent: ((eventName: string, payload?: unknown) => void) | undefined;
 }
 
 // ============================================
@@ -55,7 +38,7 @@ export function isDevToolsEnabled(): boolean {
 }
 
 export function sendDevToolsMessage(type: string, data: unknown): void {
-  if (typeof globalThis.__sendEventToHost === 'function') {
-    globalThis.__sendEventToHost(type, data);
+  if (typeof globalThis.__rill_emitEvent === 'function') {
+    globalThis.__rill_emitEvent(type, data);
   }
 }

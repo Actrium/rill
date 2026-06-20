@@ -1,0 +1,17 @@
+node_modules/
+package-lock.json
+
+# Android
+android/build/
+android/app/build/
+android/.gradle/
+android/local.properties
+android/gradle/wrapper/gradle-wrapper.jar
+android/gradlew
+android/gradlew.bat
+
+# Generated JS bundle (created by install.sh)
+android/app/src/main/assets/
+
+# Metro
+.metro-health-check*

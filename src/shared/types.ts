@@ -1,77 +1,89 @@
 /**
  * @rill/bridge - Protocol Type System
  *
- * 基于 JSI 能力定义的完整类型系统
- * - JSI 原生支持的类型：直接传递，零开销
- * - 需要 Bridge 处理的类型：序列化/反序列化
+ *  JSI
+ * - JSI ：，
+ * -  Bridge ：/
  *
- * 这是 Host ↔ Guest 共享的协议层
+ *  Host ↔ Guest
  */
 
 // ============================================
-// JSI 原生支持（直接传递，零开销）
+// Type Safety
 // ============================================
 
 /**
- * JSI 原语类型
+ * Reviewed Unknown Type
+ *
+ * Use of `unknown` is allowed only when it's explicit and intentional.
+ * Prefer specific types when possible; otherwise use ReviewedUnknown and validate at runtime.
+ */
+export type ReviewedUnknown = unknown;
+
+// ============================================
+// JSI （，）
+// ============================================
+
+/**
+ * JSI
  */
 export type JSIPrimitive = null | undefined | boolean | number | string;
 
 /**
- * JSI 安全类型 - 可直接跨边界传递
+ * JSI  -
  */
 export type JSISafe = JSIPrimitive | JSISafeArray | JSISafeObject;
 
 /**
- * JSI 安全数组
+ * JSI
  */
 export interface JSISafeArray extends Array<JSISafe> {}
 
 /**
- * JSI 安全对象
+ * JSI
  */
 export interface JSISafeObject {
   [key: string]: JSISafe;
 }
 
 // ============================================
-// 需要 Bridge 处理（JSI 无法直接传递）
+//  Bridge （JSI ）
 // ============================================
 
 /**
- * 需要序列化的类型
+ *
  */
 export type RequiresBridge =
   // biome-ignore lint/complexity/noBannedTypes: Generic function type for serialization
   Function | Date | RegExp | Error | Map<BridgeValue, BridgeValue> | Set<BridgeValue>;
 
 // ============================================
-// Bridge 完整类型
+// Bridge
 // ============================================
 
 /**
- * Bridge 支持的完整值类型
+ * Bridge
  */
 export type BridgeValue = JSIPrimitive | RequiresBridge | BridgeValueArray | BridgeValueObject;
 
 /**
- * Bridge 值数组
+ * Bridge
  */
 export interface BridgeValueArray extends Array<BridgeValue> {}
 
 /**
- * Bridge 值对象
+ * Bridge
  */
 export interface BridgeValueObject {
   [key: string]: BridgeValue;
 }
 
 // ============================================
-// 序列化后的类型
+//
 // ============================================
 
 /**
- * 序列化函数
+ *
  */
 export interface SerializedFunction {
   __type: 'function';
@@ -82,7 +94,7 @@ export interface SerializedFunction {
 }
 
 /**
- * 序列化日期
+ *
  */
 export interface SerializedDate {
   __type: 'date';
@@ -90,7 +102,7 @@ export interface SerializedDate {
 }
 
 /**
- * 序列化正则
+ *
  */
 export interface SerializedRegExp {
   __type: 'regexp';
@@ -99,7 +111,7 @@ export interface SerializedRegExp {
 }
 
 /**
- * 序列化错误
+ *
  */
 export interface SerializedError {
   __type: 'error';
@@ -109,7 +121,7 @@ export interface SerializedError {
 }
 
 /**
- * 序列化 Map
+ *  Map
  */
 export interface SerializedMap {
   __type: 'map';
@@ -117,7 +129,7 @@ export interface SerializedMap {
 }
 
 /**
- * 序列化 Set
+ *  Set
  */
 export interface SerializedSet {
   __type: 'set';
@@ -125,8 +137,8 @@ export interface SerializedSet {
 }
 
 /**
- * 序列化 Promise
- * Promise 通过 ID 跟踪，结果通过 promise:settle 消息异步传回
+ *  Promise
+ * Promise  ID ， promise:settle
  */
 export interface SerializedPromise {
   __type: 'promise';
@@ -134,7 +146,7 @@ export interface SerializedPromise {
 }
 
 /**
- * 所有序列化特殊类型
+ *
  */
 export type SerializedSpecialType =
   | SerializedFunction
@@ -146,7 +158,7 @@ export type SerializedSpecialType =
   | SerializedPromise;
 
 /**
- * 序列化后的值 - JSI 安全
+ *  - JSI
  */
 export type SerializedValue =
   | JSIPrimitive
@@ -155,23 +167,23 @@ export type SerializedValue =
   | SerializedValueObject;
 
 /**
- * 序列化值数组
+ *
  */
 export interface SerializedValueArray extends Array<SerializedValue> {}
 
 /**
- * 序列化值对象
+ *
  */
 export interface SerializedValueObject {
   [key: string]: SerializedValue;
 }
 
 // ============================================
-// 操作类型 (Guest → Host)
+//  (Guest → Host)
 // ============================================
 
 /**
- * 操作类型枚举
+ *
  */
 export type OperationType =
   | 'CREATE'
@@ -185,7 +197,7 @@ export type OperationType =
   | 'REF_CALL';
 
 /**
- * 基础操作接口
+ *
  */
 export interface BaseOperation {
   op: OperationType;
@@ -240,19 +252,19 @@ export interface TextOperation extends BaseOperation {
 }
 
 /**
- * Remote Ref 方法调用操作
- * Guest 调用 Host 组件实例方法（如 focus, blur, scrollTo）
+ * Remote Ref
+ * Guest  Host （ focus, blur, scrollTo）
  */
 export interface RefCallOperation extends BaseOperation {
   op: 'REF_CALL';
-  refId: number; // 节点 ID（与 nodeMap 中的 id 一致）
-  method: string; // 方法名：focus, blur, measure, scrollTo 等
-  args: BridgeValue[]; // 方法参数
-  callId: string; // 调用唯一标识（用于 Promise 匹配）
+  refId: number; //  ID（ nodeMap  id ）
+  method: string; // ：focus, blur, measure, scrollTo
+  args: BridgeValue[]; //
+  callId: string; // （ Promise ）
 }
 
 /**
- * 序列化后的 REF_CALL 操作
+ *  REF_CALL
  */
 export interface SerializedRefCallOperation extends BaseOperation {
   op: 'REF_CALL';
@@ -263,7 +275,7 @@ export interface SerializedRefCallOperation extends BaseOperation {
 }
 
 /**
- * 操作 - Discriminated Union
+ *  - Discriminated Union
  */
 export type Operation =
   | CreateOperation
@@ -277,7 +289,7 @@ export type Operation =
   | RefCallOperation;
 
 /**
- * 操作批次
+ *
  */
 export interface OperationBatch {
   version: number;
@@ -286,7 +298,7 @@ export interface OperationBatch {
 }
 
 /**
- * 序列化后的操作批次
+ *
  */
 export interface SerializedOperationBatch {
   version: number;
@@ -295,7 +307,7 @@ export interface SerializedOperationBatch {
 }
 
 /**
- * 序列化后的 CREATE 操作
+ *  CREATE
  */
 export interface SerializedCreateOperation extends BaseOperation {
   op: 'CREATE';
@@ -304,7 +316,7 @@ export interface SerializedCreateOperation extends BaseOperation {
 }
 
 /**
- * 序列化后的 UPDATE 操作
+ *  UPDATE
  */
 export interface SerializedUpdateOperation extends BaseOperation {
   op: 'UPDATE';
@@ -313,7 +325,7 @@ export interface SerializedUpdateOperation extends BaseOperation {
 }
 
 /**
- * 序列化后的操作 - props 使用 SerializedValueObject
+ *  - props  SerializedValueObject
  */
 export type SerializedOperation =
   | SerializedCreateOperation
@@ -327,7 +339,7 @@ export type SerializedOperation =
   | SerializedRefCallOperation;
 
 /**
- * 检查操作是否包含 props
+ *  props
  */
 export function operationHasProps(
   op: Operation | SerializedOperation
@@ -336,51 +348,54 @@ export function operationHasProps(
 }
 
 // ============================================
-// 消息类型 (Host → Guest)
+//  (Host → Guest)
 // ============================================
 
-export type HostMessageType =
-  | 'CALL_FUNCTION'
-  | 'HOST_EVENT'
-  | 'CONFIG_UPDATE'
-  | 'DESTROY'
-  | 'REF_METHOD_RESULT';
+export enum HostMsg {
+  CALL_FUNCTION = 'CALL_FUNCTION',
+  HOST_EVENT = 'HOST_EVENT',
+  CONFIG_UPDATE = 'CONFIG_UPDATE',
+  DESTROY = 'DESTROY',
+  PROMISE_RESOLVE = 'PROMISE_RESOLVE',
+  PROMISE_REJECT = 'PROMISE_REJECT',
+  REF_METHOD_RESULT = 'REF_METHOD_RESULT',
+}
 
 export interface CallFunctionMessage {
-  type: 'CALL_FUNCTION';
+  type: HostMsg.CALL_FUNCTION;
   fnId: string;
   args: BridgeValue[];
 }
 
 export interface HostEventMessage {
-  type: 'HOST_EVENT';
+  type: HostMsg.HOST_EVENT;
   eventName: string;
   payload: BridgeValue;
 }
 
 export interface ConfigUpdateMessage {
-  type: 'CONFIG_UPDATE';
+  type: HostMsg.CONFIG_UPDATE;
   config: BridgeValueObject;
 }
 
 export interface DestroyMessage {
-  type: 'DESTROY';
+  type: HostMsg.DESTROY;
 }
 
 /**
- * Remote Ref 方法调用结果消息
- * Host 返回给 Guest 的方法调用结果
+ * Remote Ref
+ * Host  Guest
  */
 export interface RefMethodResultMessage {
-  type: 'REF_METHOD_RESULT';
-  refId: number; // 节点 ID
-  callId: string; // 调用唯一标识（与 REF_CALL 对应）
-  result?: BridgeValue; // 成功时的返回值
-  error?: SerializedError; // 失败时的错误信息
+  type: HostMsg.REF_METHOD_RESULT;
+  refId: number; //  ID
+  callId: string; // （ REF_CALL ）
+  result?: BridgeValue; //
+  error?: SerializedError; //
 }
 
 /**
- * Host → Guest 消息
+ * Host → Guest
  */
 export type HostMessage =
   | CallFunctionMessage
@@ -391,17 +406,17 @@ export type HostMessage =
   | RefMethodResultMessage;
 
 /**
- * Promise 结算消息 - 用于异步传递 Promise 结果
+ * Promise  -  Promise
  */
 export type PromiseSettleMessage =
-  | { type: 'PROMISE_RESOLVE'; promiseId: string; value: BridgeValue }
-  | { type: 'PROMISE_REJECT'; promiseId: string; error: SerializedError };
+  | { type: HostMsg.PROMISE_RESOLVE; promiseId: string; value: BridgeValue }
+  | { type: HostMsg.PROMISE_REJECT; promiseId: string; error: SerializedError };
 
 /**
- * 序列化后的 REF_METHOD_RESULT 消息
+ *  REF_METHOD_RESULT
  */
 export interface SerializedRefMethodResultMessage {
-  type: 'REF_METHOD_RESULT';
+  type: HostMsg.REF_METHOD_RESULT;
   refId: number;
   callId: string;
   result?: SerializedValue;
@@ -409,104 +424,108 @@ export interface SerializedRefMethodResultMessage {
 }
 
 export type SerializedHostMessage =
-  | { type: 'CALL_FUNCTION'; fnId: string; args: SerializedValue[] }
-  | { type: 'HOST_EVENT'; eventName: string; payload: SerializedValue }
-  | { type: 'CONFIG_UPDATE'; config: SerializedValueObject }
-  | { type: 'DESTROY' }
+  | { type: HostMsg.CALL_FUNCTION; fnId: string; args: SerializedValue[] }
+  | { type: HostMsg.HOST_EVENT; eventName: string; payload: SerializedValue }
+  | { type: HostMsg.CONFIG_UPDATE; config: SerializedValueObject }
+  | { type: HostMsg.DESTROY }
   | SerializedPromiseSettleMessage
   | SerializedRefMethodResultMessage;
 
 /**
- * 序列化后的 Promise 结算消息
+ *  Promise
  */
 export type SerializedPromiseSettleMessage =
-  | { type: 'PROMISE_RESOLVE'; promiseId: string; value: SerializedValue }
-  | { type: 'PROMISE_REJECT'; promiseId: string; error: SerializedError };
+  | { type: HostMsg.PROMISE_RESOLVE; promiseId: string; value: SerializedValue }
+  | { type: HostMsg.PROMISE_REJECT; promiseId: string; error: SerializedError };
 
 // ============================================
-// Callback Registry 接口
+// Callback Registry
 // ============================================
 
 /**
- * Callback Registry - 管理跨边界函数调用
+ * Callback Registry -
  *
- * Note: Uses `unknown` for flexibility with existing implementations.
+ * Note: Uses ReviewedUnknown for flexibility with existing implementations.
  * The actual serialization/deserialization is handled by Bridge.
  */
 export interface CallbackRegistry {
   /**
-   * 注册函数，返回 fnId
+   * ， fnId
    */
-  register(fn: (...args: unknown[]) => unknown): string;
+  register(fn: (...args: ReviewedUnknown[]) => ReviewedUnknown): string;
 
   /**
-   * 通过 fnId 调用函数
+   *  fnId
    */
-  invoke(fnId: string, args: unknown[]): unknown;
+  invoke(fnId: string, args: ReviewedUnknown[]): ReviewedUnknown;
 
   /**
-   * 检查 fnId 是否存在
+   *  fnId
    */
   has(fnId: string): boolean;
 
   /**
-   * 移除指定 fnId
+   *  fnId
    */
   remove(fnId: string): void;
 
   /**
-   * 清理所有注册的函数
+   *
    */
   clear(): void;
 
   /**
-   * 增加引用计数
+   *
    */
   retain(fnId: string): void;
 
   /**
-   * 减少引用计数，计数归零时移除
+   * ，
    */
   release(fnId: string): void;
 
   /**
-   * 获取引用计数
+   *
    */
   getRefCount(fnId: string): number;
 
   /**
-   * 获取内部 Map（用于同步到 globalThis.__callbacks）
+   *  Map（ globalThis.__rill.callbacks）
    */
-  getMap(): Map<string, (...args: unknown[]) => unknown>;
+  getMap(): Map<string, (...args: ReviewedUnknown[]) => ReviewedUnknown>;
 
   /**
-   * 当前注册的函数数量
+   *
    */
   readonly size: number;
 }
 
 // ============================================
-// 便捷类型别名
+//
 // ============================================
 
 /**
- * 序列化后的 props 对象
+ *  props
  */
 export type SerializedProps = SerializedValueObject;
 
 /**
- * 发送到 Host 的函数类型
- * Guest 端发送 SerializedOperationBatch（已序列化）
- * Host 端发送 OperationBatch（未序列化）
+ * Send operations from Guest to Host.
+ * The batch format depends on the provider:
+ * - VM: OperationBatch (raw, same runtime)
+ * - WASM binary: ArrayBuffer
+ * - Native sandbox: string (JSON-serialized to avoid JSI stack overflow)
  */
-export type SendToHost = (batch: OperationBatch | SerializedOperationBatch) => void;
+export type SendToHost = (
+  batch: OperationBatch | SerializedOperationBatch | ArrayBuffer | string
+) => void;
 
 // ============================================
 // Type Guards
 // ============================================
 
 /**
- * 检查是否为 JSI 原语类型
+ *  JSI
  */
 export function isJSIPrimitive(value: BridgeValue): value is JSIPrimitive {
   return (
@@ -519,7 +538,7 @@ export function isJSIPrimitive(value: BridgeValue): value is JSIPrimitive {
 }
 
 /**
- * 检查是否为序列化函数
+ *
  */
 export function isSerializedFunction(value: SerializedValue): value is SerializedFunction {
   return (
@@ -532,7 +551,7 @@ export function isSerializedFunction(value: SerializedValue): value is Serialize
 }
 
 /**
- * 检查是否为序列化日期
+ *
  */
 export function isSerializedDate(value: SerializedValue): value is SerializedDate {
   return (
@@ -544,7 +563,7 @@ export function isSerializedDate(value: SerializedValue): value is SerializedDat
 }
 
 /**
- * 检查是否为序列化正则
+ *
  */
 export function isSerializedRegExp(value: SerializedValue): value is SerializedRegExp {
   return (
@@ -556,7 +575,7 @@ export function isSerializedRegExp(value: SerializedValue): value is SerializedR
 }
 
 /**
- * 检查是否为序列化错误
+ *
  */
 export function isSerializedError(value: SerializedValue): value is SerializedError {
   return (
@@ -568,7 +587,7 @@ export function isSerializedError(value: SerializedValue): value is SerializedEr
 }
 
 /**
- * 检查是否为序列化 Map
+ *  Map
  */
 export function isSerializedMap(value: SerializedValue): value is SerializedMap {
   return (
@@ -580,7 +599,7 @@ export function isSerializedMap(value: SerializedValue): value is SerializedMap 
 }
 
 /**
- * 检查是否为序列化 Set
+ *  Set
  */
 export function isSerializedSet(value: SerializedValue): value is SerializedSet {
   return (
@@ -592,7 +611,7 @@ export function isSerializedSet(value: SerializedValue): value is SerializedSet 
 }
 
 /**
- * 检查是否为序列化 Promise
+ *  Promise
  */
 export function isSerializedPromise(value: SerializedValue): value is SerializedPromise {
   return (
@@ -605,7 +624,7 @@ export function isSerializedPromise(value: SerializedValue): value is Serialized
 }
 
 /**
- * 检查是否为任意序列化特殊类型
+ *
  */
 export function isSerializedSpecialType(value: SerializedValue): value is SerializedSpecialType {
   return (

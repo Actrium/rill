@@ -6,12 +6,7 @@
  */
 
 // ============================================
-// Re-export from bridge
-// ============================================
-export type { CallbackRegistry as CallbackRegistryInterface, SendToHost } from '../../../shared';
-export { CallbackRegistryImpl as CallbackRegistry } from '../../../shared';
-// ============================================
-// Re-export types from let/types
+// Re-export types from sdk/types
 // ============================================
 export type {
   GuestElement,
@@ -19,7 +14,12 @@ export type {
   SerializedOperation,
   SerializedOperationBatch,
   VNode,
-} from '../../let/types';
+} from '../../../sdk/types';
+// ============================================
+// Re-export from bridge
+// ============================================
+export type { CallbackRegistry as CallbackRegistryInterface, SendToHost } from '../../../shared';
+export { CallbackRegistryImpl as CallbackRegistry } from '../../../shared';
 // ============================================
 // DevTools
 // ============================================

@@ -1,0 +1,10 @@
+{
+  "ignore_dirs": [
+    "tests/rn-macos-bridgeless/build",
+    "tests/rn-macos-bridgeless/macos/build",
+    "examples/ios-demo/build",
+    "examples/android-demo/android/.gradle",
+    "examples/android-demo/android/build",
+    "examples/android-demo/android/app/build"
+  ]
+}

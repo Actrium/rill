@@ -59,8 +59,8 @@
   var ctx = runtime.createContext();
   assert(typeof ctx === 'object', 'createContext() returns object');
   assert(typeof ctx.eval === 'function', 'context has eval method');
-  assert(typeof ctx.setGlobal === 'function', 'context has setGlobal method');
-  assert(typeof ctx.getGlobal === 'function', 'context has getGlobal method');
+  assert(typeof ctx.inject === 'function', 'context has inject method');
+  assert(typeof ctx.extract === 'function', 'context has extract method');
 
   // 3. Code Evaluation
   console.log('\n3. Code Evaluation');
@@ -77,22 +77,22 @@
     'Array map values correct'
   );
 
-  // 4. setGlobal / getGlobal
-  console.log('\n4. setGlobal / getGlobal');
-  ctx.setGlobal('myNumber', 42);
-  assert(ctx.getGlobal('myNumber') === 42, 'setGlobal/getGlobal number');
-  assert(ctx.eval('myNumber') === 42, 'eval can access setGlobal value');
+  // 4. inject / extract
+  console.log('\n4. inject / extract');
+  ctx.inject('myNumber', 42);
+  assert(ctx.extract('myNumber') === 42, 'inject/extract number');
+  assert(ctx.eval('myNumber') === 42, 'eval can access inject value');
 
-  ctx.setGlobal('myString', 'test string');
-  assert(ctx.getGlobal('myString') === 'test string', 'setGlobal/getGlobal string');
+  ctx.inject('myString', 'test string');
+  assert(ctx.extract('myString') === 'test string', 'inject/extract string');
 
-  ctx.setGlobal('myObj', { x: 10, y: 20 });
-  assert(ctx.eval('myObj.x + myObj.y') === 30, 'setGlobal/getGlobal object');
+  ctx.inject('myObj', { x: 10, y: 20 });
+  assert(ctx.eval('myObj.x + myObj.y') === 30, 'inject/extract object');
 
-  ctx.setGlobal('myArray', [1, 2, 3]);
+  ctx.inject('myArray', [1, 2, 3]);
   assert(
     ctx.eval('myArray.reduce(function(a, b) { return a + b; }, 0)') === 6,
-    'setGlobal/getGlobal array'
+    'inject/extract array'
   );
 
   // 5. Host Function Callbacks (the key feature!)
@@ -100,7 +100,7 @@
 
   var callbackInvoked = false;
   var receivedValue = 0;
-  ctx.setGlobal('hostCallback', (val) => {
+  ctx.inject('hostCallback', (val) => {
     callbackInvoked = true;
     receivedValue = val;
     return val * 2;
@@ -112,11 +112,11 @@
     'Host function called from sandbox'
   );
 
-  ctx.setGlobal('multiArg', (a, b, c, d, e) => a + b + c + d + e);
+  ctx.inject('multiArg', (a, b, c, d, e) => a + b + c + d + e);
   assert(ctx.eval('multiArg(1, 2, 3, 4, 5)') === 15, 'Host function with multiple args');
 
   var _receivedObj = null;
-  ctx.setGlobal('objCallback', (obj) => {
+  ctx.inject('objCallback', (obj) => {
     _receivedObj = obj;
     return obj.name === 'Alice' && obj.age === 30;
   });
@@ -128,7 +128,7 @@
   // 6. Bidirectional: Guest function called by Host
   console.log('\n6. Guest Functions Callable from Host');
   ctx.eval('function guestAdd(a, b) { return a + b; }');
-  var guestAdd = ctx.getGlobal('guestAdd');
+  var guestAdd = ctx.extract('guestAdd');
   assert(typeof guestAdd === 'function', 'Can get guest function');
   assert(guestAdd(5, 7) === 12, 'Can call guest function from host');
 
@@ -166,32 +166,32 @@
 
   // 10. Primitive Types - null, undefined, boolean
   console.log('\n10. Primitive Types');
-  ctx.setGlobal('myNull', null);
-  assert(ctx.getGlobal('myNull') === null, 'setGlobal/getGlobal null');
+  ctx.inject('myNull', null);
+  assert(ctx.extract('myNull') === null, 'inject/extract null');
   assert(ctx.eval('myNull === null') === true, 'eval null comparison');
 
-  ctx.setGlobal('myUndef', undefined);
-  assert(ctx.getGlobal('myUndef') === undefined, 'setGlobal/getGlobal undefined');
+  ctx.inject('myUndef', undefined);
+  assert(ctx.extract('myUndef') === undefined, 'inject/extract undefined');
   assert(ctx.eval('myUndef === undefined') === true, 'eval undefined comparison');
 
-  ctx.setGlobal('myTrue', true);
-  ctx.setGlobal('myFalse', false);
-  assert(ctx.getGlobal('myTrue') === true, 'setGlobal/getGlobal true');
-  assert(ctx.getGlobal('myFalse') === false, 'setGlobal/getGlobal false');
+  ctx.inject('myTrue', true);
+  ctx.inject('myFalse', false);
+  assert(ctx.extract('myTrue') === true, 'inject/extract true');
+  assert(ctx.extract('myFalse') === false, 'inject/extract false');
   assert(ctx.eval('myTrue && !myFalse') === true, 'eval boolean logic');
 
   // 11. Special Numbers - NaN, Infinity
   console.log('\n11. Special Numbers');
-  ctx.setGlobal('myNaN', NaN);
-  assert(Number.isNaN(ctx.getGlobal('myNaN')), 'setGlobal/getGlobal NaN');
+  ctx.inject('myNaN', NaN);
+  assert(Number.isNaN(ctx.extract('myNaN')), 'inject/extract NaN');
   assert(ctx.eval('Number.isNaN(myNaN)') === true, 'eval NaN check');
 
-  ctx.setGlobal('myInf', Infinity);
-  assert(ctx.getGlobal('myInf') === Infinity, 'setGlobal/getGlobal Infinity');
+  ctx.inject('myInf', Infinity);
+  assert(ctx.extract('myInf') === Infinity, 'inject/extract Infinity');
   assert(ctx.eval('myInf === Infinity') === true, 'eval Infinity comparison');
 
-  ctx.setGlobal('myNegInf', -Infinity);
-  assert(ctx.getGlobal('myNegInf') === -Infinity, 'setGlobal/getGlobal -Infinity');
+  ctx.inject('myNegInf', -Infinity);
+  assert(ctx.extract('myNegInf') === -Infinity, 'inject/extract -Infinity');
 
   // 12. BigInt (if supported)
   console.log('\n12. BigInt');
@@ -223,16 +223,16 @@
       },
     },
   };
-  ctx.setGlobal('nested', nested);
+  ctx.inject('nested', nested);
   assert(ctx.eval('nested.level1.level2.level3.value') === 'deep', 'Deep nested object access');
 
-  var deepResult = ctx.getGlobal('nested');
-  assert(deepResult.level1.level2.level3.value === 'deep', 'getGlobal deep nested object');
+  var deepResult = ctx.extract('nested');
+  assert(deepResult.level1.level2.level3.value === 'deep', 'extract deep nested object');
 
   // 14. Arrays with Mixed Types
   console.log('\n14. Arrays with Mixed Types');
   var mixedArray = [1, 'two', true, null, undefined, { x: 10 }, [1, 2, 3]];
-  ctx.setGlobal('mixedArray', mixedArray);
+  ctx.inject('mixedArray', mixedArray);
   assert(ctx.eval('mixedArray[0]') === 1, 'Mixed array - number');
   assert(ctx.eval('mixedArray[1]') === 'two', 'Mixed array - string');
   assert(ctx.eval('mixedArray[2]') === true, 'Mixed array - boolean');
@@ -244,36 +244,36 @@
   // 15. Functions as Values
   console.log('\n15. Functions as Values');
   ctx.eval("var objWithFunc = { greet: function(name) { return 'Hello, ' + name; } }");
-  var objWithFunc = ctx.getGlobal('objWithFunc');
+  var objWithFunc = ctx.extract('objWithFunc');
   assert(typeof objWithFunc.greet === 'function', 'Object with function property');
   assert(objWithFunc.greet('World') === 'Hello, World', 'Call function from object');
 
   ctx.eval('var higherOrder = function(f, x) { return f(x * 2); }');
-  var higherOrder = ctx.getGlobal('higherOrder');
+  var higherOrder = ctx.extract('higherOrder');
   assert(higherOrder((n) => n + 1, 5) === 11, 'Higher-order function');
 
   // 16. Host Callback with Various Return Types
   console.log('\n16. Host Callback Return Types');
-  ctx.setGlobal('returnNull', () => null);
+  ctx.inject('returnNull', () => null);
   assert(ctx.eval('returnNull() === null') === true, 'Host callback returning null');
 
-  ctx.setGlobal('returnUndefined', () => undefined);
+  ctx.inject('returnUndefined', () => undefined);
   assert(ctx.eval('returnUndefined() === undefined') === true, 'Host callback returning undefined');
 
-  ctx.setGlobal('returnBool', (b) => !b);
+  ctx.inject('returnBool', (b) => !b);
   assert(ctx.eval('returnBool(false)') === true, 'Host callback returning boolean');
 
-  ctx.setGlobal('returnArray', () => [1, 2, 3]);
+  ctx.inject('returnArray', () => [1, 2, 3]);
   var retArr = ctx.eval('returnArray()');
   assert(Array.isArray(retArr) && retArr.length === 3, 'Host callback returning array');
 
-  ctx.setGlobal('returnObject', () => ({ a: 1, b: 2 }));
+  ctx.inject('returnObject', () => ({ a: 1, b: 2 }));
   assert(ctx.eval('returnObject().a + returnObject().b') === 3, 'Host callback returning object');
 
   // 17. Guest Callback Receiving Various Types
   console.log('\n17. Guest Callback Arguments');
   ctx.eval('function identity(x) { return x; }');
-  var identity = ctx.getGlobal('identity');
+  var identity = ctx.extract('identity');
   assert(identity(null) === null, 'Guest function receives null');
   assert(identity(undefined) === undefined, 'Guest function receives undefined');
   assert(identity(true) === true, 'Guest function receives boolean');
@@ -303,7 +303,7 @@
   // 19. Date Objects
   console.log('\n19. Date Objects');
   ctx.eval('var myDate = new Date(2024, 0, 15)');
-  var dateObj = ctx.getGlobal('myDate');
+  var dateObj = ctx.extract('myDate');
   assert(dateObj instanceof Date || typeof dateObj === 'object', 'Date object retrieved');
   assert(ctx.eval('myDate.getFullYear()') === 2024, 'Date getFullYear');
   assert(ctx.eval('myDate.getMonth()') === 0, 'Date getMonth');
@@ -373,11 +373,11 @@
     ctx.eval(
       'Promise.resolve(42).then(function(v) { promiseResolved = true; promiseValue = v; });'
     );
-    // Note: Promises are async, so we can't directly test the resolved value synchronously
-    // But we can test that Promise exists and basic operations work
     assert(ctx.eval('typeof Promise') === 'function', 'Promise exists');
     assert(ctx.eval('typeof Promise.resolve') === 'function', 'Promise.resolve exists');
     assert(ctx.eval('typeof Promise.reject') === 'function', 'Promise.reject exists');
+    assert(ctx.extract('promiseResolved') === true, 'Promise microtasks drain after eval');
+    assert(ctx.extract('promiseValue') === 42, 'Promise microtask value is visible after eval');
   } catch (e) {
     console.log(`  ⚠ Promise tests skipped: ${e.message}`);
   }
@@ -385,7 +385,7 @@
   // 25. JSON serialization
   console.log('\n25. JSON Serialization');
   var jsonObj = { name: 'test', count: 42, active: true, items: [1, 2, 3] };
-  ctx.setGlobal('jsonObj', jsonObj);
+  ctx.inject('jsonObj', jsonObj);
   var jsonStr = ctx.eval('JSON.stringify(jsonObj)');
   assert(typeof jsonStr === 'string', 'JSON.stringify returns string');
   var parsed = JSON.parse(jsonStr);
@@ -405,7 +405,7 @@
 
   // 27. String methods
   console.log('\n27. String Methods');
-  ctx.setGlobal('testStr', '  Hello, World!  ');
+  ctx.inject('testStr', '  Hello, World!  ');
   assert(ctx.eval('testStr.trim()') === 'Hello, World!', 'String trim');
   assert(ctx.eval('testStr.toUpperCase().trim()') === 'HELLO, WORLD!', 'String toUpperCase');
   assert(ctx.eval('testStr.toLowerCase().trim()') === 'hello, world!', 'String toLowerCase');
@@ -425,13 +425,13 @@
 
   // 29. Empty and edge cases
   console.log('\n29. Edge Cases');
-  ctx.setGlobal('emptyStr', '');
-  assert(ctx.getGlobal('emptyStr') === '', 'Empty string');
-  ctx.setGlobal('emptyArr', []);
-  var emptyArr = ctx.getGlobal('emptyArr');
+  ctx.inject('emptyStr', '');
+  assert(ctx.extract('emptyStr') === '', 'Empty string');
+  ctx.inject('emptyArr', []);
+  var emptyArr = ctx.extract('emptyArr');
   assert(Array.isArray(emptyArr) && emptyArr.length === 0, 'Empty array');
-  ctx.setGlobal('emptyObj', {});
-  var emptyObj = ctx.getGlobal('emptyObj');
+  ctx.inject('emptyObj', {});
+  var emptyObj = ctx.extract('emptyObj');
   assert(typeof emptyObj === 'object' && Object.keys(emptyObj).length === 0, 'Empty object');
 
   assert(ctx.eval('0') === 0, 'Zero');

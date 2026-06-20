@@ -28,8 +28,8 @@ describe('E2E Error Handling: Guest Runtime Errors', () => {
       throw new Error('Intentional sync error');
     `;
 
-    // Engine should capture the error without crashing
-    await expect(ctx.engine.loadBundle(guestCode)).rejects.toThrow('Intentional sync error');
+    // Engine captures the error — loadBundle throws synchronously (sync path)
+    expect(() => ctx.engine.loadBundle(guestCode)).toThrow('Intentional sync error');
   });
 
   it('should continue running after catching guest error', async () => {
@@ -38,7 +38,7 @@ describe('E2E Error Handling: Guest Runtime Errors', () => {
       throw new Error('First error');
     `;
 
-    await expect(ctx.engine.loadBundle(brokenCode)).rejects.toThrow();
+    expect(() => ctx.engine.loadBundle(brokenCode)).toThrow();
 
     // Then load working code - engine should still work
     const workingCode = `
@@ -49,7 +49,7 @@ describe('E2E Error Handling: Guest Runtime Errors', () => {
         return React.createElement('View', { testID: 'recovered' });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(workingCode);
@@ -64,7 +64,7 @@ describe('E2E Error Handling: Guest Runtime Errors', () => {
       const value = undefinedVariable.property;
     `;
 
-    await expect(ctx.engine.loadBundle(guestCode)).rejects.toThrow();
+    expect(() => ctx.engine.loadBundle(guestCode)).toThrow();
   });
 
   it('should handle type errors', async () => {
@@ -72,7 +72,7 @@ describe('E2E Error Handling: Guest Runtime Errors', () => {
       null.someMethod();
     `;
 
-    await expect(ctx.engine.loadBundle(guestCode)).rejects.toThrow();
+    expect(() => ctx.engine.loadBundle(guestCode)).toThrow();
   });
 });
 
@@ -108,7 +108,7 @@ describe('E2E Error Handling: Callback Errors', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -137,7 +137,7 @@ describe('E2E Error Handling: Callback Errors', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -172,14 +172,14 @@ describe('E2E Error Handling: Callback Errors', () => {
             testID: 'safe-button',
             onPress: () => {
               setCount(count + 1);
-              globalThis.__sendEventToHost('COUNT_UPDATED', { count: count + 1 });
+              globalThis.__rill_emitEvent('COUNT_UPDATED', { count: count + 1 });
             }
           }),
           React.createElement('Text', { testID: 'counter' }, 'Count: ' + count)
         );
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -229,7 +229,7 @@ describe('E2E Error Handling: Error Serialization', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -258,7 +258,7 @@ describe('E2E Error Handling: Error Serialization', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -291,5 +291,5 @@ describe('E2E Error Handling: Component Render Errors', () => {
 
   // NOTE: React catches render errors internally - use Error Boundaries in real apps
   // NOTE: useEffect error handling tests moved to Playwright E2E:
-  // @see tests/e2e-wasm-sandbox/rill-useeffect.e2e.ts
+  // @see tests/wasm-sandbox/rill-useeffect.e2e.ts
 });

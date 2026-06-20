@@ -7,7 +7,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import { CallbackRegistryImpl as CallbackRegistry } from '../../../shared';
-import { Bridge } from '../../../shared/bridge/Bridge';
+import { Bridge } from '../../../shared/bridge/bridge';
 import type { OperationBatch } from '../../../shared/types';
 import { Receiver } from '../../receiver';
 import { ComponentRegistry } from '../../registry';
@@ -32,10 +32,10 @@ describe('Callback Cleanup - Memory Leak Fix', () => {
     const bridge = new Bridge({
       debug: false,
       callbackRegistry,
-      hostReceiver: (batch) => {
+      onGuestOperations: (batch) => {
         receiver.applyBatch(batch);
       },
-      guestReceiver: async () => {},
+      onHostMessage: async () => {},
     });
 
     // Initial callback count
@@ -57,7 +57,7 @@ describe('Callback Cleanup - Memory Leak Fix', () => {
       ],
     };
 
-    bridge.sendToHost(batch1);
+    bridge.sendRawBatch(batch1);
 
     // Should have registered 1 callback
     console.log(
@@ -81,7 +81,7 @@ describe('Callback Cleanup - Memory Leak Fix', () => {
       ],
     };
 
-    bridge.sendToHost(batch2);
+    bridge.sendRawBatch(batch2);
 
     // Should still have only 1 callback (old one released, new one added)
     console.log(
@@ -109,10 +109,10 @@ describe('Callback Cleanup - Memory Leak Fix', () => {
     const bridge = new Bridge({
       debug: false,
       callbackRegistry,
-      hostReceiver: (batch) => {
+      onGuestOperations: (batch) => {
         receiver.applyBatch(batch);
       },
-      guestReceiver: async () => {},
+      onHostMessage: async () => {},
     });
 
     const initialCount = callbackRegistry.size;
@@ -141,7 +141,7 @@ describe('Callback Cleanup - Memory Leak Fix', () => {
       ],
     };
 
-    bridge.sendToHost(batch1);
+    bridge.sendRawBatch(batch1);
 
     // Should have 2 callbacks registered
     expect(callbackRegistry.size).toBe(initialCount + 2);
@@ -158,7 +158,7 @@ describe('Callback Cleanup - Memory Leak Fix', () => {
       ],
     };
 
-    bridge.sendToHost(batch2);
+    bridge.sendRawBatch(batch2);
 
     // Should have only 1 callback remaining
     expect(callbackRegistry.size).toBe(initialCount + 1);
@@ -175,7 +175,7 @@ describe('Callback Cleanup - Memory Leak Fix', () => {
       ],
     };
 
-    bridge.sendToHost(batch3);
+    bridge.sendRawBatch(batch3);
 
     // Should be back to initial count
     expect(callbackRegistry.size).toBe(initialCount);
@@ -200,10 +200,10 @@ describe('Callback Cleanup - Memory Leak Fix', () => {
     const bridge = new Bridge({
       debug: false,
       callbackRegistry,
-      hostReceiver: (batch) => {
+      onGuestOperations: (batch) => {
         receiver.applyBatch(batch);
       },
-      guestReceiver: async () => {},
+      onHostMessage: async () => {},
     });
 
     const _initialCount = callbackRegistry.size;
@@ -224,7 +224,7 @@ describe('Callback Cleanup - Memory Leak Fix', () => {
       ],
     };
 
-    bridge.sendToHost(batch1);
+    bridge.sendRawBatch(batch1);
     const afterCreateCount = callbackRegistry.size;
 
     // Perform 100 updates (simulating component re-renders)
@@ -243,7 +243,7 @@ describe('Callback Cleanup - Memory Leak Fix', () => {
         ],
       };
 
-      bridge.sendToHost(batch);
+      bridge.sendRawBatch(batch);
     }
 
     // Should still have only 1 callback (not 101!)

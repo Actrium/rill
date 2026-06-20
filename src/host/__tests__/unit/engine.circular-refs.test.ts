@@ -1,33 +1,32 @@
 /**
- * Engine setGlobal mechanism tests
+ * Engine inject mechanism tests
  *
- * Verifies that Engine uses setGlobal to pass complex objects directly
+ * Verifies that Engine uses inject to pass complex objects directly
  * without JSON serialization, enabling support for:
  * - Circular references (e.g., RN event objects)
  * - Functions
  * - Complex nested objects
  *
- * Note: These tests focus on the Engine's use of setGlobal mechanism.
+ * Note: These tests focus on the Engine's use of inject mechanism.
  * Full end-to-end testing with actual providers (JSC, QuickJS, VM, WASM)
  * should be done via integration tests.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { Engine } from '../../engine';
-import { createMockJSEngineProvider } from '../test-utils';
 
-describe('Engine setGlobal Direct Object Passing', () => {
+describe('Engine inject Direct Object Passing', () => {
   let engine: Engine;
 
   beforeEach(() => {
-    engine = new Engine({ quickjs: createMockJSEngineProvider() });
+    engine = new Engine({ sandbox: 'vm'});
   });
 
   afterEach(() => {
     engine.destroy();
   });
 
-  it('should use setGlobal to pass objects without JSON serialization', async () => {
+  it('should use inject to pass objects without JSON serialization', async () => {
     await engine.loadBundle('console.log("test")');
 
     // Create an object that would fail JSON.stringify
@@ -37,9 +36,9 @@ describe('Engine setGlobal Direct Object Passing', () => {
     // Verify JSON.stringify would fail
     expect(() => JSON.stringify(circularObj)).toThrow();
 
-    // But setGlobal should work
-    engine.context?.setGlobal('testCircular', circularObj);
-    const retrieved = engine.context?.getGlobal('testCircular') as Record<string, unknown>;
+    // But inject should work
+    engine.context?.inject('testCircular', circularObj);
+    const retrieved = engine.context?.extract('testCircular') as Record<string, unknown>;
 
     expect(retrieved).toBeDefined();
     expect(retrieved.a).toBe(1);
@@ -66,9 +65,9 @@ describe('Engine setGlobal Direct Object Passing', () => {
     // JSON.stringify would throw
     expect(() => JSON.stringify(rnEvent)).toThrow();
 
-    // But setGlobal should work fine
-    engine.context?.setGlobal('rnEvent', rnEvent);
-    const retrieved = engine.context?.getGlobal('rnEvent') as typeof rnEvent;
+    // But inject should work fine
+    engine.context?.inject('rnEvent', rnEvent);
+    const retrieved = engine.context?.extract('rnEvent') as typeof rnEvent;
 
     expect(retrieved).toBeDefined();
     expect(retrieved.nativeEvent.pageX).toBe(100);
@@ -76,11 +75,11 @@ describe('Engine setGlobal Direct Object Passing', () => {
   });
 });
 
-describe('Engine setGlobal Cleanup', () => {
+describe('Engine inject Cleanup', () => {
   let engine: Engine;
 
   beforeEach(() => {
-    engine = new Engine({ quickjs: createMockJSEngineProvider() });
+    engine = new Engine({ sandbox: 'vm'});
   });
 
   afterEach(() => {
@@ -91,13 +90,13 @@ describe('Engine setGlobal Cleanup', () => {
     await engine.loadBundle('console.log("test")');
 
     // Set a global
-    engine.context?.setGlobal('testVar', 'test value');
-    let result = engine.context?.getGlobal('testVar');
+    engine.context?.inject('testVar', 'test value');
+    let result = engine.context?.extract('testVar');
     expect(result).toBe('test value');
 
     // Clear the global (setting to undefined should remove it)
-    engine.context?.setGlobal('testVar', undefined);
-    result = engine.context?.getGlobal('testVar');
+    engine.context?.inject('testVar', undefined);
+    result = engine.context?.extract('testVar');
     expect(result).toBeUndefined();
   });
 });

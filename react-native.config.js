@@ -1,12 +1,14 @@
-// Native sandbox is optional - most users only need rill/let (pure JS SDK)
-// Set platforms to null to disable auto-linking
-// For native sandbox users: manually add RillSandboxNative.podspec to Podfile
+// React Native autolinking configuration for RillSandboxNative.
+//
+// Keep only Android explicit fields. iOS autolinking uses the podspec
+// discovered from package root.
 module.exports = {
   dependency: {
     platforms: {
-      ios: null, // Disable iOS auto-linking
-      macos: null, // Disable macOS auto-linking
-      android: null, // Disable Android auto-linking
+      android: {
+        packageImportPath: 'import com.rill.sandbox.RillSandboxNativePackage;',
+        packageInstance: 'new RillSandboxNativePackage()',
+      },
     },
   },
 };

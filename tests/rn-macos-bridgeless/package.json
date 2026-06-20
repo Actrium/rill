@@ -1,0 +1,31 @@
+{
+  "name": "RillMacOSTestBridgeless",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "start": "npx react-native start",
+    "macos": "npx react-native run-macos",
+    "test": "./run-tests.sh",
+    "test:build": "./run-tests.sh build",
+    "test:run": "./run-tests.sh run"
+  },
+  "dependencies": {
+    "react": "19.1.4",
+    "react-native": "0.81.5",
+    "react-native-macos": "0.81.1",
+    "rill": "file:../.."
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.2",
+    "@babel/preset-env": "^7.25.3",
+    "@babel/runtime": "^7.28.6",
+    "@react-native-community/cli": "^20.0.2",
+    "@react-native/babel-preset": "0.81.1",
+    "@react-native/metro-config": "0.81.1",
+    "@types/react": "^19.0.0",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

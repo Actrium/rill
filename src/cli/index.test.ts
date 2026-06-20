@@ -39,7 +39,7 @@ describe('CLI Commands', () => {
     fs.writeFileSync(
       path.join(srcDir, 'guest.tsx'),
       `
-      import { View, Text } from '@rill/let';
+      import { View, Text } from 'rill/guest';
       export default function Guest() {
         return <View><Text>Hello CLI Test</Text></View>;
       }
@@ -198,6 +198,34 @@ describe('CLI Commands', () => {
 
       expect(fs.existsSync(path.join(tempDir, 'dist/meta.json'))).toBe(true);
     });
+
+    it('should handle contract and capability manifest options', async () => {
+      const buildMock = {
+        // biome-ignore lint/suspicious/noExplicitAny: Mock function accepts any build options
+        build: async (opts: any) => {
+          expect(opts.contractFile).toBe('src/rill.contract.ts');
+          expect(opts.capabilityManifest).toBe('dist/rill-capabilities.json');
+
+          fs.writeFileSync(path.join(tempDir, 'dist/bundle.js'), '// bundle');
+          fs.writeFileSync(
+            path.join(tempDir, 'dist/rill-capabilities.json'),
+            JSON.stringify({ hostCapabilities: [], guestExports: [] })
+          );
+        },
+      };
+
+      await buildMock.build({
+        entry: 'src/guest.tsx',
+        outfile: 'dist/bundle.js',
+        minify: true,
+        sourcemap: false,
+        watch: false,
+        contractFile: 'src/rill.contract.ts',
+        capabilityManifest: 'dist/rill-capabilities.json',
+      });
+
+      expect(fs.existsSync(path.join(tempDir, 'dist/rill-capabilities.json'))).toBe(true);
+    });
   });
 
   describe('analyze command', () => {
@@ -228,7 +256,7 @@ describe('CLI Commands', () => {
       };
 
       await analyzeMock.analyze('dist/test-bundle.js', {
-        whitelist: ['react', 'react-native', 'react/jsx-runtime', '@rill/let'],
+        whitelist: ['react', 'react-native', 'react/jsx-runtime', 'rill/guest'],
       });
     });
 
@@ -283,6 +311,19 @@ describe('CLI Commands', () => {
         treatDynamicNonLiteralAsViolation: true,
       });
     });
+
+    it('should handle contract option', async () => {
+      const analyzeMock = {
+        // biome-ignore lint/suspicious/noExplicitAny: Mock function accepts any analyze options
+        analyze: async (_bundlePath: string, opts?: any) => {
+          expect(opts?.contractFile).toBe('src/rill.contract.ts');
+        },
+      };
+
+      await analyzeMock.analyze('dist/test-bundle.js', {
+        contractFile: 'src/rill.contract.ts',
+      });
+    });
   });
 
   describe('init command', () => {
@@ -316,8 +357,7 @@ describe('CLI Commands', () => {
         },
         dependencies: {
           react: '^18.0.0',
-          '@rill/let': 'latest',
-          '@rill/cli': 'latest',
+          rill: 'latest',
         },
       };
       fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
@@ -339,7 +379,7 @@ describe('CLI Commands', () => {
       // Create src/guest.tsx
       const guestPath = path.join(srcDir, 'guest.tsx');
       const guestContent = `import * as React from 'react';
-import { View, Text } from '@rill/let';
+import { View, Text } from 'rill/guest';
 
 export default function Guest() {
   return (

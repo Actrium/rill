@@ -1,10 +1,9 @@
 import { describe, expect, it } from 'bun:test';
 import { Engine } from '../../engine';
-import { createMockJSEngineProvider } from '../test-utils';
 
 describe('Engine diagnostics - lifecycle', () => {
   it('tracks loaded/destroyed in health', async () => {
-    const engine = new Engine({ provider: createMockJSEngineProvider(), debug: false });
+    const engine = new Engine({ sandbox: 'vm', debug: false });
 
     // before load
     expect(engine.getDiagnostics().health.loaded).toBe(false);
@@ -19,9 +18,11 @@ describe('Engine diagnostics - lifecycle', () => {
   });
 
   it('tracks recordError when bundle execution fails', async () => {
-    const engine = new Engine({ provider: createMockJSEngineProvider(), debug: false });
+    const engine = new Engine({ sandbox: 'vm', debug: false });
 
-    await expect(engine.loadBundle('throw new Error("boom");')).rejects.toThrow('boom');
+    await expect(
+      Promise.resolve().then(() => engine.loadBundle('throw new Error("boom");'))
+    ).rejects.toThrow('boom');
 
     const d = engine.getDiagnostics();
     expect(d.health.errorCount).toBeGreaterThan(0);

@@ -5,7 +5,7 @@
 #include <string.h>
 
 // glog removed
-#include "../jsi/jsilib.h"
+#include <jsi/jsilib.h>
 #include "HostProxy.h"
 #include "JSIValueConverter.h"
 #include "QuickJSPointerValue.h"

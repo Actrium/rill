@@ -101,9 +101,8 @@ rill/
 │   ├── quickjs/        # QuickJS sandbox (cross-platform)
 │   └── platform/       # React Native integration
 ├── tests/
-│   ├── e2e-sandbox-web/   # Web Worker E2E tests
-│   ├── e2e-wasm-sandbox/  # WASM sandbox E2E tests
-│   └── rn-macos-e2e/      # React Native macOS E2E tests
+│   ├── wasm-sandbox/           # WASM sandbox E2E tests
+│   └── rn-macos-bridgeless/    # React Native macOS E2E tests (Bridgeless)
 └── docs/               # Documentation
 ```
 

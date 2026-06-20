@@ -35,7 +35,7 @@ describe('E2E Callback Returns: Primitives', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -59,7 +59,7 @@ describe('E2E Callback Returns: Primitives', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -83,7 +83,7 @@ describe('E2E Callback Returns: Primitives', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -107,7 +107,7 @@ describe('E2E Callback Returns: Primitives', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -131,7 +131,7 @@ describe('E2E Callback Returns: Primitives', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -170,7 +170,7 @@ describe('E2E Callback Returns: Objects', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -197,7 +197,7 @@ describe('E2E Callback Returns: Objects', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -231,7 +231,7 @@ describe('E2E Callback Returns: Objects', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -267,7 +267,7 @@ describe('E2E Callback Returns: Complex Types', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -276,7 +276,8 @@ describe('E2E Callback Returns: Complex Types', () => {
     const button = findNodeByTestId(ctx.receiver, 'button');
     const result = await button?.props.onPress();
 
-    expect(result).toBeInstanceOf(Date);
+    // Cross-VM boundary: instanceof may fail, verify behavior instead
+    expect(typeof (result as Date).toISOString).toBe('function');
     expect((result as Date).toISOString()).toBe('2024-06-15T10:30:00.000Z');
   });
 
@@ -292,7 +293,7 @@ describe('E2E Callback Returns: Complex Types', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -301,7 +302,8 @@ describe('E2E Callback Returns: Complex Types', () => {
     const button = findNodeByTestId(ctx.receiver, 'button');
     const result = await button?.props.onPress();
 
-    expect(result).toBeInstanceOf(Map);
+    // Cross-VM boundary: instanceof may fail, verify behavior instead
+    expect(typeof (result as Map<string, number>).get).toBe('function');
     expect((result as Map<string, number>).get('a')).toBe(1);
     expect((result as Map<string, number>).get('b')).toBe(2);
   });
@@ -318,7 +320,7 @@ describe('E2E Callback Returns: Complex Types', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -327,7 +329,8 @@ describe('E2E Callback Returns: Complex Types', () => {
     const button = findNodeByTestId(ctx.receiver, 'button');
     const result = await button?.props.onPress();
 
-    expect(result).toBeInstanceOf(Set);
+    // Cross-VM boundary: instanceof may fail, verify behavior instead
+    expect(typeof (result as Set<string>).has).toBe('function');
     expect((result as Set<string>).has('x')).toBe(true);
     expect((result as Set<string>).has('y')).toBe(true);
     expect((result as Set<string>).has('z')).toBe(true);
@@ -345,7 +348,7 @@ describe('E2E Callback Returns: Complex Types', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -354,7 +357,8 @@ describe('E2E Callback Returns: Complex Types', () => {
     const button = findNodeByTestId(ctx.receiver, 'button');
     const result = await button?.props.onPress();
 
-    expect(result).toBeInstanceOf(RegExp);
+    // Cross-VM boundary: instanceof may fail, verify behavior instead
+    expect(typeof (result as RegExp).test).toBe('function');
     expect((result as RegExp).test('Test123')).toBe(true);
     expect((result as RegExp).test('invalid')).toBe(false);
   });
@@ -386,7 +390,7 @@ describe('E2E Callback Returns: Async', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -420,7 +424,7 @@ describe('E2E Callback Returns: Async', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -486,7 +490,7 @@ describe('E2E Callback Returns: Form Validation Pattern', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -541,7 +545,7 @@ describe('E2E Callback Returns: Form Validation Pattern', () => {
         });
       }
 
-      render(React.createElement(App), globalThis.__sendToHost);
+      render(React.createElement(App), globalThis.__rill_sendBatch);
     `;
 
     await ctx.engine.loadBundle(guestCode);
@@ -557,7 +561,8 @@ describe('E2E Callback Returns: Form Validation Pattern', () => {
     expect(result?.items[0].displayName).toBe('John Doe');
     expect(result?.items[0].initials).toBe('JD');
     expect(result?.items[1].displayName).toBe('Jane Smith');
-    expect(result?.summary).toBeInstanceOf(Map);
+    // Cross-VM boundary: instanceof may fail, verify behavior instead
+    expect(typeof result?.summary.get).toBe('function');
     expect(result?.summary.get(1)).toBe('John Doe');
     expect(result?.summary.get(2)).toBe('Jane Smith');
   });

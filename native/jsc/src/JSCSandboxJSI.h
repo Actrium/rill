@@ -5,6 +5,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace jsc_sandbox {
 
@@ -15,8 +16,8 @@ using namespace facebook;
  *
  * Exposed to JS as a HostObject with SYNCHRONOUS methods:
  * - eval(code: string): unknown
- * - setGlobal(name: string, value: unknown): void
- * - getGlobal(name: string): unknown
+ * - inject(name: string, value: unknown): void
+ * - extract(name: string): unknown
  * - dispose(): void
  */
 class JSCSandboxContext : public jsi::HostObject {
@@ -30,9 +31,9 @@ public:
   std::vector<jsi::PropNameID> getPropertyNames(jsi::Runtime &rt) override;
 
   jsi::Value eval(jsi::Runtime &rt, const std::string &code);
-  void setGlobal(jsi::Runtime &rt, const std::string &name,
+  void inject(jsi::Runtime &rt, const std::string &name,
                  const jsi::Value &value);
-  jsi::Value getGlobal(jsi::Runtime &rt, const std::string &name);
+  jsi::Value extract(jsi::Runtime &rt, const std::string &name);
   void dispose();
 
   bool isDisposed() const { return disposed_; }
@@ -45,10 +46,24 @@ private:
 
   // Callback storage for functions passed from host
   std::unordered_map<std::string, std::shared_ptr<jsi::Function>> callbacks_;
-  int callbackCounter_;
+  
+  // Cache for Host Function -> Proxy ID
+  // Key: Unique identifier for the host function object (if available)
+  // Since we can't easily get a stable ID from jsi::Function, we will use
+  // a WeakMap-like approach on the JS side or simply try to cache by
+  // hashing the function object if possible.
+  //
+  // BUT: In JSI, we can attach properties to HostObjects (if it is one),
+  // but standard JS functions are opaque.
+  //
+  // Alternative: We can attach a hidden property to the host function
+  // Reserved: callback counter was used for proxy ID assignment.
+  // Kept as comment for reference; remove once proxy approach is finalized.
 
   void *jsiToJSValue(jsi::Runtime &rt, const jsi::Value &value);
   jsi::Value jsValueToJSI(jsi::Runtime &rt, void *jsValue);
+  jsi::Value jsValueToJSI(jsi::Runtime &rt, void *jsValue, int depth,
+                          std::unordered_set<const void *> *visited = nullptr);
   void *wrapFunctionForSandbox(jsi::Runtime &rt, jsi::Function &&func);
 };
 

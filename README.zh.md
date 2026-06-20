@@ -7,7 +7,7 @@
 ## 特性
 
 - **React 开发体验**：使用 JSX 和 Hooks 编写 Guest
-- **完整沙箱隔离**：可插拔的 JSEngineProvider（QuickJS、VM、Worker），Guest 崩溃不影响 Host
+- **完整沙箱隔离**：多种沙箱后端（VM/JSC/Hermes/QuickJS/WASM）自动选择；Guest 崩溃不影响 Host
 - **轻量高效**：无 WebView 开销，原生渲染性能
 - **统一桥接层**：类型安全的序列化，自动回调生命周期管理
 - **灵活扩展**：支持注册自定义业务组件
@@ -16,16 +16,15 @@
 
 ```
 rill/
-├── (default)        # Host 运行时 (Engine, EngineView, Receiver)
-├── /sdk             # Guest SDK (组件、Hooks)
+├── /host            # Host 运行时（Engine, useEngineView）
+├── /host/preset     # Host UI 工具（EngineView, DefaultComponents）
+├── /guest           # Guest SDK（组件、Hooks、平台 API）
 ├── /devtools        # 开发工具
-├── /sandbox         # 沙箱提供者 (自动检测)
-├── /sandbox/native  # 原生沙箱 (JSC/QuickJS)
-├── /sandbox/web     # Web 沙箱 (Worker)
 └── /cli             # CLI 构建工具
 ```
 
-> 注意：`rill/let` 是 `rill/sdk` 的已弃用别名。
+> `import ... from 'rill'` 被刻意禁用，请使用以上明确入口。
+
 
 ## 快速开始
 
@@ -48,7 +47,8 @@ npm install rill
 
 ```tsx
 import React, { useMemo, useEffect } from 'react';
-import { Engine, EngineView } from 'rill';
+import { Engine } from 'rill/host';
+import { EngineView } from 'rill/host/preset';
 import { NativeStepList } from './components/NativeStepList';
 
 function App() {
@@ -79,10 +79,12 @@ function App() {
 }
 ```
 
+> React Native 原生 JSI 沙箱集成（JSC/Hermes/QuickJS）见：`docs/guides/native-integration.zh.md`。
+
 ### Guest 开发
 
 ```tsx
-import { View, Text, TouchableOpacity, useHostEvent, useConfig } from 'rill/sdk';
+import { View, Text, TouchableOpacity, useHostEvent, useConfig } from 'rill/guest';
 
 export default function MyGuest() {
   const config = useConfig<{ theme: string }>();
@@ -107,13 +109,13 @@ export default function MyGuest() {
 
 ```bash
 # 构建 bundle
-bun run rill/cli build src/guest.tsx -o dist/bundle.js
+bunx rill build src/guest.tsx -o dist/bundle.js
 
 # 开发模式
-bun run rill/cli build src/guest.tsx --watch --no-minify --sourcemap
+bunx rill build src/guest.tsx --watch --no-minify --sourcemap
 
 # 分析 bundle
-bun run rill/cli analyze dist/bundle.js
+bunx rill analyze dist/bundle.js
 ```
 
 ## 架构
@@ -122,7 +124,7 @@ bun run rill/cli analyze dist/bundle.js
 ┌─────────────────────────────────────────────────────────────────┐
 │                       Host App (React Native)                    │
 ├─────────────────────────────────────────────────────────────────┤
-│  EngineView → Engine → Sandbox Provider                         │
+│  EngineView → Engine → 沙箱后端                                  │
 │                            │                                     │
 │                            ▼                                     │
 │                    ┌───────────────────┐                        │
@@ -145,17 +147,18 @@ bun run rill/cli analyze dist/bundle.js
 
 | 模块 | 导入路径 | 描述 |
 |------|----------|------|
-| Runtime | `rill` | Host 运行时：Engine、EngineView、Receiver |
-| Guest SDK | `rill/sdk` | Guest 开发套件：组件、Hooks |
+| Host | `rill/host` | Host 运行时：Engine、useEngineView |
+| Host Preset | `rill/host/preset` | Host UI 工具：EngineView、DefaultComponents |
+| Guest | `rill/guest` | Guest 模块：组件、Hooks |
 | DevTools | `rill/devtools` | 调试工具：操作日志、树形检查 |
-| CLI | `rill/cli` | Guest 打包器（基于 Bun） |
+| CLI | `rill` (bin) / `rill/cli` | Guest 打包器（基于 Bun） |
 
 ## API
 
 ### Engine
 
 ```typescript
-import { Engine } from 'rill';
+import { Engine } from 'rill/host';
 
 const engine = new Engine({
   timeout: 5000,        // 执行超时（毫秒）
@@ -184,7 +187,7 @@ engine.destroy();
 ### SDK Hooks
 
 ```typescript
-import { useHostEvent, useConfig, useSendToHost, useRemoteRef, TextInputRef } from 'rill/sdk';
+import { useHostEvent, useConfig, useSendToHost, useRemoteRef, TextInputRef } from 'rill/guest';
 
 // 订阅 Host 事件
 useHostEvent('EVENT_NAME', (payload) => { /* 处理 */ });
@@ -220,7 +223,7 @@ Guest 使用 SDK hook `useHostEvent(event, callback)` 订阅，Host 通过 `engi
 
 **Guest 示例：**
 ```tsx
-import { View, Text, useHostEvent, useSendToHost } from 'rill/sdk';
+import { View, Text, useHostEvent, useSendToHost } from 'rill/guest';
 
 export default function Guest() {
   const send = useSendToHost();
@@ -235,7 +238,7 @@ export default function Guest() {
 
 **Host 示例：**
 ```tsx
-import { Engine } from 'rill';
+import { Engine } from 'rill/host';
 
 const engine = new Engine();
 engine.on('message', (m) => console.log(m.event, m.payload));

@@ -139,7 +139,7 @@ EXPORT int qjs_eval_void(const char *code) {
 /**
  * Set a global variable from JSON string
  */
-EXPORT int qjs_set_global_json(const char *name, const char *json_value) {
+EXPORT int qjs_inject_json(const char *name, const char *json_value) {
     if (!g_context) return -1;
 
     JSValue global = JS_GetGlobalObject(g_context);
@@ -159,7 +159,7 @@ EXPORT int qjs_set_global_json(const char *name, const char *json_value) {
  * Get a global variable as JSON string
  * Caller must free the returned string
  */
-EXPORT char *qjs_get_global_json(const char *name) {
+EXPORT char *qjs_extract_json(const char *name) {
     if (!g_context) return strdup("null");
 
     JSValue global = JS_GetGlobalObject(g_context);
@@ -438,7 +438,7 @@ EXPORT int qjs_execute_pending_jobs(void) {
 // ============================================
 
 /**
- * Free a string allocated by qjs_eval, qjs_get_global_json, etc.
+ * Free a string allocated by qjs_eval, qjs_extract_json, etc.
  */
 EXPORT void qjs_free_string(char *str) {
     if (str) free(str);

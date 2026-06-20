@@ -3,8 +3,7 @@
  * Manages event listeners with memory leak detection
  */
 
-import type { EngineEvents } from '../IEngine';
-import type { EventListener } from './types';
+import type { EngineEvents, EventListener } from './types';
 
 export class EventManager {
   private listeners: Map<keyof EngineEvents, Set<EventListener<unknown>>> = new Map();

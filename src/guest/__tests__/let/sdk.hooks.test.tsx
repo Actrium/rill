@@ -10,7 +10,7 @@ describe('SDK Hooks', () => {
   let React: typeof import('react');
   let TestRenderer: typeof import('react-test-renderer');
   let act: typeof import('react-test-renderer').act;
-  let sdk: typeof import('../../let/sdk');
+  let sdk: typeof import('../../../sdk/sdk');
 
   beforeAll(async () => {
     React = await import('react');
@@ -21,7 +21,7 @@ describe('SDK Hooks', () => {
     // Set React on globalThis for SDK (especially RillErrorBoundary)
     (globalThis as Record<string, unknown>).React = React;
 
-    sdk = await import('../../let/sdk');
+    sdk = await import('../../../sdk/sdk');
   });
 
   describe('useHostEvent()', () => {
@@ -31,7 +31,7 @@ describe('SDK Hooks', () => {
       cleanup = [];
       // Setup mock global
       const listeners = new Map<string, Set<(payload: unknown) => void>>();
-      (globalThis as Record<string, unknown>).__useHostEvent = (
+      (globalThis as Record<string, unknown>).__rill_onHostEvent = (
         eventName: string,
         callback: (payload: unknown) => void
       ) => {
@@ -58,7 +58,7 @@ describe('SDK Hooks', () => {
 
     afterEach(() => {
       cleanup.forEach((fn) => fn());
-      delete (globalThis as Record<string, unknown>).__useHostEvent;
+      delete (globalThis as Record<string, unknown>).__rill_onHostEvent;
       delete (globalThis as Record<string, unknown>).__triggerHostEvent;
     });
 
@@ -178,8 +178,8 @@ describe('SDK Hooks', () => {
       });
     });
 
-    test('should handle missing __useHostEvent gracefully', () => {
-      delete (globalThis as Record<string, unknown>).__useHostEvent;
+    test('should handle missing __rill_onHostEvent gracefully', () => {
+      delete (globalThis as Record<string, unknown>).__rill_onHostEvent;
 
       const TestComponent = () => {
         sdk.useHostEvent('MISSING', () => {});
@@ -201,11 +201,11 @@ describe('SDK Hooks', () => {
 
   describe('useConfig()', () => {
     afterEach(() => {
-      delete (globalThis as Record<string, unknown>).__getConfig;
+      delete (globalThis as Record<string, unknown>).__rill_getConfig;
     });
 
     test('should return config from global', () => {
-      (globalThis as Record<string, unknown>).__getConfig = () => ({
+      (globalThis as Record<string, unknown>).__rill_getConfig = () => ({
         theme: 'dark',
         apiUrl: 'https://api.example.com',
       });
@@ -230,7 +230,7 @@ describe('SDK Hooks', () => {
       });
     });
 
-    test('should return empty object when __getConfig is missing', () => {
+    test('should return empty object when __rill_getConfig is missing', () => {
       const TestComponent = () => {
         const config = sdk.useConfig();
         return React.createElement('div', null, Object.keys(config).length.toString());
@@ -252,13 +252,13 @@ describe('SDK Hooks', () => {
 
   describe('useSendToHost()', () => {
     afterEach(() => {
-      delete (globalThis as Record<string, unknown>).__sendEventToHost;
+      delete (globalThis as Record<string, unknown>).__rill_emitEvent;
     });
 
     test('should return send function', () => {
       const sentEvents: Array<{ name: string; payload: unknown }> = [];
 
-      (globalThis as Record<string, unknown>).__sendEventToHost = (
+      (globalThis as Record<string, unknown>).__rill_emitEvent = (
         eventName: string,
         payload?: unknown
       ) => {
@@ -286,7 +286,7 @@ describe('SDK Hooks', () => {
       });
     });
 
-    test('should handle missing __sendEventToHost gracefully', () => {
+    test('should handle missing __rill_emitEvent gracefully', () => {
       const consoleLogs: string[] = [];
       const originalWarn = console.warn;
       console.warn = (...args: unknown[]) => consoleLogs.push(args.join(' '));
@@ -324,11 +324,11 @@ describe('SDK Hooks', () => {
       sentOps = [];
       eventListeners = new Map();
 
-      (globalThis as Record<string, unknown>).__sendOperation = (op: unknown) => {
+      (globalThis as Record<string, unknown>).__rill_sendOperation = (op: unknown) => {
         sentOps.push(op);
       };
 
-      (globalThis as Record<string, unknown>).__useHostEvent = (
+      (globalThis as Record<string, unknown>).__rill_onHostEvent = (
         eventName: string,
         callback: (payload: unknown) => void
       ) => {
@@ -341,8 +341,8 @@ describe('SDK Hooks', () => {
     });
 
     afterEach(() => {
-      delete (globalThis as Record<string, unknown>).__sendOperation;
-      delete (globalThis as Record<string, unknown>).__useHostEvent;
+      delete (globalThis as Record<string, unknown>).__rill_sendOperation;
+      delete (globalThis as Record<string, unknown>).__rill_onHostEvent;
     });
 
     test('should return refCallback and null initially', () => {
@@ -509,11 +509,11 @@ describe('SDK Hooks', () => {
       sentOps = [];
       eventListeners = new Map();
 
-      (globalThis as Record<string, unknown>).__sendOperation = (op: unknown) => {
+      (globalThis as Record<string, unknown>).__rill_sendOperation = (op: unknown) => {
         sentOps.push(op);
       };
 
-      (globalThis as Record<string, unknown>).__useHostEvent = (
+      (globalThis as Record<string, unknown>).__rill_onHostEvent = (
         eventName: string,
         callback: (payload: unknown) => void
       ) => {
@@ -526,8 +526,8 @@ describe('SDK Hooks', () => {
     });
 
     afterEach(() => {
-      delete (globalThis as Record<string, unknown>).__sendOperation;
-      delete (globalThis as Record<string, unknown>).__useHostEvent;
+      delete (globalThis as Record<string, unknown>).__rill_sendOperation;
+      delete (globalThis as Record<string, unknown>).__rill_onHostEvent;
     });
 
     test('should handle REF_METHOD_RESULT success', async () => {
@@ -673,8 +673,8 @@ describe('SDK Hooks', () => {
       });
     });
 
-    test('should handle missing __sendOperation', async () => {
-      delete (globalThis as Record<string, unknown>).__sendOperation;
+    test('should handle missing __rill_sendOperation', async () => {
+      delete (globalThis as Record<string, unknown>).__rill_sendOperation;
 
       let caughtError: Error | null = null;
 
@@ -702,15 +702,15 @@ describe('SDK Hooks', () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
 
       expect(caughtError).not.toBe(null);
-      expect(caughtError?.message).toContain('__sendOperation not available');
+      expect(caughtError?.message).toContain('__rill_sendOperation not available');
 
       act(() => {
         renderer.unmount();
       });
     });
 
-    test('should handle missing __useHostEvent', () => {
-      delete (globalThis as Record<string, unknown>).__useHostEvent;
+    test('should handle missing __rill_onHostEvent', () => {
+      delete (globalThis as Record<string, unknown>).__rill_onHostEvent;
 
       const TestComponent = () => {
         const [refCallback, remoteRef] = sdk.useRemoteRef();

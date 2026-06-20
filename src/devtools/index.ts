@@ -5,12 +5,12 @@
  *
  * Guest-side data is automatically collected by:
  * - DEVTOOLS_SHIM (console/error interception, injected by Engine)
- * - Reconciler (render timing, integrated in @rill/let)
+ * - Reconciler (render timing, injected by guest runtime)
  *
  * Usage:
  *
  * ```typescript
- * import { createDevTools } from '@rill/devtools';
+ * import { createDevTools } from 'rill/devtools';
  *
  * const devtools = createDevTools();
  * devtools.enable();

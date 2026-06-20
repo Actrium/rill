@@ -32,8 +32,8 @@ const APPROVED_PATTERNS = [
   /on\?.*handler:.*args:\s*unknown\[\]/, // Event handler signatures
   /\.on\(.*args:\s*unknown\[\]/, // Event listener registrations
   /eval:.*code:\s*string.*:\s*unknown/, // Sandbox eval method
-  /setGlobal:.*value:\s*unknown/, // Sandbox setGlobal method
-  /getGlobal:.*:\s*unknown/, // Sandbox getGlobal method
+  /inject:.*value:\s*unknown/, // Sandbox inject method
+  /extract:.*:\s*unknown/, // Sandbox extract method
   /toJSON.*value:\s*unknown/, // JSON serialization helpers
   /\.\.\.args:\s*unknown\[\]/, // Rest parameters in functions
   /sendDevToolsMessage.*data:\s*unknown/, // DevTools message data
@@ -52,7 +52,7 @@ const APPROVED_FILES = [
   'src/let/types.ts',
   'src/runtime/bridge/types.ts',
   'src/devtools/types.ts', // DevTools type definitions
-  'src/sandbox/types/provider.ts', // Sandbox provider interface types
+  'src/host/sandbox/types/provider.ts', // Sandbox provider interface types
   'src/sandbox-native/JSCModule.ts', // Native JSC interface
   'src/sandbox-native/QuickJSModule.ts', // Native QuickJS interface
   'src/sandbox-native/index.ts', // Sandbox native exports

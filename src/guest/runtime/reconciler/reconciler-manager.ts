@@ -9,8 +9,8 @@
 // biome-ignore lint/suspicious/noExplicitAny: Internal type alias for flexibility
 type ReactElement = any;
 
-import { type CallbackRegistry, CallbackRegistryImpl, type SendToHost } from '../../../shared';
-import type { GuestElement } from '../../let/types';
+import type { GuestElement } from '../../../sdk/types';
+import { type CallbackRegistry, globalCallbackRegistry, type SendToHost } from '../../../shared';
 import { transformGuestElement } from './element-transform';
 import { createReconciler } from './host-config';
 import type { RillReconciler, RootContainer } from './types';
@@ -36,7 +36,7 @@ interface ReconcilerInstance {
  *
  * Stored on globalThis for idempotent initialization:
  * - Engine may inject GUEST_BUNDLE_CODE first
- * - Then bundle.js (containing guest-bundle) executes
+ * - Then user guest bundle executes
  * - Both should share the same reconcilerMap instance
  */
 const globals = globalThis as Record<string, unknown>;
@@ -44,25 +44,9 @@ const reconcilerMap: Map<SendToHost, ReconcilerInstance> =
   (globals.__rillReconcilerMap as Map<SendToHost, ReconcilerInstance>) ??
   (globals.__rillReconcilerMap = new Map<SendToHost, ReconcilerInstance>());
 
-/**
- * Global callback registry for Guest environment (sandbox internal use)
- *
- * Architecture notes:
- * - In Host: Each Engine instance owns its own CallbackRegistry (single ownership)
- * - In Guest: This globalCallbackRegistry is used for sandbox-internal operations
- *
- * The Host-side Engine.callbackRegistry is injected into Bridge and handles
- * callbacks for props passed across the JSI boundary. This globalCallbackRegistry is for:
- * - Guest function component transformations (serializePropsForGuest)
- * - Legacy compatibility within sandbox context
- *
- * For new code, prefer using Engine's callbackRegistry via Bridge.
- *
- * Stored on globalThis for idempotent initialization.
- */
-export const globalCallbackRegistry: CallbackRegistry =
-  (globals.__rillGlobalCallbackRegistry as CallbackRegistry) ??
-  (globals.__rillGlobalCallbackRegistry = new CallbackRegistryImpl());
+// Export globalCallbackRegistry from shared for public API
+// (re-export the singleton from shared module)
+export { globalCallbackRegistry } from '../../../shared';
 
 // ============================================
 // Public API
@@ -123,14 +107,27 @@ export function render(element: ReactElement, sendToHost: SendToHost): void {
       null, // concurrentUpdatesByDefaultOverride
       'rill', // identifierPrefix
       // biome-ignore lint/suspicious/noExplicitAny: Error could be non-standard
-      (error: any) =>
-        console.error('[rill] onUncaughtError:', error?.message ?? error, error?.stack ?? ''), // onUncaughtError
+      (error: any) => {
+        // String-only console to avoid JSI circular ref traversal
+        const msg = error instanceof Error ? error.message : String(error);
+        const stack = error instanceof Error ? (error.stack ?? '') : '';
+        console.error(`[rill] onUncaughtError: ${msg}`);
+        if (stack) console.error(`[rill] stack: ${stack}`);
+      }, // onUncaughtError
       // biome-ignore lint/suspicious/noExplicitAny: Error could be non-standard
-      (error: any) =>
-        console.error('[rill] onCaughtError:', error?.message ?? error, error?.stack ?? ''), // onCaughtError
+      (error: any) => {
+        const msg = error instanceof Error ? error.message : String(error);
+        const stack = error instanceof Error ? (error.stack ?? '') : '';
+        console.error(`[rill] onCaughtError: ${msg}`);
+        if (stack) console.error(`[rill] stack: ${stack}`);
+      }, // onCaughtError
       // biome-ignore lint/suspicious/noExplicitAny: Error could be non-standard
-      (error: any) =>
-        console.error('[rill] onRecoverableError:', error?.message ?? error, error?.stack ?? ''), // onRecoverableError
+      (error: any) => {
+        const msg = error instanceof Error ? error.message : String(error);
+        const stack = error instanceof Error ? (error.stack ?? '') : '';
+        console.error(`[rill] onRecoverableError: ${msg}`);
+        if (stack) console.error(`[rill] stack: ${stack}`);
+      }, // onRecoverableError
       () => {}, // onDefaultTransitionIndicator
       null // transitionCallbacks
     );
@@ -189,7 +186,7 @@ export function getCallbackRegistry(sendToHost?: SendToHost): CallbackRegistry |
  *
  * Note: In RN / VM runtimes, Guest-side functions are seen by Host-side reconciler
  * as callable handles and registered in CallbackRegistry.
- * No need to rely on Guest runtime injected globalThis.__callbacks / __invokeCallback.
+ * No need to rely on Guest runtime injected globalThis.__rill.callbacks / __rill.invokeCallback.
  */
 export function hasCallback(fnId: string): boolean {
   return globalCallbackRegistry.getMap().has(fnId);

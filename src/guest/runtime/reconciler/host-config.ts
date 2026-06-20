@@ -8,8 +8,20 @@
 import React from 'react';
 import Reconciler from 'react-reconciler';
 import { DefaultEventPriority } from 'react-reconciler/constants';
-import type { CallbackRegistry, SendToHost } from '../../../shared';
-import type { SerializedCreateOperation, SerializedUpdateOperation, VNode } from '../../let/types';
+import type { SandboxGlobals } from '../../../host/sandbox/globals';
+import type {
+  SerializedCreateOperation,
+  SerializedUpdateOperation,
+  VNode,
+} from '../../../sdk/types';
+import type {
+  CallbackRegistry,
+  ReviewedUnknown,
+  SendToHost,
+  SerializedFunction,
+  SerializedValue,
+} from '../../../shared';
+import { isSerializedFunction } from '../../../shared';
 import { isDevToolsEnabled, type RenderTiming, sendDevToolsMessage } from './devtools';
 import { serializeProps } from './guest-encoder';
 import { OperationCollector } from './operation-collector';
@@ -86,9 +98,11 @@ export function createReconciler(
   let renderTimings: RenderTiming[] = [];
   let commitStartTime = 0;
 
-  // Sync callbackRegistry with globalThis.__callbacks
-  // This allows Engine.handleCallFunction() to find callbacks via __invokeCallback()
-  globalThis.__callbacks = callbackRegistry.getMap();
+  // Sync callbackRegistry with globalThis.__rill.callbacks
+  // This allows Engine.handleCallFunction() to find callbacks via __rill.invokeCallback()
+  const _g = globalThis as unknown as SandboxGlobals;
+  _g.__rill = _g.__rill || {};
+  _g.__rill.callbacks = callbackRegistry.getMap();
 
   const hostConfig: ExtendedHostConfig = {
     // ============ Core Methods ============
@@ -97,16 +111,15 @@ export function createReconciler(
       const startTime = isDevToolsEnabled() ? performance.now() : 0;
       const id = ++nodeIdCounter;
 
-      // Filter out children and internal React props
-      // Children are handled separately via appendChild/appendInitialChild
-      // 使用 Object.entries 过滤而非解构，避免触发 React 19 的 defineKeyPropWarningGetter
-      // （解构会访问 props.key/props.ref，触发 React 开发模式的警告 getter）
-      const filteredProps: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(props)) {
-        if (k !== 'children' && k !== 'key' && k !== 'ref') {
-          filteredProps[k] = v;
-        }
-      }
+      // Filter out children (handled separately via appendChild/appendInitialChild).
+      // Avoid destructuring key/ref — React dev mode defines warning getters on
+      // element.props for these special props, and reading them emits console.error.
+      const { children, ...filteredProps } = props as {
+        children?: ReviewedUnknown;
+        [key: string]: ReviewedUnknown;
+      };
+      delete filteredProps.key;
+      delete filteredProps.ref;
 
       // Serialize props using TypeRules
       // Functions are converted to { __type: 'function', __fnId }
@@ -166,21 +179,18 @@ export function createReconciler(
     },
 
     appendChild(parent: VNode, child: VNode): void {
-      globalThis.__APPEND_CHILD_CALLED = Date.now();
       parent.children.push(child);
       child.parent = parent;
       collector.add({ op: 'APPEND', id: child.id, parentId: parent.id, childId: child.id });
     },
 
     appendInitialChild(parent: VNode, child: VNode): void {
-      globalThis.__APPEND_INITIAL_CALLED = Date.now();
       parent.children.push(child);
       child.parent = parent;
       collector.add({ op: 'APPEND', id: child.id, parentId: parent.id, childId: child.id });
     },
 
     appendChildToContainer(container: RootContainer, child: VNode): void {
-      globalThis.__APPEND_TO_CONTAINER_CALLED = Date.now();
       container.children.push(child);
       // parentId=0 signals root container on the host side
       collector.add({ op: 'APPEND', id: child.id, parentId: 0, childId: child.id });
@@ -257,14 +267,14 @@ export function createReconciler(
         ? (prevPropsOrNextProps as Record<string, unknown>)
         : (nextPropsOrInternalHandle as Record<string, unknown>);
 
-      // Filter out children and internal React props
-      // 使用 Object.entries 过滤而非解构，避免触发 React 19 的 defineKeyPropWarningGetter
-      const filteredProps: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(newProps as Record<string, unknown>)) {
-        if (k !== 'children' && k !== 'key' && k !== 'ref') {
-          filteredProps[k] = v;
-        }
-      }
+      // Filter out children.
+      // Avoid destructuring key/ref — React dev mode warning getters (see createInstance).
+      const { children, ...filteredProps } = newProps as {
+        children?: ReviewedUnknown;
+        [key: string]: ReviewedUnknown;
+      };
+      delete filteredProps.key;
+      delete filteredProps.ref;
 
       // Serialize props using TypeRules
       // Functions are converted to { __type: 'function', __fnId }
@@ -505,17 +515,11 @@ function collectDeleteOperations(node: VNode, collector: OperationCollector): vo
  */
 function cleanupNodeCallbacks(node: VNode, registry: CallbackRegistry): void {
   // Release function references for this node
+  // Uses centralized isSerializedFunction type guard from TypeRules
   if (node.props) {
     for (const value of Object.values(node.props)) {
-      if (
-        typeof value === 'object' &&
-        value !== null &&
-        '__fnId' in value &&
-        // biome-ignore lint/suspicious/noExplicitAny: Type guard for checking function ID property
-        typeof (value as any).__fnId === 'string'
-      ) {
-        // biome-ignore lint/suspicious/noExplicitAny: Extracting function ID from callback object
-        const fnId = (value as any).__fnId;
+      if (isSerializedFunction(value as SerializedValue)) {
+        const fnId = (value as SerializedFunction).__fnId;
         if (registry.has(fnId)) {
           registry.release(fnId);
         }

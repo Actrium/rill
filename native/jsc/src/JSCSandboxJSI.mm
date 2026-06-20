@@ -1,14 +1,32 @@
 #import "JSCSandboxJSI.h"
 #import <Foundation/Foundation.h>
 #import <JavaScriptCore/JavaScriptCore.h>
+#import <os/log.h>
 
 namespace jsc_sandbox {
+
+// Safe extraction of error message from a JSValue without triggering
+// toString recursion. [JSValue toString] executes JS code which can throw,
+// re-entering the exception handler and causing stack overflow (SIGBUS).
+static NSString *safeExceptionMessage(JSValue *exception) {
+  if (!exception) return @"(null exception)";
+  if ([exception isString]) {
+    return [exception toString];
+  }
+  // For Error objects, .message is typically a plain string
+  JSValue *msg = exception[@"message"];
+  if (msg && [msg isString]) {
+    JSValue *name = exception[@"name"];
+    NSString *nameStr = (name && [name isString]) ? [name toString] : @"Error";
+    return [NSString stringWithFormat:@"%@: %@", nameStr, [msg toString]];
+  }
+  return @"(exception: cannot safely stringify)";
+}
 
 // MARK: - JSCSandboxContext Implementation
 
 JSCSandboxContext::JSCSandboxContext(jsi::Runtime &hostRuntime, double timeout)
-    : jsContext_(nullptr), hostRuntime_(&hostRuntime), disposed_(false),
-      callbackCounter_(0) {
+    : jsContext_(nullptr), hostRuntime_(&hostRuntime), disposed_(false) {
   (void)timeout; // Reserved for future use
   @autoreleasepool {
     JSContext *ctx = [[JSContext alloc] init];
@@ -16,54 +34,29 @@ JSCSandboxContext::JSCSandboxContext(jsi::Runtime &hostRuntime, double timeout)
       throw jsi::JSError(hostRuntime, "Failed to create JSContext");
     }
 
-    // Set up exception handler - must store exception for later checking
-    // NOTE: JSValue's default description can be empty for some thrown values.
-    // Log name/message/stack when available to make sandbox crashes debuggable.
+    // Set up exception handler - must store exception for later checking.
+    // CRITICAL: Use recursion guard to prevent infinite toString recursion.
+    // [JSValue toString] executes JS code which can throw, re-entering this
+    // handler and causing stack overflow (EXC_BAD_ACCESS / SIGBUS).
+    __block BOOL inExceptionHandler = NO;
     ctx.exceptionHandler = ^(JSContext *context, JSValue *exception) {
-      @autoreleasepool {
-        NSString *exceptionStr = nil;
-        @try {
-          exceptionStr = [exception toString];
-        } @catch (NSException *e) {
-          exceptionStr = [NSString stringWithFormat:@"(toString failed: %@)", e.reason];
-        }
-        if (!exceptionStr) {
-          exceptionStr = @"(null)";
-        }
-
-        NSString *name = nil;
-        NSString *message = nil;
-        NSString *stack = nil;
-        @try {
-          JSValue *nameVal = exception[@"name"];
-          if (nameVal && !nameVal.isUndefined) name = [nameVal toString];
-          JSValue *msgVal = exception[@"message"];
-          if (msgVal && !msgVal.isUndefined) message = [msgVal toString];
-          JSValue *stackVal = exception[@"stack"];
-          if (stackVal && !stackVal.isUndefined) stack = [stackVal toString];
-        } @catch (NSException *e) {
-          // ignore
-          (void)e;
-        }
-
-        if (name || message || stack) {
-          NSLog(@"[JSCSandbox] Exception: %@ | name=%@ | message=%@\n%@",
-                exceptionStr,
-                name ? name : @"(null)",
-                message ? message : @"(null)",
-                stack ? stack : @"");
-        } else {
-          NSLog(@"[JSCSandbox] Exception: %@", exceptionStr);
-        }
-
-        context.exception = exception; // Preserve for checking after eval
-      }
+      context.exception = exception; // Preserve for checking after eval
+      if (inExceptionHandler) return; // Break recursion cycle
+      inExceptionHandler = YES;
+      NSLog(@"[JSCSandbox] Exception: %@", safeExceptionMessage(exception));
+      inExceptionHandler = NO;
     };
 
     // Inject console shim
+    // message is always a string from JS-side .join(' '), safe to toString.
+    // Guard against non-string values to avoid toString recursion.
     JSValue *consoleLog = [JSValue
         valueWithObject:^(JSValue *message) {
-          NSLog(@"[JSCSandbox] %@", message);
+          if ([message isString]) {
+            NSLog(@"[JSCSandbox] %@", [message toString]);
+          } else {
+            NSLog(@"[JSCSandbox] [non-string value]");
+          }
         }
               inContext:ctx];
     ctx[@"__jsc_console_log"] = consoleLog;
@@ -126,7 +119,7 @@ jsi::Value JSCSandboxContext::get(jsi::Runtime &rt,
         });
   }
 
-  if (propName == "setGlobal") {
+  if (propName == "inject") {
     return jsi::Function::createFromHostFunction(
         rt, name,
         2, // argc
@@ -135,15 +128,15 @@ jsi::Value JSCSandboxContext::get(jsi::Runtime &rt,
           (void)thisVal;
           if (count < 2 || !args[0].isString()) {
             throw jsi::JSError(rt,
-                               "setGlobal requires (name: string, value: any)");
+                               "inject requires (name: string, value: any)");
           }
           std::string globalName = args[0].asString(rt).utf8(rt);
-          this->setGlobal(rt, globalName, args[1]);
+          this->inject(rt, globalName, args[1]);
           return jsi::Value::undefined();
         });
   }
 
-  if (propName == "getGlobal") {
+  if (propName == "extract") {
     return jsi::Function::createFromHostFunction(
         rt, name,
         1, // argc
@@ -151,10 +144,10 @@ jsi::Value JSCSandboxContext::get(jsi::Runtime &rt,
                const jsi::Value *args, size_t count) -> jsi::Value {
           (void)thisVal;
           if (count < 1 || !args[0].isString()) {
-            throw jsi::JSError(rt, "getGlobal requires a string argument");
+            throw jsi::JSError(rt, "extract requires a string argument");
           }
           std::string globalName = args[0].asString(rt).utf8(rt);
-          return this->getGlobal(rt, globalName);
+          return this->extract(rt, globalName);
         });
   }
 
@@ -191,8 +184,8 @@ std::vector<jsi::PropNameID>
 JSCSandboxContext::getPropertyNames(jsi::Runtime &rt) {
   std::vector<jsi::PropNameID> props;
   props.push_back(jsi::PropNameID::forUtf8(rt, "eval"));
-  props.push_back(jsi::PropNameID::forUtf8(rt, "setGlobal"));
-  props.push_back(jsi::PropNameID::forUtf8(rt, "getGlobal"));
+  props.push_back(jsi::PropNameID::forUtf8(rt, "inject"));
+  props.push_back(jsi::PropNameID::forUtf8(rt, "extract"));
   props.push_back(jsi::PropNameID::forUtf8(rt, "dispose"));
   props.push_back(jsi::PropNameID::forUtf8(rt, "isDisposed"));
   return props;
@@ -213,7 +206,7 @@ jsi::Value JSCSandboxContext::eval(jsi::Runtime &rt, const std::string &code) {
 
     // Check for exceptions
     if (ctx.exception) {
-      NSString *errorMsg = [ctx.exception toString];
+      NSString *errorMsg = safeExceptionMessage(ctx.exception);
       ctx.exception = nil;
       throw jsi::JSError(rt, [errorMsg UTF8String]);
     }
@@ -222,7 +215,7 @@ jsi::Value JSCSandboxContext::eval(jsi::Runtime &rt, const std::string &code) {
   }
 }
 
-void JSCSandboxContext::setGlobal(jsi::Runtime &rt, const std::string &name,
+void JSCSandboxContext::inject(jsi::Runtime &rt, const std::string &name,
                                   const jsi::Value &value) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 
@@ -237,81 +230,16 @@ void JSCSandboxContext::setGlobal(jsi::Runtime &rt, const std::string &name,
     // Handle functions specially - create a wrapper function in JS that calls
     // our block This ensures typeof returns "function" instead of "object"
     if (value.isObject() && value.asObject(rt).isFunction(rt)) {
-      // Store the function
-      std::string callbackId = "cb_" + std::to_string(++callbackCounter_);
-      auto func =
-          std::make_shared<jsi::Function>(value.asObject(rt).asFunction(rt));
-      callbacks_[callbackId] = func;
+      jsi::Function func = value.asObject(rt).asFunction(rt);
+      
+      // DEBUG: Log when registering a function global (especially __sendToHost)
+      NSLog(@"[JSCSandbox] inject: registering function '%s', rt=%p, hostRuntime_=%p, same=%d", 
+            name.c_str(), (void*)&rt, (void*)hostRuntime_, (&rt == hostRuntime_));
+      
+      void* jsValPtr = wrapFunctionForSandbox(rt, std::move(func));
+      JSValue* jsVal = (__bridge JSValue*)jsValPtr;
 
-      // Capture what we need for the block
-      jsi::Runtime *hostRt = hostRuntime_;
-      std::string cbId = callbackId;
-      auto *self = this;
-
-      // First, create a block-based function with internal name
-      NSString *internalName =
-          [NSString stringWithFormat:@"__jsc_cb_%s", cbId.c_str()];
-      JSValue *blockFn = [JSValue
-          valueWithObject:^id(void) {
-            NSArray *jsArgs = [JSContext currentArguments];
-
-            @autoreleasepool {
-              auto it = self->callbacks_.find(cbId);
-              if (it == self->callbacks_.end()) {
-                NSLog(@"[JSCSandbox] Callback not found: %s", cbId.c_str());
-                return nil;
-              }
-
-              try {
-                std::vector<jsi::Value> jsiArgs;
-                for (NSUInteger i = 0; i < jsArgs.count; i++) {
-                  JSValue *arg = jsArgs[i];
-                  jsiArgs.push_back(
-                      self->jsValueToJSI(*hostRt, (__bridge void *)arg));
-                }
-
-                jsi::Value result;
-                if (jsiArgs.empty()) {
-                  result = it->second->call(*hostRt);
-                } else {
-                  result = it->second->call(*hostRt,
-                                            (const jsi::Value *)jsiArgs.data(),
-                                            jsiArgs.size());
-                }
-
-                void *jsResult = self->jsiToJSValue(*hostRt, result);
-                return (__bridge id)jsResult;
-              } catch (const std::exception &e) {
-                NSLog(@"[JSCSandbox] Callback %s exception: %s", cbId.c_str(),
-                      e.what());
-                return nil;
-              }
-            }
-          }
-                inContext:ctx];
-
-      // Store the block function with internal name
-      ctx[internalName] = blockFn;
-
-      // Create a proper function wrapper using eval
-      // This ensures typeof returns "function"
-      NSString *wrapperScript =
-          [NSString stringWithFormat:@"(function() { return function(...args) "
-                                     @"{ return %@.apply(this, args); }; })()",
-                                     internalName];
-      JSValue *wrapperFn = [ctx evaluateScript:wrapperScript];
-
-      // Set the wrapper as the global with the requested name
-      ctx[nsName] = wrapperFn;
-
-      // Also set on globalThis - use internalName which is accessible as a
-      // global variable
-      NSString *globalThisScript = [NSString
-          stringWithFormat:
-              @"(function() { var fn = %@; globalThis['%@'] = function() { "
-              @"return fn.apply(this, arguments); }; })()",
-              internalName, nsName];
-      [ctx evaluateScript:globalThisScript];
+      ctx[nsName] = jsVal;
     } else {
       // Convert and set non-function values
       void *jsValue = jsiToJSValue(rt, value);
@@ -333,7 +261,7 @@ void JSCSandboxContext::setGlobal(jsi::Runtime &rt, const std::string &name,
   }
 }
 
-jsi::Value JSCSandboxContext::getGlobal(jsi::Runtime &rt,
+jsi::Value JSCSandboxContext::extract(jsi::Runtime &rt,
                                         const std::string &name) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 
@@ -350,36 +278,170 @@ jsi::Value JSCSandboxContext::getGlobal(jsi::Runtime &rt,
 }
 
 // Helper: wrap a jsi::Function into a JSValue function callable in the sandbox
-void *JSCSandboxContext::wrapFunctionForSandbox(jsi::Runtime & /*rt*/,
+void *JSCSandboxContext::wrapFunctionForSandbox(jsi::Runtime &rt,
                                                 jsi::Function &&func) {
   JSContext *ctx = (__bridge JSContext *)jsContext_;
+  jsi::Object funcObj = std::move(func); // Treat as object to access properties
 
-  // Generate unique internal name for this function
-  static int funcCounter = 0;
-  int funcId = ++funcCounter;
-  NSString *internalName = [NSString stringWithFormat:@"__jsc_fn_%d__", funcId];
+  // 1. Try to retrieve existing Proxy ID from the function object
+  std::string internalNameStr;
+  bool isCached = false;
+  
+  try {
+    if (funcObj.hasProperty(rt, "__rill_proxy_id__")) {
+      jsi::Value idVal = funcObj.getProperty(rt, "__rill_proxy_id__");
+      if (idVal.isString()) {
+        std::string id = idVal.asString(rt).utf8(rt);
+        internalNameStr = "__jsc_fn_" + id + "__";
+        
+        // Check if this ID actually exists in our native registry
+        // (It might be from a different runtime if we are unlucky, but strict isolation should prevent that.
+        //  However, to be safe, we rely on our map lookup).
+        if (callbacks_.find(internalNameStr) != callbacks_.end()) {
+             isCached = true;
+        }
+      }
+    }
+  } catch (...) {
+    // Ignore errors reading property (e.g. frozen)
+  }
 
-  // Store the function in callbacks_ with the internal name
-  std::string internalNameStr = [internalName UTF8String];
-  callbacks_[internalNameStr] =
-      std::make_shared<jsi::Function>(std::move(func));
+      if (isCached) {
+        // Retrieve existing wrapper
+        
+        // Let's extract ID from internalNameStr or just assume format.
+        // internalNameStr = "__jsc_fn_123__"
+        // replace "fn" with "wrap" -> "__jsc_wrap_123__"
+        
+        std::string wrapNameStr = internalNameStr;
+        size_t fnPos = wrapNameStr.find("_fn_");
+        if (fnPos != std::string::npos) {
+             wrapNameStr.replace(fnPos, 4, "_wrap_");
+        }
+        
+        NSString *wrapperName = [NSString stringWithUTF8String:wrapNameStr.c_str()];
+        JSValue *wrapperFn = ctx[wrapperName];
+        
+        // If wrapper is missing for some reason (e.g. somehow collected or not set?), fallback to recreate
+        if (wrapperFn && ![wrapperFn isUndefined]) {
+             return (__bridge void *)wrapperFn;
+        }
+        // Fallthrough to recreate if missing (shouldn't happen with our logic)
+      }
+      
+      // 3. Not cached: Generate new ID and store
+      static int funcCounter = 0;
+      int funcId = ++funcCounter;
+      std::string idStr = std::to_string(funcId);
+      NSString *internalName = [NSString stringWithFormat:@"__jsc_fn_%d__", funcId];
+      NSString *wrapperName = [NSString stringWithFormat:@"__jsc_wrap_%d__", funcId];
+      internalNameStr = [internalName UTF8String];
+      
+      // DEBUG: Log funcId assignment
+      NSLog(@"[JSCSandbox] wrapFunctionForSandbox: assigned funcId=%d", funcId);
 
-  // Get reference to host runtime
-  jsi::Runtime *hostRt = hostRuntime_;
-  auto self = this;
+      // Tag the original function with the ID
+      try {
+          funcObj.setProperty(rt, "__rill_proxy_id__", jsi::String::createFromUtf8(rt, idStr));
+      } catch (...) {
+          // Failed to tag, skip caching
+      }
+      
+      // Convert back to function for storage
+      jsi::Function funcToStore = funcObj.asFunction(rt);
+      
+      // CRITICAL FIX: Instead of storing the jsi::Function directly,
+      // create a HostFunction wrapper that captures the original function.
+      // This ensures the function is called properly within the Host Runtime context.
+      auto sharedFunc = std::make_shared<jsi::Function>(std::move(funcToStore));
+      jsi::Runtime* capturedRt = &rt; // Capture the original runtime pointer
+      
+      // Create a HostFunction that wraps the original JS function
+      jsi::Function hostFuncWrapper = jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forUtf8(rt, internalNameStr),
+          0, // We don't know the exact arg count, but it doesn't matter for HostFunction
+          [sharedFunc, funcId, capturedRt](jsi::Runtime& callRt, const jsi::Value& /*thisVal*/,
+                               const jsi::Value* args, size_t count) -> jsi::Value {
+              NSLog(@"[JSCSandbox] fn_%d HostFunction wrapper: callRt=%p, capturedRt=%p, same=%d", 
+                    funcId, (void*)&callRt, (void*)capturedRt, (&callRt == capturedRt));
+              try {
+                  // Use the CAPTURED runtime, not the callRt!
+                  jsi::Value result = sharedFunc->call(*capturedRt, args, count);
+                  NSLog(@"[JSCSandbox] fn_%d HostFunction wrapper: call succeeded", funcId);
+                  return result;
+              } catch (const std::exception& e) {
+                  NSLog(@"[JSCSandbox] fn_%d HostFunction wrapper: exception: %s", funcId, e.what());
+                  throw;
+              }
+          }
+      );
 
-  // Create native block that calls the stored function
-  JSValue *blockFn = [JSValue
-      valueWithObject:^id(void) {
-        NSArray *args = [JSContext currentArguments];
+      // Store the HostFunction wrapper in callbacks_
+      callbacks_[internalNameStr] =
+          std::make_shared<jsi::Function>(std::move(hostFuncWrapper));
 
-        @autoreleasepool {
-          std::lock_guard<std::recursive_mutex> lock(self->mutex_);
+      // Get reference to host runtime
+      jsi::Runtime *hostRt = hostRuntime_;
+      auto self = this;
 
-          auto it = self->callbacks_.find(internalNameStr);
-          if (it == self->callbacks_.end()) {
-            NSLog(@"[JSCSandbox] Wrapped fn_%d: function not found!", funcId);
-            return nil;
+      // Create native block that calls the stored function
+      JSValue *blockFn = [JSValue
+          valueWithObject:^id(void) {
+            NSArray *args = [JSContext currentArguments];
+
+            @autoreleasepool {
+              std::lock_guard<std::recursive_mutex> lock(self->mutex_);
+
+              auto it = self->callbacks_.find(internalNameStr);
+              if (it == self->callbacks_.end()) {
+                NSLog(@"[JSCSandbox] Wrapped fn_%d: function not found!", funcId);
+                return nil;
+              }
+
+          // DEBUG: Log incoming arguments for troubleshooting
+          if (args.count > 0) {
+            JSValue *firstArg = args[0];
+            if ([firstArg isObject]) {
+              // Check if this looks like an operation batch
+              JSValue *operations = firstArg[@"operations"];
+              if (operations && [operations isArray]) {
+                NSUInteger opCount = [[operations[@"length"] toNumber] unsignedIntegerValue];
+                NSLog(@"[JSCSandbox] fn_%d called with batch of %lu operations", funcId, (unsigned long)opCount);
+                
+                // Log each operation's props keys
+                for (NSUInteger i = 0; i < opCount && i < 5; i++) {
+                  JSValue *op = [operations valueAtIndex:i];
+                  JSValue *opType = op[@"type"];
+                  JSValue *props = op[@"props"];
+                  if (props && [props isObject]) {
+                    // Get keys of props using JSON.stringify for better visibility
+                    JSContext *ctx = (__bridge JSContext *)self->jsContext_;
+                    JSValue *stringifyFunc = [ctx evaluateScript:@"(function(o) { try { return JSON.stringify(o); } catch(e) { return '(error: ' + e.message + ')'; } })"];
+                    JSValue *jsonStr = [stringifyFunc callWithArguments:@[props]];
+                    NSLog(@"[JSCSandbox] fn_%d op[%lu] type=%@ props=%@", 
+                          funcId, (unsigned long)i, 
+                          [opType isString] ? [opType toString] : @"(non-string)",
+                          [jsonStr toString]);
+                    
+                    // Also check if props has onPress specifically
+                    JSValue *onPress = props[@"onPress"];
+                    if (![onPress isUndefined]) {
+                      NSLog(@"[JSCSandbox] fn_%d op[%lu] has onPress: isObject=%d, isString=%d",
+                            funcId, (unsigned long)i, [onPress isObject], [onPress isString]);
+                      if ([onPress isObject]) {
+                        JSValue *typeField = onPress[@"__type"];
+                        JSValue *fnIdField = onPress[@"__fnId"];
+                        NSLog(@"[JSCSandbox] fn_%d op[%lu] onPress.__type=%@, __fnId=%@",
+                              funcId, (unsigned long)i,
+                              [typeField isString] ? [typeField toString] : @"(undefined)",
+                              [fnIdField isString] ? [fnIdField toString] : @"(undefined)");
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
 
           try {
@@ -390,22 +452,188 @@ void *JSCSandboxContext::wrapFunctionForSandbox(jsi::Runtime & /*rt*/,
               jsiArgs.push_back(
                   self->jsValueToJSI(*hostRt, (__bridge void *)arg));
             }
+            
+            // DEBUG: After conversion, verify the first arg (batch) structure
+            if (jsiArgs.size() > 0 && jsiArgs[0].isObject()) {
+              jsi::Object batchObj = jsiArgs[0].asObject(*hostRt);
+              if (batchObj.hasProperty(*hostRt, "operations")) {
+                jsi::Value opsVal = batchObj.getProperty(*hostRt, "operations");
+                if (opsVal.isObject() && opsVal.asObject(*hostRt).isArray(*hostRt)) {
+                  jsi::Array opsArr = opsVal.asObject(*hostRt).asArray(*hostRt);
+                  size_t opCount = opsArr.size(*hostRt);
+                  NSLog(@"[JSCSandbox] fn_%d: jsiArgs batch has %zu operations", funcId, opCount);
+                  
+                  // Check each operation for TouchableOpacity props
+                  for (size_t i = 0; i < opCount && i < 5; i++) {
+                    jsi::Value opVal = opsArr.getValueAtIndex(*hostRt, i);
+                    if (opVal.isObject()) {
+                      jsi::Object opObj = opVal.asObject(*hostRt);
+                      if (opObj.hasProperty(*hostRt, "type")) {
+                        jsi::Value typeVal = opObj.getProperty(*hostRt, "type");
+                        if (typeVal.isString()) {
+                          std::string typeStr = typeVal.asString(*hostRt).utf8(*hostRt);
+                          if (typeStr == "TouchableOpacity" && opObj.hasProperty(*hostRt, "props")) {
+                            jsi::Value propsVal = opObj.getProperty(*hostRt, "props");
+                            if (propsVal.isObject()) {
+                              jsi::Object propsObj = propsVal.asObject(*hostRt);
+                              jsi::Array propNames = propsObj.getPropertyNames(*hostRt);
+                              size_t propCount = propNames.size(*hostRt);
+                              std::string propList;
+                              for (size_t j = 0; j < propCount && j < 10; j++) {
+                                if (j > 0) propList += ", ";
+                                propList += propNames.getValueAtIndex(*hostRt, j).asString(*hostRt).utf8(*hostRt);
+                              }
+                              NSLog(@"[JSCSandbox] fn_%d: jsiArgs op[%zu] TouchableOpacity props (%zu): %s", 
+                                    funcId, i, propCount, propList.c_str());
+                              
+                              // Check specifically for onPress
+                              if (propsObj.hasProperty(*hostRt, "onPress")) {
+                                jsi::Value onPressVal = propsObj.getProperty(*hostRt, "onPress");
+                                NSLog(@"[JSCSandbox] fn_%d: jsiArgs op[%zu] onPress isUndefined=%d isObject=%d",
+                                      funcId, i, onPressVal.isUndefined(), onPressVal.isObject());
+                              } else {
+                                NSLog(@"[JSCSandbox] fn_%d: jsiArgs op[%zu] NO onPress property!!", funcId, i);
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
 
             jsi::Value result;
+            
+            // DEBUG: Log before calling Host function
+            NSLog(@"[JSCSandbox] fn_%d: ABOUT TO CALL Host function with %zu args", funcId, jsiArgs.size());
+            NSLog(@"[JSCSandbox] fn_%d: callbacks_.size=%lu, internalNameStr=%s", 
+                  funcId, (unsigned long)self->callbacks_.size(), internalNameStr.c_str());
+            
+            // DEBUG: Verify the stored function is valid
+            jsi::Function& storedFunc = *it->second;
+            bool isHostObject = storedFunc.isHostObject(*hostRt);
+            bool isHostFunc = storedFunc.isHostFunction(*hostRt);
+            NSLog(@"[JSCSandbox] fn_%d: storedFunc isHostObject=%d, isHostFunction=%d", 
+                  funcId, isHostObject, isHostFunc);
+            
+            // DEBUG: Final verification of jsiArgs content just before calling Host function
+            // This verifies that jsi::Value objects are intact at the point of the call
+            if (jsiArgs.size() > 0 && jsiArgs[0].isObject()) {
+              jsi::Object arg0 = jsiArgs[0].asObject(*hostRt);
+              if (arg0.hasProperty(*hostRt, "operations")) {
+                jsi::Value opsVal = arg0.getProperty(*hostRt, "operations");
+                if (opsVal.isObject() && opsVal.asObject(*hostRt).isArray(*hostRt)) {
+                  jsi::Array opsArr = opsVal.asObject(*hostRt).asArray(*hostRt);
+                  size_t opCount = opsArr.size(*hostRt);
+                  NSLog(@"[JSCSandbox] fn_%d: FINAL CHECK - batch has %zu operations", funcId, opCount);
+                  
+                  for (size_t i = 0; i < opCount && i < 5; i++) {
+                    jsi::Value opVal = opsArr.getValueAtIndex(*hostRt, i);
+                    if (opVal.isObject()) {
+                      jsi::Object opObj = opVal.asObject(*hostRt);
+                      if (opObj.hasProperty(*hostRt, "type")) {
+                        jsi::Value typeVal = opObj.getProperty(*hostRt, "type");
+                        if (typeVal.isString()) {
+                          std::string typeStr = typeVal.asString(*hostRt).utf8(*hostRt);
+                          if (typeStr == "TouchableOpacity" && opObj.hasProperty(*hostRt, "props")) {
+                            jsi::Value propsVal = opObj.getProperty(*hostRt, "props");
+                            if (propsVal.isObject()) {
+                              jsi::Object propsObj = propsVal.asObject(*hostRt);
+                              
+                              // Check if onPress exists
+                              if (propsObj.hasProperty(*hostRt, "onPress")) {
+                                jsi::Value onPressVal = propsObj.getProperty(*hostRt, "onPress");
+                                NSLog(@"[JSCSandbox] fn_%d: FINAL CHECK op[%zu] onPress exists! isObject=%d isFunction=%d isUndefined=%d",
+                                      funcId, i, onPressVal.isObject(), 
+                                      onPressVal.isObject() && onPressVal.asObject(*hostRt).isFunction(*hostRt),
+                                      onPressVal.isUndefined());
+                                
+                                // If it's an object, check its properties
+                                if (onPressVal.isObject()) {
+                                  jsi::Object onPressObj = onPressVal.asObject(*hostRt);
+                                  jsi::Array onPressPropNames = onPressObj.getPropertyNames(*hostRt);
+                                  size_t onPressPropCount = onPressPropNames.size(*hostRt);
+                                  std::string propList;
+                                  for (size_t j = 0; j < onPressPropCount && j < 10; j++) {
+                                    if (j > 0) propList += ", ";
+                                    propList += onPressPropNames.getValueAtIndex(*hostRt, j).asString(*hostRt).utf8(*hostRt);
+                                  }
+                                  NSLog(@"[JSCSandbox] fn_%d: FINAL CHECK op[%zu] onPress object has %zu props: %s",
+                                        funcId, i, onPressPropCount, propList.c_str());
+                                  
+                                  // Check __type
+                                  if (onPressObj.hasProperty(*hostRt, "__type")) {
+                                    jsi::Value typeVal = onPressObj.getProperty(*hostRt, "__type");
+                                    if (typeVal.isString()) {
+                                      NSLog(@"[JSCSandbox] fn_%d: FINAL CHECK op[%zu] onPress.__type = %s",
+                                            funcId, i, typeVal.asString(*hostRt).utf8(*hostRt).c_str());
+                                    }
+                                  }
+                                }
+                              } else {
+                                // List all props
+                                jsi::Array propNames = propsObj.getPropertyNames(*hostRt);
+                                size_t propCount = propNames.size(*hostRt);
+                                std::string propList;
+                                for (size_t j = 0; j < propCount && j < 10; j++) {
+                                  if (j > 0) propList += ", ";
+                                  propList += propNames.getValueAtIndex(*hostRt, j).asString(*hostRt).utf8(*hostRt);
+                                }
+                                NSLog(@"[JSCSandbox] fn_%d: FINAL CHECK op[%zu] NO onPress! props are: %s",
+                                      funcId, i, propList.c_str());
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            
             if (jsiArgs.empty()) {
+              NSLog(@"[JSCSandbox] fn_%d: calling Host function with NO args", funcId);
               result = it->second->call(*hostRt);
             } else {
+              NSLog(@"[JSCSandbox] fn_%d: calling Host function with %zu args, hostRt=%p", funcId, jsiArgs.size(), (void*)hostRt);
+              
+              // DEBUG: Try JSON.stringify on the first arg to see what Host Runtime sees
+              try {
+                jsi::Function stringify = hostRt->global()
+                    .getPropertyAsObject(*hostRt, "JSON")
+                    .getPropertyAsFunction(*hostRt, "stringify");
+                jsi::Value jsonStr = stringify.call(*hostRt, jsiArgs[0]);
+                if (jsonStr.isString()) {
+                  std::string str = jsonStr.asString(*hostRt).utf8(*hostRt);
+                  // Truncate to avoid log spam
+                  if (str.length() > 500) {
+                    str = str.substr(0, 500) + "...";
+                  }
+                  NSLog(@"[JSCSandbox] fn_%d: JSON.stringify(arg[0])=%s", funcId, str.c_str());
+                }
+              } catch (const std::exception& e) {
+                NSLog(@"[JSCSandbox] fn_%d: JSON.stringify failed: %s", funcId, e.what());
+              }
+              
               result = it->second->call(
                   *hostRt, (const jsi::Value *)jsiArgs.data(), jsiArgs.size());
             }
+            
+            // DEBUG: Log after calling Host function
+            NSLog(@"[JSCSandbox] fn_%d: Host function RETURNED, result isUndefined=%d isObject=%d isString=%d",
+                  funcId, result.isUndefined(), result.isObject(), result.isString());
 
             void *jsResult = self->jsiToJSValue(*hostRt, result);
+            NSLog(@"[JSCSandbox] fn_%d: jsiToJSValue completed, returning to Guest", funcId);
             return (__bridge id)jsResult;
           } catch (const std::exception &e) {
-            NSLog(@"[JSCSandbox] fn_%d exception: %s", funcId, e.what());
+            os_log_error(OS_LOG_DEFAULT, "[JSCSandbox] fn_%d exception: %{public}s", funcId, e.what());
             return nil;
           } catch (...) {
-            NSLog(@"[JSCSandbox] fn_%d unknown exception!", funcId);
+            os_log_error(OS_LOG_DEFAULT, "[JSCSandbox] fn_%d unknown exception!", funcId);
             return nil;
           }
         }
@@ -418,10 +646,13 @@ void *JSCSandboxContext::wrapFunctionForSandbox(jsi::Runtime & /*rt*/,
   // Create a proper function wrapper using eval (ensures typeof returns
   // "function")
   NSString *wrapperScript = [NSString
-      stringWithFormat:@"(function() { var fn = %@; return function(...args) { "
-                       @"return fn(...args); }; })()",
+      stringWithFormat:@"(function() { var fn = %@; var w = function(...args) { "
+                       @"return fn(...args); }; return w; })()",
                        internalName];
   JSValue *wrapperFn = [ctx evaluateScript:wrapperScript];
+
+  // Store it in the context so we can retrieve it later for caching
+  ctx[wrapperName] = wrapperFn;
 
   return (__bridge void *)wrapperFn;
 }
@@ -527,8 +758,29 @@ void *JSCSandboxContext::jsiToJSValue(jsi::Runtime &rt,
   return (__bridge void *)[JSValue valueWithUndefinedInContext:ctx];
 }
 
-// Convert JSValue* to jsi::Value
+// Convert JSValue* to jsi::Value (entry point, creates visited set for cycle detection)
 jsi::Value JSCSandboxContext::jsValueToJSI(jsi::Runtime &rt, void *jsValue) {
+  std::unordered_set<const void *> visited;
+  return jsValueToJSI(rt, jsValue, 0, &visited);
+}
+
+// Depth-limited + cycle-detecting conversion to prevent stack overflow
+// Depth limit guards against extremely deep (non-circular) structures.
+// Visited set tracks the current ancestor path to detect true cycles (A->B->A).
+// Important: entries are REMOVED after subtree conversion completes so that
+// shared references between siblings (e.g., two operations sharing a style
+// object) are NOT falsely flagged as circular.
+//
+// CRITICAL: Only track OBJECTS and ARRAYS in the visited set, NOT primitive values.
+// JSC may reuse JSValueRef pointers for interned strings, small integers, or
+// other optimized values. Tracking primitives would cause false positive
+// circular reference detection when the same primitive value appears multiple
+// times in an object tree.
+static constexpr int kMaxConversionDepth = 64;
+
+jsi::Value JSCSandboxContext::jsValueToJSI(jsi::Runtime &rt, void *jsValue,
+                                            int depth,
+                                            std::unordered_set<const void *> *visited) {
   JSValue *value = (__bridge JSValue *)jsValue;
 
   if (!value || [value isUndefined]) {
@@ -547,28 +799,50 @@ jsi::Value JSCSandboxContext::jsValueToJSI(jsi::Runtime &rt, void *jsValue) {
     NSString *str = [value toString];
     return jsi::String::createFromUtf8(rt, [str UTF8String]);
   }
-  if ([value isArray]) {
-    NSArray *arr = [value toArray];
-    jsi::Array jsiArr = jsi::Array(rt, arr.count);
-    for (NSUInteger i = 0; i < arr.count; i++) {
-      id elem = arr[i];
-      if ([elem isKindOfClass:[JSValue class]]) {
-        jsiArr.setValueAtIndex(rt, i, jsValueToJSI(rt, (__bridge void *)elem));
-      } else if ([elem isKindOfClass:[NSNumber class]]) {
-        jsiArr.setValueAtIndex(rt, i, jsi::Value([elem doubleValue]));
-      } else if ([elem isKindOfClass:[NSString class]]) {
-        jsiArr.setValueAtIndex(
-            rt, i, jsi::String::createFromUtf8(rt, [elem UTF8String]));
-      } else if ([elem isKindOfClass:[NSNull class]]) {
-        jsiArr.setValueAtIndex(rt, i, jsi::Value::null());
-      } else if ([elem isKindOfClass:[NSDictionary class]]) {
-        // Recursively convert nested objects
-        JSContext *ctx = (__bridge JSContext *)jsContext_;
-        JSValue *nestedValue = [JSValue valueWithObject:elem inContext:ctx];
-        jsiArr.setValueAtIndex(rt, i,
-                               jsValueToJSI(rt, (__bridge void *)nestedValue));
-      }
+
+  // Depth guard for extremely deep (non-circular) structures
+  if (depth >= kMaxConversionDepth) {
+    NSLog(@"[JSCSandbox] jsValueToJSI: max depth %d reached, returning "
+          @"undefined",
+          kMaxConversionDepth);
+    return jsi::Value::undefined();
+  }
+
+  // At this point, value must be an object or array (non-primitive).
+  // Only track these composite types for circular reference detection.
+  // Primitives (bool, number, string, null, undefined) are handled above
+  // and should NOT be added to visited set as JSC may reuse their JSValueRef.
+  JSValueRef valueRef = [value JSValueRef];
+  bool addedToVisited = false;
+  
+  // DEBUG: Check if this is actually an object/array before adding to visited
+  bool isRealObject = [value isObject] || [value isArray];
+  
+  if (visited && valueRef && isRealObject) {
+    if (visited->count(valueRef)) {
+      // Already visiting this exact object in current ancestor path - true cycle
+      // DEBUG: Log more info about what we think is circular
+      NSLog(@"[JSCSandbox] jsValueToJSI: circular reference detected at depth "
+            @"%d, ptr=%p, isArray=%d, isObject=%d, visitedSize=%lu",
+            depth, valueRef, [value isArray], [value isObject], visited->size());
+      return jsi::Value::undefined();
     }
+    visited->insert(valueRef);
+    addedToVisited = true;
+  }
+
+  if ([value isArray]) {
+    // Use valueAtIndex: to preserve JSValue identity (needed for cycle detection).
+    // [value toArray] deep-converts to NSDictionary/NSArray, losing object identity.
+    NSUInteger count = [[value[@"length"] toNumber] unsignedIntegerValue];
+    jsi::Array jsiArr = jsi::Array(rt, count);
+    for (NSUInteger i = 0; i < count; i++) {
+      JSValue *elem = [value valueAtIndex:i];
+      jsiArr.setValueAtIndex(
+          rt, i, jsValueToJSI(rt, (__bridge void *)elem, depth + 1, visited));
+    }
+    // Remove from ancestor path: subtree is fully converted
+    if (addedToVisited) visited->erase(valueRef);
     return std::move(jsiArr);
   }
   if ([value isObject]) {
@@ -582,6 +856,8 @@ jsi::Value JSCSandboxContext::jsValueToJSI(jsi::Runtime &rt, void *jsValue) {
     NSString *typeString = [typeStr toString];
 
     if ([typeString isEqualToString:@"function"]) {
+      // Functions don't recurse into children, safe to remove from visited
+      if (addedToVisited) visited->erase(valueRef);
 
       // Store the sandbox function for later invocation
       static int sandboxFuncCounter = 0;
@@ -632,7 +908,7 @@ jsi::Value JSCSandboxContext::jsValueToJSI(jsi::Runtime &rt, void *jsValue) {
 
               // Check for exceptions
               if (ctx.exception) {
-                NSString *errorMsg = [ctx.exception toString];
+                NSString *errorMsg = safeExceptionMessage(ctx.exception);
                 ctx.exception = nil;
                 throw jsi::JSError(rt, [errorMsg UTF8String]);
               }
@@ -643,10 +919,6 @@ jsi::Value JSCSandboxContext::jsValueToJSI(jsi::Runtime &rt, void *jsValue) {
     }
 
     // Not a function, convert as regular object
-    // IMPORTANT: Use Object.keys() instead of toDictionary to preserve all
-    // properties toDictionary loses Symbol properties and may not handle nested
-    // objects correctly
-
     jsi::Object jsiObj = jsi::Object(rt);
 
     // Get all own property names using JavaScript
@@ -656,6 +928,11 @@ jsi::Value JSCSandboxContext::jsValueToJSI(jsi::Runtime &rt, void *jsValue) {
 
     if (keysArray && [keysArray isArray]) {
       NSArray *keys = [keysArray toArray];
+      
+      // DEBUG: Log object conversion at specific depth to track onPress issue
+      if (depth <= 3) {
+        NSLog(@"[JSCSandbox] jsValueToJSI object at depth %d: %lu keys", depth, (unsigned long)keys.count);
+      }
 
       for (NSString *key in keys) {
         if (![key isKindOfClass:[NSString class]])
@@ -665,12 +942,46 @@ jsi::Value JSCSandboxContext::jsValueToJSI(jsi::Runtime &rt, void *jsValue) {
         if (!propVal || [propVal isUndefined])
           continue;
 
-        // Recursively convert each property
-        jsi::Value jsiPropVal = jsValueToJSI(rt, (__bridge void *)propVal);
+        // DEBUG: Track onPress conversion specifically
+        if ([key isEqualToString:@"onPress"]) {
+          NSLog(@"[JSCSandbox] jsValueToJSI: converting onPress property at depth %d, isObject=%d, isString=%d",
+                depth, [propVal isObject], [propVal isString]);
+          if ([propVal isObject]) {
+            JSValue *typeField = propVal[@"__type"];
+            NSLog(@"[JSCSandbox] jsValueToJSI: onPress.__type=%@",
+                  [typeField isString] ? [typeField toString] : @"(not string)");
+          }
+        }
+
+        // Recursively convert each property with depth + cycle tracking
+        jsi::Value jsiPropVal =
+            jsValueToJSI(rt, (__bridge void *)propVal, depth + 1, visited);
+        
+        // DEBUG: Track onPress conversion result
+        if ([key isEqualToString:@"onPress"]) {
+          NSLog(@"[JSCSandbox] jsValueToJSI: onPress converted at depth %d, result isUndefined=%d, isObject=%d",
+                depth, jsiPropVal.isUndefined(), jsiPropVal.isObject());
+        }
+        
         jsiObj.setProperty(rt, [key UTF8String], std::move(jsiPropVal));
       }
     }
 
+    // DEBUG: Log final object properties at depth 3 (where props object should be)
+    if (depth == 3) {
+      // Check what properties the converted object has
+      jsi::Array propNames = jsiObj.getPropertyNames(rt);
+      size_t propCount = propNames.size(rt);
+      std::string propList;
+      for (size_t i = 0; i < propCount && i < 10; i++) {
+        if (i > 0) propList += ", ";
+        propList += propNames.getValueAtIndex(rt, i).asString(rt).utf8(rt);
+      }
+      NSLog(@"[JSCSandbox] jsValueToJSI: depth %d object converted with %zu props: %s", depth, propCount, propList.c_str());
+    }
+
+    // Remove from ancestor path: subtree is fully converted
+    if (addedToVisited) visited->erase(valueRef);
     return std::move(jsiObj);
   }
 
@@ -830,6 +1141,11 @@ void JSCSandboxModule::install(jsi::Runtime &runtime) {
   jsi::Object moduleObj = jsi::Object::createFromHostObject(runtime, module);
   runtime.global().setProperty(runtime, "__JSCSandboxJSI",
                                std::move(moduleObj));
+}
+
+// Wrapper function for external linkage (avoids JSValue symbol conflicts)
+void installJSCSandbox(jsi::Runtime &runtime) {
+  JSCSandboxModule::install(runtime);
 }
 
 } // namespace jsc_sandbox

@@ -7,7 +7,7 @@
 
 #pragma once
 
-#include "../jsi/jsi.h"
+#include <jsi/jsi.h>
 #include <memory.h>
 
 namespace facebook::jsc {
