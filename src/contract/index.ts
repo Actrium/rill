@@ -6,8 +6,6 @@
 
 export type HostModuleId = `host:${string}`;
 
-export type BoundaryDirection = 'guest->host' | 'host->guest';
-
 export interface BoundarySchema<Input, Output> {
   // Reason: Boundary schemas parse untrusted cross-runtime input.
   parseInput?: (value: unknown) => Input;
@@ -85,6 +83,19 @@ export type HostModulesImplementation<TContract extends RillContractShape> = {
     : never;
 };
 
+/**
+ * Structural (non-generic) shape of a host module implementation map.
+ *
+ * Used by the runtime backend (Engine) where the concrete contract type is not
+ * statically available. `(...args: never[]) => unknown` is the top function type
+ * under contravariance, so any concrete `HostModulesImplementation<TContract>` is
+ * assignable to it.
+ */
+export type HostModuleImplementationMap = Record<
+  string,
+  Record<string, (...args: never[]) => unknown>
+>;
+
 export type GuestExportsClient<TContract extends RillContractShape> = {
   [ExportName in keyof TContract['guestExports']]: TContract['guestExports'][ExportName] extends RpcDescriptor<
     infer Input,
@@ -98,6 +109,40 @@ export interface RillCapabilitiesManifest {
   contractVersion: string;
   hostCapabilities: string[];
   guestExports: string[];
+}
+
+/**
+ * A single dispatch-wrapped host capability, ready to be exposed to the Guest.
+ *
+ * Wrapping enforces the contract's boundary schemas: rpc capabilities run
+ * `parseInput` before the implementation and `parseOutput` on its result;
+ * subscription capabilities run `parseEvent` on every event before it reaches
+ * the Guest handler. Validation failures throw (fail-closed).
+ */
+// Reason: dispatch handlers cross the runtime boundary with arbitrary argument shapes.
+export type HostModuleDispatchHandler = (...args: unknown[]) => unknown;
+
+/** Dispatch-wrapped capabilities of a single host module, keyed by export name. */
+export type HostModuleDispatchModule = Record<string, HostModuleDispatchHandler>;
+
+/** Dispatch-wrapped host modules, keyed by host module id (e.g. `host:analytics`). */
+export type HostModuleDispatchTable = Record<string, HostModuleDispatchModule>;
+
+/** Boundary phase at which a dispatch wrapper rejected a value. */
+export type HostModuleBoundaryPhase = 'input' | 'output' | 'event';
+
+export interface HostModuleDispatchContext {
+  moduleId: string;
+  exportName: string;
+  phase: HostModuleBoundaryPhase;
+}
+
+export interface HostModuleDispatchOptions {
+  /**
+   * Invoked when a boundary schema rejects a value. The dispatch wrapper still
+   * throws after this hook runs; the hook is for host-side diagnostics/logging.
+   */
+  onError?: (error: Error, context: HostModuleDispatchContext) => void;
 }
 
 const HOST_MODULE_ID_PATTERN = /^host:[a-z0-9_-]+(?:\/[a-z0-9_-]+)*$/;
@@ -147,6 +192,61 @@ export function implementHostModules<const TContract extends RillContractShape>(
 ): HostModulesImplementation<TContract> {
   validateHostModulesImplementation(contract, implementation);
   return implementation;
+}
+
+/**
+ * Build the dispatch table that the runtime backend exposes to the Guest.
+ *
+ * This is the runtime counterpart of {@link implementHostModules}: it pairs each
+ * contract descriptor with its implementation and returns boundary-enforcing
+ * wrappers. The Engine injects the result into the sandbox as
+ * `globalThis.__rill.hostModules`, where the Guest's rewritten `host:*` imports
+ * resolve it.
+ *
+ * Enforcement (fail-closed):
+ * - rpc: `schema.parseInput(args)` runs before the implementation; `schema.parseOutput(result)`
+ *   runs on the resolved value (awaited for async implementations). Either failing throws.
+ * - subscription: `schema.parseEvent(event)` runs on every event before it reaches the Guest
+ *   handler; a rejected event throws and never reaches the Guest.
+ * - The implementation's own errors propagate unchanged.
+ *
+ * The implementation must exactly match the contract (validated here), so a guest
+ * capability that is declared but not implemented is impossible; an undeclared
+ * `host:*` import is rejected at build time and, defensively, by the runtime resolver.
+ */
+export function createHostModuleDispatch(
+  contract: RillContractShape,
+  implementation: HostModuleImplementationMap,
+  options: HostModuleDispatchOptions = {}
+): HostModuleDispatchTable {
+  assertImplementationMatchesContract(contract, implementation);
+
+  const implementationRecord = implementation as Record<
+    string,
+    Record<string, HostModuleDispatchHandler>
+  >;
+  const table: HostModuleDispatchTable = {};
+
+  for (const [moduleId, moduleSpec] of Object.entries(contract.hostModules)) {
+    const moduleImpl = implementationRecord[moduleId];
+    if (!moduleImpl) continue;
+
+    const moduleDispatch: HostModuleDispatchModule = {};
+
+    for (const [exportName, descriptor] of Object.entries(moduleSpec)) {
+      const impl = moduleImpl[exportName];
+      if (typeof impl !== 'function') continue;
+
+      moduleDispatch[exportName] =
+        descriptor.kind === 'subscription'
+          ? wrapSubscriptionDispatch(moduleId, exportName, descriptor, impl, options)
+          : wrapRpcDispatch(moduleId, exportName, descriptor, impl, options);
+    }
+
+    table[moduleId] = moduleDispatch;
+  }
+
+  return table;
 }
 
 export function createCapabilitiesManifest(contract: RillContractShape): RillCapabilitiesManifest {
@@ -219,6 +319,18 @@ function validateHostModulesImplementation<const TContract extends RillContractS
   contract: TContract,
   implementation: HostModulesImplementation<TContract>
 ): void {
+  assertImplementationMatchesContract(contract, implementation as HostModuleImplementationMap);
+}
+
+/**
+ * Assert that an implementation map exactly covers a contract's host modules:
+ * every declared module/export has a function implementation, and no extra
+ * (undeclared) modules or exports are present.
+ */
+function assertImplementationMatchesContract(
+  contract: RillContractShape,
+  implementation: HostModuleImplementationMap
+): void {
   validateContract(contract);
 
   const implementationRecord = implementation as Record<string, Record<string, unknown>>;
@@ -279,6 +391,120 @@ function validateExportName(value: string, owner: string): void {
   if (!GUEST_EXPORT_NAME_PATTERN.test(value)) {
     throw new Error(`[rill/contract] Invalid export name "${value}" in ${owner}.`);
   }
+}
+
+function wrapRpcDispatch(
+  moduleId: string,
+  exportName: string,
+  descriptor: RpcDescriptor<unknown, unknown>,
+  impl: HostModuleDispatchHandler,
+  options: HostModuleDispatchOptions
+): HostModuleDispatchHandler {
+  const schema = descriptor.schema;
+
+  return (...args: unknown[]): unknown => {
+    // Boundary: parse the untrusted input the Guest sent before it reaches the host impl.
+    let callArgs = args;
+    if (schema?.parseInput) {
+      const parsed = runBoundary(
+        schema.parseInput,
+        args[0],
+        moduleId,
+        exportName,
+        'input',
+        options
+      );
+      callArgs = [parsed];
+    }
+
+    const result = impl(...(callArgs as never[]));
+
+    if (!schema?.parseOutput) {
+      return result;
+    }
+
+    const parseOutput = schema.parseOutput;
+    if (isThenable(result)) {
+      // Boundary: parse the host impl's resolved output before it crosses back to the Guest.
+      return Promise.resolve(result).then((resolved) =>
+        runBoundary(parseOutput, resolved, moduleId, exportName, 'output', options)
+      );
+    }
+
+    return runBoundary(parseOutput, result, moduleId, exportName, 'output', options);
+  };
+}
+
+function wrapSubscriptionDispatch(
+  moduleId: string,
+  exportName: string,
+  descriptor: SubscriptionDescriptor,
+  impl: HostModuleDispatchHandler,
+  options: HostModuleDispatchOptions
+): HostModuleDispatchHandler {
+  const schema = descriptor.schema;
+
+  return (...args: unknown[]): unknown => {
+    const handler = args[0];
+    if (typeof handler !== 'function') {
+      throw new Error(
+        `[rill/contract] Subscription "${moduleId}.${exportName}" requires a handler function.`
+      );
+    }
+
+    // Reason: the Guest handler and its events cross the runtime boundary as untrusted values.
+    const guestHandler = handler as (event: unknown) => void;
+    const wrappedHandler = schema?.parseEvent
+      ? (event: unknown): void => {
+          // Boundary: parse every event before it reaches the Guest handler.
+          const parsed = runBoundary(
+            schema.parseEvent!,
+            event,
+            moduleId,
+            exportName,
+            'event',
+            options
+          );
+          guestHandler(parsed);
+        }
+      : guestHandler;
+
+    return impl(wrappedHandler as never);
+  };
+}
+
+// Reason: boundary parsers receive arbitrary cross-runtime input and return a narrowed value.
+function runBoundary(
+  parse: (value: unknown) => unknown,
+  value: unknown,
+  moduleId: string,
+  exportName: string,
+  phase: HostModuleBoundaryPhase,
+  // Reason: returns the parsed (narrowed) value, or throws when the boundary rejects it.
+  options: HostModuleDispatchOptions
+): unknown {
+  try {
+    return parse(value);
+  } catch (cause) {
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    const error = new Error(
+      `[rill/contract] Boundary ${phase} validation failed for "${moduleId}.${exportName}": ${reason}`
+    );
+    // Reason: preserve the original validation error for host-side diagnostics.
+    (error as { cause?: unknown }).cause = cause;
+    options.onError?.(error, { moduleId, exportName, phase });
+    throw error;
+  }
+}
+
+// Reason: type guard narrows an arbitrary runtime value to a thenable.
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return (
+    value != null &&
+    (typeof value === 'object' || typeof value === 'function') &&
+    // Reason: probe the value's then property without assuming its shape.
+    typeof (value as { then?: unknown }).then === 'function'
+  );
 }
 
 function freezeDescriptor<T extends object>(descriptor: T): Readonly<T> {

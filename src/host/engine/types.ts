@@ -2,6 +2,7 @@
  * Engine Types and Interfaces
  */
 
+import type { HostModuleImplementationMap, RillContractShape } from '../../contract';
 import type { RuntimeCollectorConfig } from '../../devtools/runtime';
 import type { OrchestratorTenantConfig } from '../orchestrator/types';
 import type { Receiver, ReceiverStats } from '../receiver';
@@ -99,6 +100,26 @@ export interface EngineOptions {
    * - RuntimeCollectorConfig: Enable with custom settings
    */
   devtools?: boolean | RuntimeCollectorConfig;
+
+  /**
+   * Capability contract describing the `host:*` modules and Guest exports.
+   *
+   * Required when {@link EngineOptions.hostModules} is provided: the contract
+   * supplies the boundary schemas (`parseInput`/`parseOutput`/`parseEvent`) that
+   * the runtime enforces on every host-module call.
+   */
+  contract?: RillContractShape;
+
+  /**
+   * Host module implementations exposed to the Guest's `host:*` imports.
+   *
+   * Produce this with `implementHostModules(contract, { ... })` from
+   * `rill/contract`. The Engine wraps each capability with the contract's
+   * boundary schemas and injects them so the Guest's rewritten `host:*` imports
+   * resolve to the (validated) host implementations. Requires
+   * {@link EngineOptions.contract}.
+   */
+  hostModules?: HostModuleImplementationMap;
 }
 
 /**
