@@ -17,6 +17,7 @@ declare global {
   var __rill_handleMessage: ((message: import('../types').HostMessage) => void) | undefined;
 }
 
+import { createHostModuleDispatch, type HostModuleDispatchTable } from '../../contract';
 import type { RuntimeCollector } from '../../devtools/index';
 import { createRuntimeCollector } from '../../devtools/index';
 import { GUEST_BUNDLE_CODE } from '../../guest/build/bundle';
@@ -111,6 +112,13 @@ export class Engine implements IEngine {
   private destroyed = false;
   private loaded = false;
   private _timeoutTimer?: ReturnType<typeof setTimeout>;
+
+  /**
+   * Dispatch-wrapped `host:*` modules exposed to the Guest, or null when no host
+   * modules were configured. Built once from the contract + implementations and
+   * injected into the sandbox during injectRuntimeAPI().
+   */
+  private _hostModuleDispatch: HostModuleDispatchTable | null = null;
 
   // Pause state
   private _isPaused = false;
@@ -288,6 +296,30 @@ export class Engine implements IEngine {
       this._devtools.enable();
       if (this.options.debug) {
         this.options.logger.log(`[rill:${this.id}] DevTools enabled`);
+      }
+    }
+
+    // Build the host-module dispatch table (fail-closed): pairs contract descriptors
+    // with their implementations and wraps each capability with the boundary schemas.
+    if (options.hostModules) {
+      if (!options.contract) {
+        throw new Error(
+          '[rill] EngineOptions.hostModules requires EngineOptions.contract so boundary schemas can be enforced.'
+        );
+      }
+      this._hostModuleDispatch = createHostModuleDispatch(options.contract, options.hostModules, {
+        onError: (error, ctx) => {
+          this.options.logger.error(
+            `[rill:${this.id}] Host module boundary rejected ${ctx.moduleId}.${ctx.exportName} (${ctx.phase}):`,
+            error
+          );
+          this.diagnostics?.recordError?.();
+        },
+      });
+      if (this.options.debug) {
+        this.options.logger.log(
+          `[rill:${this.id}] Host modules registered: ${Object.keys(this._hostModuleDispatch).join(', ')}`
+        );
       }
     }
 
@@ -1286,6 +1318,9 @@ export class Engine implements IEngine {
       );
     }
 
+    // Expose host:* modules to the Guest resolver (globalThis.__rill.hostModules).
+    this.injectHostModules();
+
     // All inject operations are now synchronous - no need to wait
     if (debug) {
       logger.log(`[rill:${this.id}] injectRuntimeAPI: all inject operations done`);
@@ -1308,6 +1343,55 @@ export class Engine implements IEngine {
       } catch (e) {
         logger.warn(`[rill:${this.id}] Failed to inject DevTools shim:`, e);
       }
+    }
+  }
+
+  /**
+   * Inject the dispatch-wrapped `host:*` modules into the sandbox.
+   *
+   * Each capability is injected as an individual host function (mirroring how
+   * `__rill_emitEvent`, `__rill_getConfig`, etc. are injected) so the marshalling
+   * layer only ever crosses single functions — the JSI-friendly shape. A single
+   * eval then assembles `globalThis.__rill.hostModules`, which is exactly where the
+   * Guest bundle's rewritten `host:*` imports resolve (build.ts: `__rill_importHostModule`).
+   *
+   * Capabilities not registered here are absent from the table, so the Guest
+   * resolver throws "Host module not registered" (fail-closed).
+   */
+  private injectHostModules(): void {
+    if (!this.context || !this._hostModuleDispatch) return;
+
+    const assignments: string[] = [];
+    let counter = 0;
+
+    for (const [moduleId, moduleDispatch] of Object.entries(this._hostModuleDispatch)) {
+      const moduleKey = JSON.stringify(moduleId);
+      for (const [exportName, handler] of Object.entries(moduleDispatch)) {
+        const tempName = `__rill_hm_${counter++}`;
+        this.context.inject(tempName, handler);
+        const tempKey = JSON.stringify(tempName);
+        const exportKey = JSON.stringify(exportName);
+        assignments.push(
+          `  m[${moduleKey}] = m[${moduleKey}] || {};\n` +
+            `  m[${moduleKey}][${exportKey}] = globalThis[${tempKey}];\n` +
+            `  try { delete globalThis[${tempKey}]; } catch (e) {}`
+        );
+      }
+    }
+
+    this.evalCode(`
+      (function() {
+        if (!globalThis.__rill) { globalThis.__rill = {}; }
+        var m = globalThis.__rill.hostModules || {};
+${assignments.join('\n')}
+        globalThis.__rill.hostModules = m;
+      })();
+    `);
+
+    if (this.options.debug) {
+      this.options.logger.log(
+        `[rill:${this.id}] injectHostModules: injected ${counter} host capability function(s)`
+      );
     }
   }
 

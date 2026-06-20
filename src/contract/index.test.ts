@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   createCapabilitiesManifest,
+  createHostModuleDispatch,
   defineRillContract,
   implementHostModules,
   isHostModuleId,
@@ -216,5 +217,170 @@ describe('rill/contract', () => {
         },
       } as never)
     ).toThrow('Host module implementation "host:extra" is not declared');
+  });
+});
+
+describe('createHostModuleDispatch', () => {
+  const buildContract = () =>
+    defineRillContract({
+      version: '2.0.0',
+      hostModules: {
+        'host:analytics': {
+          track: rpc<{ name: string }, { ok: true }>({
+            schema: {
+              parseInput: (value) => {
+                const input = value as { name?: unknown };
+                if (typeof input?.name !== 'string' || input.name.length === 0) {
+                  throw new Error('name must be a non-empty string');
+                }
+                return { name: input.name };
+              },
+              parseOutput: (value) => {
+                const output = value as { ok?: unknown };
+                if (output?.ok !== true) {
+                  throw new Error('output.ok must be true');
+                }
+                return { ok: true };
+              },
+            },
+          }),
+        },
+        'host:theme': {
+          onThemeChanged: subscription<{ theme: 'light' | 'dark' }>({
+            schema: {
+              parseEvent: (value) => {
+                const event = value as { theme?: unknown };
+                if (event?.theme !== 'light' && event?.theme !== 'dark') {
+                  throw new Error('theme must be light or dark');
+                }
+                return { theme: event.theme };
+              },
+            },
+          }),
+        },
+      },
+      guestExports: {},
+    });
+
+  test('runs parseInput then implementation then parseOutput', async () => {
+    const calls: Array<{ name: string }> = [];
+    const dispatch = createHostModuleDispatch(buildContract(), {
+      'host:analytics': {
+        track: async (input) => {
+          calls.push(input);
+          return { ok: true };
+        },
+      },
+      'host:theme': {
+        onThemeChanged: () => () => {},
+      },
+    });
+
+    const result = await dispatch['host:analytics']!.track!({ name: 'opened' });
+    expect(result).toEqual({ ok: true });
+    expect(calls).toEqual([{ name: 'opened' }]);
+  });
+
+  test('parseInput rejects malformed input fail-closed (impl never runs)', async () => {
+    let implCalled = false;
+    const dispatch = createHostModuleDispatch(buildContract(), {
+      'host:analytics': {
+        track: async () => {
+          implCalled = true;
+          return { ok: true };
+        },
+      },
+      'host:theme': { onThemeChanged: () => () => {} },
+    });
+
+    expect(() => dispatch['host:analytics']!.track!({ name: '' })).toThrow(
+      'Boundary input validation failed for "host:analytics.track": name must be a non-empty string'
+    );
+    expect(implCalled).toBe(false);
+  });
+
+  test('parseOutput rejects malformed output of an async implementation', async () => {
+    const dispatch = createHostModuleDispatch(buildContract(), {
+      'host:analytics': {
+        // Implementation returns a value the contract forbids.
+        track: async () => ({ ok: false }) as never,
+      },
+      'host:theme': { onThemeChanged: () => () => {} },
+    });
+
+    await expect(dispatch['host:analytics']!.track!({ name: 'x' })).rejects.toThrow(
+      'Boundary output validation failed for "host:analytics.track": output.ok must be true'
+    );
+  });
+
+  test('reports boundary failures through onError without swallowing the throw', () => {
+    const errors: string[] = [];
+    const dispatch = createHostModuleDispatch(
+      buildContract(),
+      {
+        'host:analytics': { track: async () => ({ ok: true }) },
+        'host:theme': { onThemeChanged: () => () => {} },
+      },
+      {
+        onError: (_error, ctx) => {
+          errors.push(`${ctx.moduleId}.${ctx.exportName}:${ctx.phase}`);
+        },
+      }
+    );
+
+    expect(() => dispatch['host:analytics']!.track!({ name: 123 })).toThrow();
+    expect(errors).toEqual(['host:analytics.track:input']);
+  });
+
+  test('subscription runs parseEvent before the guest handler and rejects bad events', () => {
+    const seen: Array<{ theme: string }> = [];
+    let emit: ((event: unknown) => void) | undefined;
+
+    const dispatch = createHostModuleDispatch(buildContract(), {
+      'host:analytics': { track: async () => ({ ok: true }) },
+      'host:theme': {
+        onThemeChanged: (handler) => {
+          emit = handler as (event: unknown) => void;
+          return () => {};
+        },
+      },
+    });
+
+    const unsubscribe = dispatch['host:theme']!.onThemeChanged!((event: { theme: string }) => {
+      seen.push(event);
+    });
+    expect(typeof unsubscribe).toBe('function');
+
+    emit?.({ theme: 'dark' });
+    expect(seen).toEqual([{ theme: 'dark' }]);
+
+    // A malformed event throws on emit and never reaches the guest handler.
+    expect(() => emit?.({ theme: 'rainbow' })).toThrow(
+      'Boundary event validation failed for "host:theme.onThemeChanged": theme must be light or dark'
+    );
+    expect(seen).toEqual([{ theme: 'dark' }]);
+  });
+
+  test('implementation errors propagate unchanged (not wrapped as boundary errors)', async () => {
+    const dispatch = createHostModuleDispatch(buildContract(), {
+      'host:analytics': {
+        track: async () => {
+          throw new Error('analytics backend down');
+        },
+      },
+      'host:theme': { onThemeChanged: () => () => {} },
+    });
+
+    await expect(dispatch['host:analytics']!.track!({ name: 'x' })).rejects.toThrow(
+      'analytics backend down'
+    );
+  });
+
+  test('rejects an implementation that does not match the contract', () => {
+    expect(() =>
+      createHostModuleDispatch(buildContract(), {
+        'host:analytics': { track: async () => ({ ok: true }) },
+      } as never)
+    ).toThrow('Missing implementation for host module "host:theme"');
   });
 });
