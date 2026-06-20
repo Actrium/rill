@@ -1,7 +1,7 @@
 #include "ThreadPool.h"
 #include <stdexcept>
 
-namespace rill::orchestrator {
+namespace rill::tenant_manager {
 
 ThreadPool::ThreadPool(uint32_t maxThreads) : maxThreads_(maxThreads) {}
 
@@ -71,4 +71,4 @@ size_t ThreadPool::activeThreadCount() const {
   return threads_.size();
 }
 
-} // namespace rill::orchestrator
+} // namespace rill::tenant_manager

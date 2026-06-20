@@ -19,7 +19,7 @@ Rill is a lightweight, headless, sandboxed dynamic UI rendering engine for React
 ```
 Platform Layer  (iOS / macOS / Android / Web)
   |
-  +-- C++ Orchestrator  (multi-tenant management, thread pool, event bus)
+  +-- C++ TenantManager  (multi-tenant management, thread pool, event bus)
   |     |
   |     +-- Per-Tenant Sandbox  (isolated JS runtime, timer wheel, security)
   |           |
@@ -28,9 +28,9 @@ Platform Layer  (iOS / macOS / Android / Web)
   +-- Host Shell  (EngineView renders native React Native components)
 ```
 
-**Platform Layer** -- Native entry point. On Apple platforms this is a TurboModule (`RillSandboxNativeTurboModule`) that installs the C++ orchestrator into the React Native host runtime.
+**Platform Layer** -- Native entry point. On Apple platforms this is a TurboModule (`RillSandboxNativeTurboModule`) that installs the C++ tenant manager into the React Native host runtime.
 
-**C++ Orchestrator** -- Singleton (`RillOrchestrator`) that coordinates tenant creation, thread assignment, resource quotas, event bus, security contexts, and CDP debugging. Installed as `globalThis.__RillOrchestrator` via JSI HostObject.
+**C++ TenantManager** -- Singleton (`RillTenantManager`) that coordinates tenant creation, thread assignment, resource quotas, event bus, security contexts, and CDP debugging. Installed as `globalThis.__RillTenantManager` via JSI HostObject.
 
 **Per-Tenant Sandbox** -- Each tenant gets a `TenantThread` with its own run loop, `TimerWheel`, and JS runtime. The sandbox executes guest bundles in complete isolation from other tenants and from the host.
 
@@ -55,7 +55,7 @@ src/
       types.ts
       stats.ts
     registry.ts          ComponentRegistry (whitelist)
-    orchestrator/        OrchestratorProvider (TS adapter for C++ orchestrator)
+    tenant manager/        TenantManagerProvider (TS adapter for C++ tenant manager)
     preset/              Built-in component presets
 
   guest/               Guest runtime
@@ -93,8 +93,8 @@ src/
   cli/                 Build tooling
   devtools/            Runtime DevTools collector
 
-native/core/src/      C++ Orchestrator and supporting modules
-    RillOrchestrator.h/.mm    Singleton JSI HostObject
+native/core/src/      C++ TenantManager and supporting modules
+    RillTenantManager.h/.mm    Singleton JSI HostObject
     TenantRegistry.h/.cpp     Tenant state tracking
     TenantHandle.h/.cpp       Per-tenant wrapper (runtime, context, state machine)
     TenantThread.h/.cpp       Dedicated execution thread with priority queue

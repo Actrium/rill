@@ -1,6 +1,6 @@
-# C++ 原生 Orchestrator
+# C++ 原生 TenantManager
 
-原生 orchestrator 是一个 C++ 单例,提供多租户沙箱管理、线程隔离、资源配额和集中协调。它作为 JSI HostObject 安装在 React Native host 运行时中。
+原生 tenant manager 是一个 C++ 单例,提供多租户沙箱管理、线程隔离、资源配额和集中协调。它作为 JSI HostObject 安装在 React Native host 运行时中。
 
 ## 设计动机
 
@@ -10,9 +10,9 @@
 
 ## 组件概述
 
-### RillOrchestrator (`native/core/src/RillOrchestrator.h`)
+### RillTenantManager (`native/core/src/RillTenantManager.h`)
 
-通过 `jsi::HostObject` 作为 `globalThis.__RillOrchestrator` 安装的单例。所有方法都通过 JSI `get()` 接口公开,可从 TypeScript 调用。
+通过 `jsi::HostObject` 作为 `globalThis.__RillTenantManager` 安装的单例。所有方法都通过 JSI `get()` 接口公开,可从 TypeScript 调用。
 
 主要职责:
 - 租户生命周期(创建、加载、暂停、恢复、销毁)
@@ -120,44 +120,44 @@ Host VM Thread                    Tenant Thread
 
 ## JSI 绑定
 
-在 TurboModule 初始化期间,orchestrator 安装在 host 运行时中:
+在 TurboModule 初始化期间,tenant manager 安装在 host 运行时中:
 
 ```cpp
-RillOrchestrator::install(hostRuntime, callInvoker);
+RillTenantManager::install(hostRuntime, callInvoker);
 ```
 
-这创建了一个单例 `RillOrchestrator` 并将其设置为 `globalThis.__RillOrchestrator`。所有方法都通过 `jsi::HostObject::get()` 接口公开:
+这创建了一个单例 `RillTenantManager` 并将其设置为 `globalThis.__RillTenantManager`。所有方法都通过 `jsi::HostObject::get()` 接口公开:
 
 ```
-__RillOrchestrator.createTenant(config)
-__RillOrchestrator.loadBundle(tenantId, code)
-__RillOrchestrator.destroyTenant(tenantId)
-__RillOrchestrator.sendEvent(tenantId, name, payload)
-__RillOrchestrator.evalInTenant(tenantId, code)
-__RillOrchestrator.setTenantGlobal(tenantId, name, value)
-__RillOrchestrator.getTenantGlobal(tenantId, name)
-__RillOrchestrator.setHostCallbacks(callbacks)
-__RillOrchestrator.getMetrics()
+__RillTenantManager.createTenant(config)
+__RillTenantManager.loadBundle(tenantId, code)
+__RillTenantManager.destroyTenant(tenantId)
+__RillTenantManager.sendEvent(tenantId, name, payload)
+__RillTenantManager.evalInTenant(tenantId, code)
+__RillTenantManager.setTenantGlobal(tenantId, name, value)
+__RillTenantManager.getTenantGlobal(tenantId, name)
+__RillTenantManager.setHostCallbacks(callbacks)
+__RillTenantManager.getMetrics()
 // ... EventBus 方法、定时器方法等
 ```
 
 Host 回调(`onBatch`、`onEvent`、`onError`、`onLog`、`onTimer`)是通过 `setHostCallbacks` 注册的 `jsi::Function` 对象。它们通过 `CallInvoker::invokeAsync()` 在 Host VM 线程上调用。
 
-## OrchestratorProvider (TypeScript 适配器)
+## TenantManagerProvider (TypeScript 适配器)
 
-`src/host/orchestrator/orchestrator-provider.ts` 将 JSI 接口桥接到 TypeScript。
+`src/host/tenant manager/tenant manager-provider.ts` 将 JSI 接口桥接到 TypeScript。
 
 ### 检测
 
 ```typescript
 static isAvailable(): boolean {
-  return typeof globalThis.__RillOrchestrator !== 'undefined';
+  return typeof globalThis.__RillTenantManager !== 'undefined';
 }
 ```
 
 ### Engine 集成
 
-当 `globalThis.__RillOrchestrator` 可用时,`Engine` 会自动委托给它。内部适配器将原始 JSI 接口包装到 `JSEngineProvider` / `JSEngineRuntime` / `SandboxScope` 实现中:
+当 `globalThis.__RillTenantManager` 可用时,`Engine` 会自动委托给它。内部适配器将原始 JSI 接口包装到 `JSEngineProvider` / `JSEngineRuntime` / `SandboxScope` 实现中:
 
 - `createRuntime()` -- 调用 `createTenant(config)`,返回包装器
 - `context.eval(code)` -- 调用 `evalInTenant(tenantId, code)`
@@ -165,4 +165,4 @@ static isAvailable(): boolean {
 - `context.extract(name)` -- 调用 `getTenantGlobal(tenantId, name)`
 - `context.dispose()` -- 调用 `destroyTenant(tenantId)`
 
-这允许现有的 TypeScript Engine 代码透明地工作,无论是由 C++ orchestrator 还是纯 TypeScript 沙箱提供者支持。
+这允许现有的 TypeScript Engine 代码透明地工作,无论是由 C++ tenant manager 还是纯 TypeScript 沙箱提供者支持。

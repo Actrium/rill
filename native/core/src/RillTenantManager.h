@@ -12,7 +12,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace rill::orchestrator {
+namespace rill::tenant_manager {
 
 /// Configuration passed from JS when creating a tenant.
 struct TenantConfig {
@@ -23,7 +23,7 @@ struct TenantConfig {
   double timeout = 0; // 0 = no execution timeout
 };
 
-/// Callbacks from Orchestrator → Host JS.
+/// Callbacks from TenantManager → Host JS.
 /// These functions live on the Host VM and must only be called on the JS thread.
 struct HostCallbacks {
   std::shared_ptr<facebook::jsi::Function> onBatch;
@@ -33,17 +33,17 @@ struct HostCallbacks {
   std::shared_ptr<facebook::jsi::Function> onTimer; // Timer callback fired from TenantThread
 };
 
-/// Native C++ orchestrator for multi-tenant sandbox management.
-/// Installed as `__RillOrchestrator` global HostObject in the Host JS runtime.
-class RillOrchestrator : public facebook::jsi::HostObject {
+/// Native C++ tenant_manager for multi-tenant sandbox management.
+/// Installed as `__RillTenantManager` global HostObject in the Host JS runtime.
+class RillTenantManager : public facebook::jsi::HostObject {
 public:
-  /// Install the orchestrator as a global HostObject on the Host runtime.
+  /// Install the tenant_manager as a global HostObject on the Host runtime.
   /// Call after sandbox bindings are installed.
   static void install(facebook::jsi::Runtime& hostRuntime,
                       std::shared_ptr<facebook::react::CallInvoker> callInvoker);
 
   /// Get the singleton instance (available after install).
-  static RillOrchestrator* instance();
+  static RillTenantManager* instance();
 
   // jsi::HostObject interface
   facebook::jsi::Value get(facebook::jsi::Runtime& rt,
@@ -55,7 +55,7 @@ public:
       facebook::jsi::Runtime& rt) override;
 
 private:
-  RillOrchestrator(facebook::jsi::Runtime& hostRuntime,
+  RillTenantManager(facebook::jsi::Runtime& hostRuntime,
                    std::shared_ptr<facebook::react::CallInvoker> callInvoker);
 
   // --- Tenant lifecycle ---
@@ -152,7 +152,7 @@ private:
   std::mutex callbacksMutex_;
   TenantId nextTenantId_ = 1;
 
-  static std::shared_ptr<RillOrchestrator> instance_;
+  static std::shared_ptr<RillTenantManager> instance_;
 };
 
-} // namespace rill::orchestrator
+} // namespace rill::tenant_manager

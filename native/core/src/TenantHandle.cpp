@@ -6,7 +6,7 @@
 // (e.g., QuickJS JSValue vs ObjC JSValue).
 // We interact with them through the jsi::HostObject interface.
 
-namespace rill::orchestrator {
+namespace rill::tenant_manager {
 
 TenantHandle::TenantHandle(TenantId id, std::unique_ptr<TenantContext> context)
     : id_(id), context_(std::move(context)) {
@@ -23,7 +23,7 @@ void TenantHandle::createSandbox(facebook::jsi::Runtime& hostRuntime,
   if (disposed_) return;
 
   // Access the engine-specific global module object.
-  // These are installed by installSandboxBindings() before Orchestrator.
+  // These are installed by installSandboxBindings() before TenantManager.
 #if RILL_SANDBOX_ENGINE == RILL_SANDBOX_ENGINE_QUICKJS
   static constexpr const char* kModuleGlobal = "__QuickJSSandboxJSI";
 #elif RILL_SANDBOX_ENGINE == RILL_SANDBOX_ENGINE_HERMES
@@ -159,4 +159,4 @@ bool TenantHandle::isDisposed() const {
   return disposed_;
 }
 
-} // namespace rill::orchestrator
+} // namespace rill::tenant_manager

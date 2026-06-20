@@ -150,7 +150,7 @@ const engine = new Engine({
 | `'quickjs'` | QuickJS Native |
 | `'wasm-quickjs'` | QuickJS WASM |
 | `'vm'` | Node VM |
-| `'orchestrator'` | Native Orchestrator (多租户模式) |
+| `'tenant-manager'` | Native TenantManager (多租户模式) |
 | `'none'` | 无沙箱 -- 在 host 上下文中执行(仅开发) |
 
 ```ts

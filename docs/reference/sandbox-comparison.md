@@ -2,7 +2,7 @@
 
 Rill 把 JavaScript 执行抽象在一个内部的 `JSEngineProvider` 接口之后。项目内置了 5 种 provider 实现，对应不同运行时环境。
 
-注意：这些 provider **不是公共 API**，也不支持用户注入自定义 provider。对外只提供 `EngineOptions.sandbox` 用于选择/提示沙箱后端；其余细节由引擎内部自动选择（例如 `DefaultProvider` 与 Orchestrator 集成）。
+注意：这些 provider **不是公共 API**，也不支持用户注入自定义 provider。对外只提供 `EngineOptions.sandbox` 用于选择/提示沙箱后端；其余细节由引擎内部自动选择（例如 `DefaultProvider` 与 TenantManager 集成）。
 
 ---
 

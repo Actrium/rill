@@ -1,35 +1,35 @@
-# Orchestrator API Reference
+# TenantManager API Reference
 
-The Orchestrator is a native C++ multi-tenant sandbox manager exposed to the host JS runtime via JSI (JavaScript Interface). It provides tenant lifecycle management, per-tenant resource quotas and permission enforcement, cross-tenant communication via an EventBus, and native thread-level isolation.
+The TenantManager is a native C++ multi-tenant sandbox manager exposed to the host JS runtime via JSI (JavaScript Interface). It provides tenant lifecycle management, per-tenant resource quotas and permission enforcement, cross-tenant communication via an EventBus, and native thread-level isolation.
 
 ---
 
 ## Engine Integration
 
-Rill integrates Orchestrator via `EngineOptions.sandbox = 'orchestrator'` (or auto-detection). Internally, `Engine` delegates sandbox operations to the native `__RillOrchestrator` HostObject through an internal TypeScript adapter (`src/host/orchestrator/orchestrator-provider.ts`), but this adapter is not part of the public API.
+Rill integrates TenantManager via `EngineOptions.sandbox = 'tenant-manager'` (or auto-detection). Internally, `Engine` delegates sandbox operations to the native `__RillTenantManager` HostObject through an internal TypeScript adapter (`src/host/tenant manager/tenant manager-provider.ts`), but this adapter is not part of the public API.
 
 ### Detection
 
-The native Orchestrator is installed as a global on the host JS runtime:
+The native TenantManager is installed as a global on the host JS runtime:
 
 ```typescript
-globalThis.__RillOrchestrator: RillOrchestratorJSI | undefined
+globalThis.__RillTenantManager: RillTenantManagerJSI | undefined
 ```
 
-If `globalThis.__RillOrchestrator` is defined, Orchestrator is available.
+If `globalThis.__RillTenantManager` is defined, TenantManager is available.
 
 ### Usage
 
-The Orchestrator is selected automatically when detected, or explicitly via the `sandbox` option:
+The TenantManager is selected automatically when detected, or explicitly via the `sandbox` option:
 
 ```typescript
-// Auto-detection (used when __RillOrchestrator is available)
+// Auto-detection (used when __RillTenantManager is available)
 const engine = new Engine();
 
 // Explicit selection
 const engine = new Engine({
-  sandbox: 'orchestrator',
-  orchestrator: {
+  sandbox: 'tenant-manager',
+  tenant: {
     appId: 'com.example.miniapp',
     quota: { maxHeapBytes: 16 * 1024 * 1024 },
   },
@@ -38,9 +38,9 @@ const engine = new Engine({
 
 ---
 
-## RillOrchestratorJSI
+## RillTenantManagerJSI
 
-The full JSI interface for the native `__RillOrchestrator` HostObject. All methods are synchronous JSI calls unless otherwise noted.
+The full JSI interface for the native `__RillTenantManager` HostObject. All methods are synchronous JSI calls unless otherwise noted.
 
 ### Tenant Lifecycle
 
@@ -49,7 +49,7 @@ The full JSI interface for the native `__RillOrchestrator` HostObject. All metho
 Create a new isolated tenant with its own JS runtime and dedicated thread.
 
 ```typescript
-createTenant(config: OrchestratorTenantConfig): number
+createTenant(config: TenantConfig): number
 ```
 
 Returns a tenant ID (integer) used for all subsequent operations on this tenant.
@@ -113,10 +113,10 @@ broadcast(name: string, payload?: unknown): void
 Register callbacks for events flowing from native tenants to the host JS runtime.
 
 ```typescript
-setHostCallbacks(callbacks: OrchestratorHostCallbacks): void
+setHostCallbacks(callbacks: TenantManagerHostCallbacks): void
 ```
 
-**OrchestratorHostCallbacks:**
+**TenantManagerHostCallbacks:**
 
 | Callback | Signature | Description |
 |---|---|---|
@@ -133,7 +133,7 @@ setHostCallbacks(callbacks: OrchestratorHostCallbacks): void
 Get detailed information about a specific tenant.
 
 ```typescript
-getTenantInfo(tenantId: number): OrchestratorTenantInfo
+getTenantInfo(tenantId: number): TenantInfo
 ```
 
 #### getMetrics()
@@ -141,7 +141,7 @@ getTenantInfo(tenantId: number): OrchestratorTenantInfo
 Get aggregate metrics across all tenants.
 
 ```typescript
-getMetrics(): OrchestratorMetrics
+getMetrics(): TenantManagerMetrics
 ```
 
 ### Per-Tenant Context
@@ -336,12 +336,12 @@ busCreateChannel(policy: ChannelPolicyConfig): void
 
 ## Type Definitions
 
-### OrchestratorTenantConfig
+### TenantConfig
 
 Configuration for creating a new tenant.
 
 ```typescript
-interface OrchestratorTenantConfig {
+interface TenantConfig {
   /** Unique application identifier for this tenant. */
   appId: string;
 
@@ -368,12 +368,12 @@ interface OrchestratorTenantConfig {
 }
 ```
 
-### OrchestratorTenantInfo
+### TenantInfo
 
 Detailed information about a tenant, returned by `getTenantInfo()`.
 
 ```typescript
-interface OrchestratorTenantInfo {
+interface TenantInfo {
   /** Tenant ID. */
   id: number;
 
@@ -414,12 +414,12 @@ interface OrchestratorTenantInfo {
 }
 ```
 
-### OrchestratorMetrics
+### TenantManagerMetrics
 
 Aggregate metrics across all tenants, returned by `getMetrics()`.
 
 ```typescript
-interface OrchestratorMetrics {
+interface TenantManagerMetrics {
   /** Total number of tenants ever created. */
   totalTenants: number;
 

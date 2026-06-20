@@ -4,9 +4,9 @@
 
 import type { HostModuleImplementationMap, RillContractShape } from '../../contract';
 import type { RuntimeCollectorConfig } from '../../devtools/runtime';
-import type { OrchestratorTenantConfig } from '../orchestrator/types';
 import type { Receiver, ReceiverStats } from '../receiver';
 import type { ComponentMap, ComponentRegistry } from '../registry';
+import type { TenantConfig } from '../tenant-manager/types';
 import type { BridgeValueObject, OperationBatch } from '../types';
 
 /**
@@ -22,14 +22,14 @@ export interface EngineOptions {
    * - `none`: Runs code directly in the host context via `eval`. Insecure, but fast and easy to debug.
    * If not set, the best available provider for the environment is chosen automatically.
    */
-  sandbox?: 'vm' | 'jsc' | 'hermes' | 'quickjs' | 'wasm-quickjs' | 'orchestrator' | 'none';
+  sandbox?: 'vm' | 'jsc' | 'hermes' | 'quickjs' | 'wasm-quickjs' | 'tenant-manager' | 'none';
 
   /**
-   * Orchestrator tenant configuration.
-   * Required when sandbox='orchestrator' or when __RillOrchestrator is auto-detected.
+   * TenantManager tenant configuration.
+   * Required when sandbox='tenant-manager' or when __RillTenantManager is auto-detected.
    * At minimum, `appId` must be provided.
    */
-  orchestrator?: OrchestratorTenantConfig;
+  tenant?: TenantConfig;
 
   /**
    * Execution timeout (milliseconds)

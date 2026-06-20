@@ -6,7 +6,7 @@ The Event Bus is a cross-tenant publish/subscribe system implemented in C++. It 
 
 **File:** `native/core/src/EventBus.h`
 
-The Event Bus is owned by `RillOrchestrator` and shared across all tenants. It provides:
+The Event Bus is owned by `RillTenantManager` and shared across all tenants. It provides:
 
 - **Channel-based routing** -- Events are published to named channels, and only subscribers of that channel receive them
 - **Policy enforcement** -- Each channel can restrict who can publish, how fast, and how large payloads can be
@@ -199,7 +199,7 @@ Statistics use `std::atomic` counters for lock-free read access.
 
 ## JSI Integration
 
-The Event Bus is exposed to TypeScript through JSI methods on `RillOrchestrator`:
+The Event Bus is exposed to TypeScript through JSI methods on `RillTenantManager`:
 
 | JSI Method | Description |
 |---|---|

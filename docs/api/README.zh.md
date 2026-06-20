@@ -42,14 +42,14 @@ Guest SDK 提供了沙箱内部可用的组件、hooks 和平台 API。Guest 代
 
 完整的 Guest API 参考见 [guest.zh.md](./guest.zh.md)。
 
-### Orchestrator（使用 `sandbox: 'orchestrator'` 的 `rill/host`）
+### TenantManager（使用 `sandbox: 'tenant-manager'` 的 `rill/host`）
 
-Orchestrator 是一个通过 JSI 暴露给 Host JS 运行时的原生 C++ 多租户沙箱管理器。它提供了租户生命周期管理、每租户资源配额、权限强制执行和跨租户 EventBus。
+TenantManager 是一个通过 JSI 暴露给 Host JS 运行时的原生 C++ 多租户沙箱管理器。它提供了租户生命周期管理、每租户资源配额、权限强制执行和跨租户 EventBus。
 
-- **注意：**不需要导入 provider。`Engine` 会自动检测 `globalThis.__RillOrchestrator` 并在内部委托给 Orchestrator；或者你也可以通过 `EngineOptions.sandbox = 'orchestrator'` 强制启用。
-- **RillOrchestratorJSI** -- 用于租户管理、代码加载、通信、指标和 EventBus 操作的完整 JSI 接口。
+- **注意：**不需要导入 provider。`Engine` 会自动检测 `globalThis.__RillTenantManager` 并在内部委托给 TenantManager；或者你也可以通过 `EngineOptions.sandbox = 'tenant-manager'` 强制启用。
+- **RillTenantManagerJSI** -- 用于租户管理、代码加载、通信、指标和 EventBus 操作的完整 JSI 接口。
 
-完整的 Orchestrator API 参考见 [orchestrator.zh.md](./orchestrator.zh.md)。
+完整的 TenantManager API 参考见 [tenant manager.zh.md](./tenant manager.zh.md)。
 
 ### 沙箱提供者（内部）
 
@@ -64,7 +64,7 @@ Orchestrator 是一个通过 JSI 暴露给 Host JS 运行时的原生 C++ 多租
 | `hermes` | React Native | JSI 原生 | 通过 JSI 的 Hermes 沙箱 |
 | `quickjs` | 跨平台 | JSI 原生 | 通过 JSI 的 QuickJS |
 | `wasm-quickjs` | Web / React Native | WASM | 编译为 WebAssembly 的 QuickJS |
-| `orchestrator` | Apple（iOS/macOS） | 原生 C++ | 带专用线程的多租户 |
+| `tenant manager` | Apple（iOS/macOS） | 原生 C++ | 带专用线程的多租户 |
 | `none` | 任意 | 无 | 在 Host 上下文中直接 eval（不安全） |
 
 ### DevTools（`rill/devtools`）

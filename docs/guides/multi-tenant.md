@@ -1,6 +1,6 @@
-# Multi-Tenant Mode (Orchestrator)
+# Multi-Tenant Mode (TenantManager)
 
-The Orchestrator is a C++ native module that manages multiple isolated sandboxes within a single application. Each sandbox is called a **tenant** and runs its own guest bundle on a dedicated thread with independent resource quotas, timers, and lifecycle management.
+The TenantManager is a C++ native module that manages multiple isolated sandboxes within a single application. Each sandbox is called a **tenant** and runs its own guest bundle on a dedicated thread with independent resource quotas, timers, and lifecycle management.
 
 ---
 
@@ -8,7 +8,7 @@ The Orchestrator is a C++ native module that manages multiple isolated sandboxes
 
 Multi-tenant mode is designed for applications that need to run several independent guest bundles simultaneously -- for example, rendering multiple dynamic UI cards on the same screen, each authored by a different team or loaded from a different source.
 
-The Orchestrator provides:
+The TenantManager provides:
 
 - Per-tenant lifecycle management (create, load, pause, resume, destroy).
 - Per-tenant resource quotas (heap size, timer count, callback count).
@@ -20,10 +20,10 @@ The Orchestrator provides:
 
 ## Creating Tenants
 
-A tenant is created by passing a configuration object to the Orchestrator:
+A tenant is created by passing a configuration object to the TenantManager:
 
 ```ts
-interface OrchestratorTenantConfig {
+interface TenantConfig {
   appId: string;          // Unique identifier for this tenant
   debug?: boolean;        // Enable debug logging (default false)
   timeout?: number;       // Execution timeout in ms (default 5000)
@@ -37,7 +37,7 @@ interface OrchestratorTenantConfig {
 ```
 
 ```ts
-const tenantId = orchestrator.createTenant({
+const tenantId = tenant manager.createTenant({
   appId: 'promo-card',
   timeout: 3000,
   quota: {
@@ -79,16 +79,16 @@ Created --> Loading --> Running --> Paused --> Running --> Destroying --> Destro
 
 ```ts
 // Load and start a bundle
-await orchestrator.loadBundle(tenantId, bundleSource);
+await tenant manager.loadBundle(tenantId, bundleSource);
 
 // Pause (e.g., when the screen is backgrounded)
-orchestrator.pauseTenant(tenantId);
+tenant manager.pauseTenant(tenantId);
 
 // Resume
-orchestrator.resumeTenant(tenantId);
+tenant manager.resumeTenant(tenantId);
 
 // Tear down
-orchestrator.destroyTenant(tenantId);
+tenant manager.destroyTenant(tenantId);
 ```
 
 ---
@@ -108,16 +108,16 @@ Quotas prevent any single tenant from consuming disproportionate resources.
 ### Monitoring
 
 ```ts
-const info = orchestrator.getTenantInfo(tenantId);
+const info = tenant manager.getTenantInfo(tenantId);
 // { appId, state, heapUsed, timerCount, callbackCount, ... }
 
-orchestrator.isOverQuota(tenantId);   // true if any limit exceeded
-orchestrator.isNearQuota(tenantId);   // true if any limit > 80%
+tenant manager.isOverQuota(tenantId);   // true if any limit exceeded
+tenant manager.isNearQuota(tenantId);   // true if any limit > 80%
 ```
 
 ### Violation Tracking
 
-The Orchestrator records quota and policy violations per tenant:
+The TenantManager records quota and policy violations per tenant:
 
 | Violation Type | Trigger |
 |---|---|
@@ -137,19 +137,19 @@ Each tenant has its own native **TimerWheel** running on the tenant's dedicated 
 
 ```ts
 // One-shot timer
-orchestrator.scheduleTenantTimeout(tenantId, callback, delayMs);
+tenant manager.scheduleTenantTimeout(tenantId, callback, delayMs);
 
 // Repeating timer
-orchestrator.scheduleTenantInterval(tenantId, callback, intervalMs);
+tenant manager.scheduleTenantInterval(tenantId, callback, intervalMs);
 
 // Cancel a specific timer
-orchestrator.cancelTenantTimer(tenantId, timerId);
+tenant manager.cancelTenantTimer(tenantId, timerId);
 
 // Pause all timers for a tenant (called automatically on pauseTenant)
-orchestrator.pauseTenantTimers(tenantId);
+tenant manager.pauseTenantTimers(tenantId);
 
 // Resume all timers (called automatically on resumeTenant)
-orchestrator.resumeTenantTimers(tenantId);
+tenant manager.resumeTenantTimers(tenantId);
 ```
 
 When a tenant is paused, its timers freeze. Elapsed time during the pause does not count toward pending timeouts.
@@ -164,16 +164,16 @@ The EventBus allows tenants (and the host) to exchange messages through named ch
 
 ```ts
 // Publish to a specific channel (delivered to all subscribers)
-orchestrator.busPublish(channel, payload);
+tenant manager.busPublish(channel, payload);
 
 // Broadcast to all tenants on all channels
-orchestrator.busBroadcast(payload);
+tenant manager.busBroadcast(payload);
 
 // Send to a single tenant
-orchestrator.busUnicast(tenantId, channel, payload);
+tenant manager.busUnicast(tenantId, channel, payload);
 
 // Send to a set of tenants
-orchestrator.busMulticast([tenantIdA, tenantIdB], channel, payload);
+tenant manager.busMulticast([tenantIdA, tenantIdB], channel, payload);
 ```
 
 ### Channel Policies
@@ -202,14 +202,14 @@ Each channel can be configured with a policy object:
 
 ## Metrics
 
-The Orchestrator exposes aggregated metrics for monitoring:
+The TenantManager exposes aggregated metrics for monitoring:
 
 ```ts
-const metrics = orchestrator.getMetrics();
+const metrics = tenant manager.getMetrics();
 ```
 
 ```ts
-interface OrchestratorMetrics {
+interface TenantManagerMetrics {
   totalTenants: number;     // Total tenants created (including destroyed)
   registryTotal: number;    // Current tenants in registry
   registryActive: number;   // Tenants in Running or Paused state

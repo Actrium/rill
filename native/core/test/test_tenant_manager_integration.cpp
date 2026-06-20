@@ -7,7 +7,7 @@
 #include <thread>
 #include <vector>
 
-using namespace rill::orchestrator;
+using namespace rill::tenant_manager;
 using namespace rill::test;
 
 namespace {
@@ -27,8 +27,8 @@ bool waitFor(Pred pred, int maxMs = 3000) {
   return true;
 }
 
-TestSuite createOrchestratorIntegrationTests() {
-  TestSuite suite{"OrchestratorIntegration (ThreadPool+Timer)", {}};
+TestSuite createTenantManagerIntegrationTests() {
+  TestSuite suite{"TenantManagerIntegration (ThreadPool+Timer)", {}};
 
   // --- Multi-tenant timer isolation ---
 
@@ -257,7 +257,7 @@ TestSuite createOrchestratorIntegrationTests() {
     TenantId receivedTenantId = 0;
     std::mutex resultMutex;
 
-    // Schedule a timeout that simulates the Orchestrator's onTimerFired
+    // Schedule a timeout that simulates the TenantManager's onTimerFired
     pool.getThread(1)->scheduleTimeout(
         [&mainThreadNotified, &receivedCallbackId, &receivedTenantId, &resultMutex]() {
           // This runs on TenantThread — simulate CallInvoker dispatch
@@ -390,6 +390,6 @@ TestSuite createOrchestratorIntegrationTests() {
 
 } // namespace
 
-void registerOrchestratorIntegrationTests() {
-  TestRunner::instance().addSuite(createOrchestratorIntegrationTests());
+void registerTenantManagerIntegrationTests() {
+  TestRunner::instance().addSuite(createTenantManagerIntegrationTests());
 }

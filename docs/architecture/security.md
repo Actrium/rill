@@ -6,7 +6,7 @@ The security subsystem enforces network and filesystem restrictions on a per-ten
 
 **File:** `native/core/src/security/SecurityManager.h`
 
-`SecurityManager` is owned by `RillOrchestrator` and manages the lifecycle of per-tenant security contexts.
+`SecurityManager` is owned by `RillTenantManager` and manages the lifecycle of per-tenant security contexts.
 
 ### Responsibilities
 

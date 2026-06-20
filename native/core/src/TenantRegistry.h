@@ -5,7 +5,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace rill::orchestrator {
+namespace rill::tenant_manager {
 
 class TenantRegistry {
  public:
@@ -19,7 +19,7 @@ class TenantRegistry {
                           APIPermission apis = {},
                           ResourceQuota quota = {});
 
-  // Register a tenant with a caller-provided id (used by Orchestrator).
+  // Register a tenant with a caller-provided id (used by TenantManager).
   // Throws if the id already exists.
   void registerTenantWithId(TenantId id,
                             TenantIdentity identity,
@@ -53,4 +53,4 @@ class TenantRegistry {
   uint32_t nextId_ = 1;
 };
 
-}  // namespace rill::orchestrator
+}  // namespace rill::tenant_manager

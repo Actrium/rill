@@ -2,7 +2,7 @@
 #include <algorithm>
 #include <chrono>
 
-namespace rill::orchestrator {
+namespace rill::tenant_manager {
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -438,4 +438,4 @@ EventBus::Stats EventBus::getStats() const {
   return s;
 }
 
-} // namespace rill::orchestrator
+} // namespace rill::tenant_manager

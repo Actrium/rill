@@ -1,7 +1,7 @@
 /**
- * TypeScript type definitions for the native __RillOrchestrator HostObject.
+ * TypeScript type definitions for the native __RillTenantManager HostObject.
  *
- * This HostObject is installed by the C++ RillOrchestrator on the Host JS runtime
+ * This HostObject is installed by the C++ RillTenantManager on the Host JS runtime
  * via JSI. It provides multi-tenant sandbox lifecycle management.
  */
 
@@ -10,7 +10,7 @@ import type { ReviewedUnknown } from '../types';
 /**
  * Tenant configuration passed to createTenant.
  */
-export interface OrchestratorTenantConfig {
+export interface TenantConfig {
   appId: string;
   debug?: boolean;
   timeout?: number;
@@ -29,7 +29,7 @@ export interface OrchestratorTenantConfig {
 /**
  * Tenant info returned by getTenantInfo.
  */
-export interface OrchestratorTenantInfo {
+export interface TenantInfo {
   id: number;
   appId: string;
   state: number;
@@ -54,7 +54,7 @@ export interface OrchestratorTenantInfo {
 /**
  * Metrics returned by getMetrics.
  */
-export interface OrchestratorMetrics {
+export interface TenantManagerMetrics {
   totalTenants: number;
   registryTotal: number;
   registryActive: number;
@@ -67,7 +67,7 @@ export interface OrchestratorMetrics {
 /**
  * Host callbacks from native → Host JS.
  */
-export interface OrchestratorHostCallbacks {
+export interface TenantManagerHostCallbacks {
   onBatch?: (tenantId: number, batch: ReviewedUnknown) => void;
   onEvent?: (tenantId: number, name: string, payload: ReviewedUnknown) => void;
   onError?: (tenantId: number, message: string) => void;
@@ -76,12 +76,12 @@ export interface OrchestratorHostCallbacks {
 }
 
 /**
- * The native __RillOrchestrator HostObject interface.
- * Installed as `globalThis.__RillOrchestrator` when the native module is loaded.
+ * The native __RillTenantManager HostObject interface.
+ * Installed as `globalThis.__RillTenantManager` when the native module is loaded.
  */
-export interface RillOrchestratorJSI {
+export interface RillTenantManagerJSI {
   // --- Tenant lifecycle ---
-  createTenant(config: OrchestratorTenantConfig): number;
+  createTenant(config: TenantConfig): number;
   destroyTenant(tenantId: number): void;
   pauseTenant(tenantId: number): void;
   resumeTenant(tenantId: number): void;
@@ -94,11 +94,11 @@ export interface RillOrchestratorJSI {
   broadcast(name: string, payload?: ReviewedUnknown): void;
 
   // --- Host callbacks ---
-  setHostCallbacks(callbacks: OrchestratorHostCallbacks): void;
+  setHostCallbacks(callbacks: TenantManagerHostCallbacks): void;
 
   // --- Metrics ---
-  getTenantInfo(tenantId: number): OrchestratorTenantInfo;
-  getMetrics(): OrchestratorMetrics;
+  getTenantInfo(tenantId: number): TenantInfo;
+  getMetrics(): TenantManagerMetrics;
 
   // --- Per-tenant context operations (Engine delegation) ---
   evalInTenant(tenantId: number, code: string): ReviewedUnknown;
@@ -178,9 +178,9 @@ export interface EventBusStats {
 }
 
 /**
- * Augment globalThis to include __RillOrchestrator.
+ * Augment globalThis to include __RillTenantManager.
  */
 declare global {
   // eslint-disable-next-line no-var
-  var __RillOrchestrator: RillOrchestratorJSI | undefined;
+  var __RillTenantManager: RillTenantManagerJSI | undefined;
 }

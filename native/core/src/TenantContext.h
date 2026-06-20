@@ -5,7 +5,7 @@
 #include <string>
 #include <unordered_set>
 
-namespace rill::orchestrator {
+namespace rill::tenant_manager {
 
 using TenantId = uint32_t;
 
@@ -102,4 +102,4 @@ struct TenantContext {
   bool isNearQuota(float threshold = 0.8f) const;
 };
 
-}  // namespace rill::orchestrator
+}  // namespace rill::tenant_manager

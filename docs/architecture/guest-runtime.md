@@ -137,7 +137,7 @@ src/guest/
   build/
     bundle.ts                   Pre-built IIFE (GUEST_BUNDLE_CODE)
   runtime/
-    init.ts                     Guest initialization orchestrator
+    init.ts                     Guest initialization tenant manager
     globals-setup.ts            Console and global shim construction
     react-global.ts             Inject React/JSX runtimes (real React)
     reconciler/

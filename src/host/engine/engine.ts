@@ -34,12 +34,12 @@ import type {
 } from '../../shared';
 import { CallbackRegistryImpl as CallbackRegistry, HostMsg } from '../../shared';
 import { Bridge } from '../../shared/bridge/bridge';
-import { OrchestratorProvider } from '../orchestrator/orchestrator-provider';
 import { Receiver } from '../receiver';
 import type { ComponentMap } from '../registry';
 import { ComponentRegistry } from '../registry';
 import type { JSEngineProvider, JSEngineRuntime, SandboxScope } from '../sandbox';
 import type { RillReconcilerGlobal } from '../sandbox/globals';
+import { TenantManagerProvider } from '../tenant-manager/tenant-manager-provider';
 import type { HostMessage, OperationBatch, ReviewedUnknown } from '../types';
 import { DiagnosticsCollector } from './diagnostics-collector';
 import { createCommonJSGlobals, createReactNativeShim, formatConsoleArgs } from './sandbox-helpers';
@@ -203,7 +203,7 @@ export class Engine implements IEngine {
       receiverMaxBatchSize: options.receiverMaxBatchSize ?? 5000,
     };
 
-    // Generate unique engine ID early (needed by OrchestratorProvider default appId)
+    // Generate unique engine ID early (needed by TenantManagerProvider default appId)
     const counter = ++engineIdCounter;
     const timestamp = Date.now().toString(36);
     const random = Math.random().toString(36).substring(2, 6);
@@ -216,15 +216,15 @@ export class Engine implements IEngine {
     this.callbackRegistry = new CallbackRegistry();
 
     // Initialize JS engine provider
-    // Priority: Orchestrator (explicit or auto-detect) > DefaultProvider
+    // Priority: TenantManager (explicit or auto-detect) > DefaultProvider
     // Note: custom provider injection is intentionally not part of the public API.
-    const useOrchestrator =
-      options.sandbox === 'orchestrator' ||
-      (!options.sandbox && OrchestratorProvider.isAvailable());
+    const useTenantManager =
+      options.sandbox === 'tenant-manager' ||
+      (!options.sandbox && TenantManagerProvider.isAvailable());
 
-    if (useOrchestrator && OrchestratorProvider.isAvailable()) {
-      const tenantConfig = options.orchestrator ?? { appId: this.id };
-      this.provider = new OrchestratorProvider({
+    if (useTenantManager && TenantManagerProvider.isAvailable()) {
+      const tenantConfig = options.tenant ?? { appId: this.id };
+      this.provider = new TenantManagerProvider({
         tenantConfig: {
           ...tenantConfig,
           debug: tenantConfig.debug ?? this.options.debug,
@@ -233,7 +233,7 @@ export class Engine implements IEngine {
       });
       if (this.options.debug) {
         this.options.logger.log(
-          `[rill:${this.id}] Using OrchestratorProvider (appId: ${tenantConfig.appId})`
+          `[rill:${this.id}] Using TenantManagerProvider (appId: ${tenantConfig.appId})`
         );
       }
     } else {
@@ -1146,7 +1146,7 @@ export class Engine implements IEngine {
     });
 
     // Guest-side render tracking + scheduleRender
-    // Must be Guest code (not a Host closure) to avoid Orchestrator re-entrancy deadlocks.
+    // Must be Guest code (not a Host closure) to avoid TenantManager re-entrancy deadlocks.
     this.evalCode(`
       (function() {
         try {
@@ -1260,10 +1260,10 @@ export class Engine implements IEngine {
 
     // __rill_handleMessage: Handle messages from host
     // IMPORTANT: Defined as GUEST code (not a host closure) to avoid re-entrant
-    // Orchestrator mutex calls. When evalInTenant holds the mutex and the evaluated
+    // TenantManager mutex calls. When evalInTenant holds the mutex and the evaluated
     // code calls a host closure that uses extract/inject, a deadlock occurs
     // with non-recursive mutexes. Guest code can access __rill directly from its
-    // own global scope without going through the Orchestrator's extract.
+    // own global scope without going through the TenantManager's extract.
     this.evalCode(`
       globalThis.__rill_handleMessage = function(message) {
         try {

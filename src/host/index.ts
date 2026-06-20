@@ -9,7 +9,7 @@ export type { EngineOptions } from './engine';
 // Core exports
 export { Engine } from './engine';
 
-// Sandbox provider selection is internal and automatic (DefaultProvider / OrchestratorProvider).
+// Sandbox provider selection is internal and automatic (DefaultProvider / TenantManagerProvider).
 
 // EngineView hook for custom EngineView implementations
 export type { LoadingState, UseEngineViewOptions, UseEngineViewResult } from './use-engine-view';

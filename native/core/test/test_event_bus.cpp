@@ -3,7 +3,7 @@
 #include <chrono>
 #include <thread>
 
-using namespace rill::orchestrator;
+using namespace rill::tenant_manager;
 using namespace rill::test;
 
 namespace {

@@ -1,6 +1,6 @@
 #include "TenantContext.h"
 
-namespace rill::orchestrator {
+namespace rill::tenant_manager {
 
 bool TenantContext::canUseComponent(const std::string& name) const {
   return components.allowAll ||
@@ -67,4 +67,4 @@ bool TenantContext::isNearQuota(float threshold) const {
   return false;
 }
 
-}  // namespace rill::orchestrator
+}  // namespace rill::tenant_manager

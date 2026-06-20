@@ -2,7 +2,7 @@
 # Apple (macOS) build gate for RillSandboxNative.
 #
 # Goal:
-#   - Ensure Objective-C++ native code (including native/core/src/RillOrchestrator.mm)
+#   - Ensure Objective-C++ native code (including native/core/src/RillTenantManager.mm)
 #     compiles in a real React Native build.
 #
 # How it works:

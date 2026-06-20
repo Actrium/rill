@@ -5,7 +5,7 @@
 #include <optional>
 #include <vector>
 
-namespace rill::orchestrator {
+namespace rill::tenant_manager {
 
 using TimerId = uint32_t;
 
@@ -42,4 +42,4 @@ private:
   double currentTimeMs() const;
 };
 
-} // namespace rill::orchestrator
+} // namespace rill::tenant_manager

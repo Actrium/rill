@@ -8,7 +8,7 @@ This guide covers how to integrate the Rill native sandbox module into an iOS or
 
 Rill's native layer depends on **JSI** and **TurboModules**:
 
-- **JSI (JavaScript Interface)** -- The C++ interface that allows JavaScript and native code to call each other directly, without JSON serialization. Rill uses JSI to install the `RillOrchestrator` HostObject and sandbox engine bindings into the RN JS runtime.
+- **JSI (JavaScript Interface)** -- The C++ interface that allows JavaScript and native code to call each other directly, without JSON serialization. Rill uses JSI to install the `RillTenantManager` HostObject and sandbox engine bindings into the RN JS runtime.
 - **TurboModules** -- The native module system built on JSI. Rill exposes `RillSandboxNativeTurboModule` so the host RN app can create and manage sandbox instances (the second JS runtime) from JavaScript.
 
 Rill does **not** depend on **Fabric** (the new rendering system). Guest UI is rendered through Rill's own reconciler-to-host bridge, not through Fabric's C++ renderer.
