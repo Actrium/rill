@@ -65,7 +65,7 @@ cp -v quickjs_sandbox.js "${OUTPUT_DIR}/quickjs-sandbox.js"
 cp -v quickjs_sandbox.wasm "${OUTPUT_DIR}/quickjs-sandbox.wasm"
 
 # Align runtime file naming with repo conventions (kebab-case)
-perl -pi -e 's/quickjs_sandbox\\.wasm/quickjs-sandbox.wasm/g' "${OUTPUT_DIR}/quickjs-sandbox.js"
+perl -pi -e 's/quickjs_sandbox\.wasm/quickjs-sandbox.wasm/g' "${OUTPUT_DIR}/quickjs-sandbox.js"
 
 # Report size
 echo ""

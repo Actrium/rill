@@ -9,6 +9,8 @@
  * - SandboxScope: A single, isolated JS execution environment.
  */
 
+import type { HostModuleDispatchTable, RillContractShape } from '../../../contract';
+
 /**
  * Available sandbox types for DefaultProvider.
  *
@@ -114,6 +116,32 @@ export interface SandboxScope {
    * Use for large ArrayBuffer/TypedArray transfers to avoid JSON overhead.
    */
   binary?: BinaryTransferCapabilities;
+
+  /**
+   * Install dispatch-wrapped `host:*` modules so the Guest's
+   * `globalThis.__rill.hostModules` resolves to them.
+   *
+   * Optional: providers that share the host realm (vm) or support host functions
+   * with return values (native JSI) don't need it — the Engine instead injects the
+   * dispatch functions directly. Providers with an isolated realm and no synchronous
+   * return channel (WASM) implement this to bridge calls via a request/response
+   * protocol (rpc results and subscription events are marshalled as JSON, with the
+   * boundary schemas enforced host-side inside the dispatch table).
+   *
+   * `contract` supplies each capability's kind (rpc vs subscription) so the guest
+   * receives the right stub; `table` supplies the boundary-enforcing implementations.
+   */
+  installHostModules?: (table: HostModuleDispatchTable, contract: RillContractShape) => void;
+
+  /**
+   * Drive any in-flight `host:*` calls to completion.
+   *
+   * Only meaningful for providers that bridge host-module calls asynchronously
+   * (see {@link SandboxScope.installHostModules}). In a running app the host event
+   * loop settles these naturally; this method lets a synchronous/deterministic
+   * driver (tests, teardown) await them. No-op/absent for realm-sharing providers.
+   */
+  flushHostModuleCalls?: () => Promise<void>;
 }
 
 /**
