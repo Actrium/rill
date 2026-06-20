@@ -63,7 +63,17 @@ if(BUILD_WASM)
         ${WASM_BINDINGS_SOURCES}
     )
 
-    target_compile_definitions(quickjs_sandbox_wasm PRIVATE ${QUICKJS_DEFINITIONS})
+    # Newer Emscripten only defines __EMSCRIPTEN__, but vendored QuickJS guards its
+    # Emscripten code paths (e.g. js_def_malloc_usable_size) on the legacy EMSCRIPTEN
+    # macro. Define it so those intended paths are taken instead of the glibc fallback.
+    target_compile_definitions(quickjs_sandbox_wasm PRIVATE ${QUICKJS_DEFINITIONS} EMSCRIPTEN)
+
+    # Vendored QuickJS predates clang 16, which promotes incompatible function
+    # pointer types from a warning to an error. Keep it a warning so the bundled
+    # engine still builds with modern Emscripten/clang.
+    target_compile_options(quickjs_sandbox_wasm PRIVATE
+        -Wno-error=incompatible-function-pointer-types
+    )
 
     target_include_directories(quickjs_sandbox_wasm PRIVATE
         ${SRC_DIR}

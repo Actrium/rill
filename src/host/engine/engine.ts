@@ -17,7 +17,11 @@ declare global {
   var __rill_handleMessage: ((message: import('../types').HostMessage) => void) | undefined;
 }
 
-import { createHostModuleDispatch, type HostModuleDispatchTable } from '../../contract';
+import {
+  createHostModuleDispatch,
+  type HostModuleDispatchTable,
+  type RillContractShape,
+} from '../../contract';
 import type { RuntimeCollector } from '../../devtools/index';
 import { createRuntimeCollector } from '../../devtools/index';
 import { GUEST_BUNDLE_CODE } from '../../guest/build/bundle';
@@ -119,6 +123,12 @@ export class Engine implements IEngine {
    * injected into the sandbox during injectRuntimeAPI().
    */
   private _hostModuleDispatch: HostModuleDispatchTable | null = null;
+
+  /**
+   * Capability contract backing {@link Engine._hostModuleDispatch}. Retained so
+   * isolated-realm providers (WASM) can read each capability's kind when bridging.
+   */
+  private _hostModuleContract: RillContractShape | null = null;
 
   // Pause state
   private _isPaused = false;
@@ -307,6 +317,7 @@ export class Engine implements IEngine {
           '[rill] EngineOptions.hostModules requires EngineOptions.contract so boundary schemas can be enforced.'
         );
       }
+      this._hostModuleContract = options.contract;
       this._hostModuleDispatch = createHostModuleDispatch(options.contract, options.hostModules, {
         onError: (error, ctx) => {
           this.options.logger.error(
@@ -1360,6 +1371,20 @@ export class Engine implements IEngine {
    */
   private injectHostModules(): void {
     if (!this.context || !this._hostModuleDispatch) return;
+
+    // Provider-specific transport: isolated-realm providers (WASM) can't receive
+    // host function references and bridge calls via a request/response protocol.
+    // They opt in via installHostModules; realm-sharing / JSI providers fall through
+    // to direct injection below.
+    if (typeof this.context.installHostModules === 'function' && this._hostModuleContract) {
+      this.context.installHostModules(this._hostModuleDispatch, this._hostModuleContract);
+      if (this.options.debug) {
+        this.options.logger.log(
+          `[rill:${this.id}] injectHostModules: installed via provider bridge (${Object.keys(this._hostModuleDispatch).join(', ')})`
+        );
+      }
+      return;
+    }
 
     const assignments: string[] = [];
     let counter = 0;

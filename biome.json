@@ -20,7 +20,8 @@
         "tests/**",
         "examples/**",
         "src/guest/build/**",
-        "src/host/engine/sandbox-runtime-bundle.ts"
+        "src/host/engine/sandbox-runtime-bundle.ts",
+        "src/host/sandbox/wasm/**"
       ],
       "linter": {
         "enabled": false
