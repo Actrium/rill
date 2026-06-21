@@ -659,20 +659,38 @@ export class Engine implements IEngine {
       callbackRegistry: this.callbackRegistry,
       // Guest callback invoker - routes Guest callbacks to sandbox
       guestInvoker: (fnId, args) => {
+        // Fast path: node-vm / native JSI providers return live function references from
+        // extract(), so the guest's invokeCallback can be called directly.
         if (/^fn_\d+$/.test(fnId)) {
           const rillNs = this.context?.extract('__rill') as Record<string, unknown> | undefined;
           const invokeCallback = rillNs?.invokeCallback as
             | ((fnId: string, args: ReviewedUnknown[]) => ReviewedUnknown)
             | undefined;
-          if (invokeCallback) {
+          if (typeof invokeCallback === 'function') {
             return invokeCallback(fnId, args);
           }
         }
         const reconciler = this.context?.extract('RillReconciler') as
           | { invokeCallback?: (fnId: string, args: ReviewedUnknown[]) => ReviewedUnknown }
           | undefined;
-        if (reconciler?.invokeCallback) {
+        if (typeof reconciler?.invokeCallback === 'function') {
           return reconciler.invokeCallback(fnId, args);
+        }
+        // Fallback: the WASM provider's extract() goes through a JSON bridge that drops
+        // function references, so invokeCallback can't be pulled across — invoke the guest
+        // callback in-realm via eval instead (the same mechanism the CALL_FUNCTION host
+        // message uses). This is what makes function-prop callbacks (e.g. onPress -> setState)
+        // work on web/WASM. Works on every provider.
+        if (this.context) {
+          this.context.inject('__rill_guest_invoke_args', (args ?? []) as ReviewedUnknown);
+          const fnIdLit = JSON.stringify(fnId);
+          const result = this.context.eval(
+            `(function(){var a=globalThis.__rill_guest_invoke_args;delete globalThis.__rill_guest_invoke_args;` +
+              `var R=globalThis.__rill;if(R&&typeof R.invokeCallback==='function')return R.invokeCallback(${fnIdLit},a);` +
+              `var RC=globalThis.RillReconciler;if(RC&&typeof RC.invokeCallback==='function')return RC.invokeCallback(${fnIdLit},a);` +
+              `return undefined;})()`
+          );
+          return result as ReviewedUnknown;
         }
         logger.warn(`[rill:${this.id}] No invoker found for ${fnId}`);
         return undefined;
