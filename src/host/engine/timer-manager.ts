@@ -63,11 +63,16 @@ export class TimerManager {
     }) as typeof setTimeout;
 
     const fallbackClearTimeout = (() => {}) as typeof clearTimeout;
+    // Bind to globalThis: in the browser, window.setTimeout/clearTimeout throw
+    // "Illegal invocation" when called with any other `this` (a detached reference).
+    // Node/Bun don't care, which is why this only surfaces on the WASM/web path.
     this.nativeSetTimeout =
-      typeof globalThis.setTimeout === 'function' ? globalThis.setTimeout : fallbackSetTimeout;
+      typeof globalThis.setTimeout === 'function'
+        ? globalThis.setTimeout.bind(globalThis)
+        : fallbackSetTimeout;
     this.nativeClearTimeout =
       typeof globalThis.clearTimeout === 'function'
-        ? globalThis.clearTimeout
+        ? globalThis.clearTimeout.bind(globalThis)
         : fallbackClearTimeout;
     this.nativeQueueMicrotask =
       typeof globalThis.queueMicrotask === 'function'

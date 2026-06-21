@@ -85,3 +85,6 @@ src/guest/build/guest-bundle.merged.ts
 # Benchmark outputs
 benchmark-*.txt
 packages/*/benchmark-*.txt
+
+# Engine-in-browser e2e: WASM copied for /wasm/ serving (build artifact)
+tests/wasm-sandbox/wasm/

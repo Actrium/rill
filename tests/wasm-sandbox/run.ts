@@ -12,7 +12,12 @@ import net from 'net';
 const ROOT = join(import.meta.dir, '../..');
 const E2E_DIR = import.meta.dir;
 const DIST_DIR = join(E2E_DIR, 'dist');
+// Served at /wasm/ — the bundled Engine's WASM provider dynamically imports
+// ../wasm/quickjs-sandbox.js relative to /dist/engine-harness.js (i.e. /wasm/...).
+const WASM_SERVE_DIR = join(E2E_DIR, 'wasm');
 const WASM_SRC = join(ROOT, 'src/host/sandbox/wasm');
+const ENGINE_HARNESS_ENTRY = join(E2E_DIR, 'engine-harness.ts');
+const ENGINE_HARNESS_OUT = join(DIST_DIR, 'engine-harness.js');
 const PLAYWRIGHT_CLI = join(ROOT, 'node_modules/playwright/cli.js');
 
 function findNodeCommand(): string | undefined {
@@ -45,24 +50,49 @@ async function copyWASMFiles() {
     mkdirSync(DIST_DIR, { recursive: true });
   }
 
+  if (!existsSync(WASM_SERVE_DIR)) {
+    mkdirSync(WASM_SERVE_DIR, { recursive: true });
+  }
+
   const files = ['quickjs-sandbox.js', 'quickjs-sandbox.wasm'];
   for (const file of files) {
     const src = join(WASM_SRC, file);
-    const dest = join(DIST_DIR, file);
-    if (existsSync(src)) {
-      copyFileSync(src, dest);
-      console.log(`  ${file} -> dist/`);
-    } else {
+    if (!existsSync(src)) {
       console.error(`  Missing: ${src}`);
       console.error('  Run: cd native/quickjs && ./build-wasm.sh release');
       process.exit(1);
     }
+    // dist/ for the bare-harness tests (imported as /dist/quickjs-sandbox.js);
+    // wasm/ for the engine harness (dynamic import resolves to /wasm/quickjs-sandbox.js).
+    copyFileSync(src, join(DIST_DIR, file));
+    copyFileSync(src, join(WASM_SERVE_DIR, file));
+    console.log(`  ${file} -> dist/, wasm/`);
   }
+}
+
+// Bundle the real Engine for the browser (engine-in-browser e2e). The dynamic import of
+// the WASM loader inside the provider is left as a runtime import (resolved against the
+// served bundle URL), so the .wasm is fetched from /wasm/ — not inlined into the bundle.
+function buildEngineHarness() {
+  console.log('Building engine harness bundle...');
+  const result = spawnSync(
+    process.execPath,
+    ['build', ENGINE_HARNESS_ENTRY, '--target=browser', '--outfile', ENGINE_HARNESS_OUT],
+    { stdio: 'inherit', cwd: ROOT }
+  );
+  if (result.status !== 0) {
+    console.error('  Failed to bundle engine-harness.ts');
+    process.exit(result.status ?? 1);
+  }
+  console.log('  engine-harness.js -> dist/');
 }
 
 async function main() {
   // Copy WASM files
   await copyWASMFiles();
+
+  // Bundle the Engine for the engine-in-browser e2e
+  buildEngineHarness();
 
   // Pick a free port (Bun.serve({ port: 0 }) can fail in some environments)
   const port = await new Promise<number>((resolve, reject) => {
