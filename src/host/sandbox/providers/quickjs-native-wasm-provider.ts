@@ -151,6 +151,14 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
         // __sendToHost (see installHostModules).
         let onHostModuleEvent: ((event: string, data: string) => void) | null = null;
 
+        // By-name host->guest function bridge (issue #8). The isolated WASM realm
+        // can't receive a host function reference, so each function injected by name
+        // (render: __rill_sendBatch; events: __rill_emitEvent; config: __rill_getConfig;
+        // etc.) is registered here and reached via __sendToHost -> onHostFnCall.
+        let onHostFnCall: ((name: string, data: string) => void) | null = null;
+        // Reason: injected host hooks accept/return arbitrary serializable values.
+        const injectedHostFns = new Map<string, (...args: ReviewedUnknown[]) => ReviewedUnknown>();
+
         // Install host callback for communication
         const hostCallback = (eventPtr: number, dataPtr: number) => {
           const event = module.UTF8ToString(eventPtr);
@@ -163,6 +171,12 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
           // host:* request/response bridge (issue #5)
           if (event.indexOf('__rill_host_') === 0) {
             onHostModuleEvent?.(event, data);
+            return;
+          }
+
+          // by-name host function bridge (issue #8)
+          if (event.indexOf('__rill_fn:') === 0) {
+            onHostFnCall?.(event.slice(10), data);
             return;
           }
 
@@ -228,6 +242,35 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
 
         const drainJobs = (): void => {
           module._qjs_execute_pending_jobs();
+        };
+
+        // Synchronously invoke a by-name injected host function (issue #8). The guest
+        // shim is blocked inside __sendToHost while this runs, so writing the result
+        // back to a guest global lets the shim return it synchronously. One-way hooks
+        // (render/event) simply ignore the written value.
+        onHostFnCall = (name: string, data: string): void => {
+          const fn = injectedHostFns.get(name);
+          let args: ReviewedUnknown[] = [];
+          try {
+            const parsed = JSON.parse(data) as { args?: ReviewedUnknown[] };
+            if (parsed && Array.isArray(parsed.args)) args = parsed.args;
+          } catch {
+            /* malformed payload -> no args */
+          }
+          let result: ReviewedUnknown;
+          try {
+            result = fn ? fn(...args) : undefined;
+          } catch (err) {
+            if (this.options.debug) {
+              console.error(`[QuickJSWASM] injected host fn "${name}" threw:`, err);
+            }
+            result = undefined;
+          }
+          try {
+            injectJson('__rill_fn_ret', JSON.stringify(result === undefined ? null : result));
+          } catch {
+            /* result not serializable -> guest sees null */
+          }
         };
 
         const resolveHostCall = (id: number, value: ReviewedUnknown): void => {
@@ -365,16 +408,24 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
           },
 
           inject: (name: string, value: unknown): void => {
-            // Handle functions specially
+            // Bridge a by-name host function into the isolated guest realm (issue #8).
+            // The guest shim posts its arguments to the host synchronously via
+            // __sendToHost (routed to onHostFnCall in hostCallback), then reads back the
+            // value the host wrote. This wires the render channel (__rill_sendBatch ->
+            // host Receiver), host events (__rill_emitEvent), config (__rill_getConfig),
+            // single ops (__rill_sendOperation), etc. — none of which worked before.
             if (typeof value === 'function') {
-              // Create a wrapper in the sandbox
-              const fnId = `__host_fn_${name}_${Date.now()}`;
-              const wrapperCode = `
-                globalThis["${name}"] = function(...args) {
-                  globalThis.__rill_sendBatch("CALL_HOST_FN", { fnId: "${fnId}", args: args });
+              injectedHostFns.set(name, value as (...args: ReviewedUnknown[]) => ReviewedUnknown);
+              const nameKey = JSON.stringify(name);
+              const eventKey = JSON.stringify(`__rill_fn:${name}`);
+              evalVoid(`
+                globalThis[${nameKey}] = function() {
+                  var args = Array.prototype.slice.call(arguments);
+                  globalThis.__rill_fn_ret = null;
+                  __sendToHost(${eventKey}, { args: args });
+                  return globalThis.__rill_fn_ret;
                 };
-              `;
-              evalVoid(wrapperCode);
+              `);
               return;
             }
 
