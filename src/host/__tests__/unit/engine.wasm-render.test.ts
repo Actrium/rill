@@ -49,6 +49,16 @@ describeIfWASM('Engine render channel on wasm-quickjs (issue #8)', () => {
     const receiver = engine.getReceiver();
     expect(receiver).not.toBeNull();
 
+    // Host-side proof the Receiver actually applied the batch and built the node tree
+    // (not merely that the 'operation' event fired): one View node, reachable by type,
+    // and a non-null render — the full sendBatch -> Bridge -> Receiver round-trip.
+    // biome-ignore lint/style/noNonNullAssertion: asserted not-null above
+    expect(receiver!.nodeCount).toBe(1);
+    // biome-ignore lint/style/noNonNullAssertion: see above
+    expect(receiver!.findNodesByType('View')).toHaveLength(1);
+    // biome-ignore lint/style/noNonNullAssertion: see above
+    expect(receiver!.render()).not.toBeNull();
+
     engine.destroy();
   });
 });

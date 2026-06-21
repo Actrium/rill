@@ -111,5 +111,111 @@ for (const sandbox of SANDBOXES) {
       expect(scope(engine).extract('__cbResult')).toEqual({ pressed: true });
       engine.destroy();
     });
+
+    it('guest console.error/warn reach the host logger', async () => {
+      const errors: unknown[][] = [];
+      const warns: unknown[][] = [];
+      const engine = new Engine({
+        sandbox,
+        logger: {
+          log: () => {},
+          warn: (...a) => warns.push(a),
+          error: (...a) => errors.push(a),
+        },
+      });
+
+      // console.error/warn always forward to the host logger (console.log is debug-gated).
+      // A non-serializable arg must degrade gracefully (sanitized), not throw.
+      const circular: Record<string, unknown> = {};
+      circular.self = circular;
+      await engine.loadBundle(`
+        var c = {}; c.self = c;
+        console.error('guest-error', { a: 1 }, c);
+        console.warn('guest-warn');
+      `);
+
+      const flat = (rows: unknown[][]) => rows.map((r) => r.map(String).join(' '));
+      expect(flat(errors).some((line) => line.includes('guest-error'))).toBe(true);
+      expect(flat(warns).some((line) => line.includes('guest-warn'))).toBe(true);
+      engine.destroy();
+    });
+
+    it('a DESTROY message clears the guest host-event listeners', async () => {
+      const engine = new Engine({ sandbox });
+      await engine.loadBundle(`
+        globalThis.__pings = 0;
+        globalThis.__rill_onHostEvent('PING', function(){ globalThis.__pings++; });
+      `);
+
+      expect(scope(engine).eval('globalThis.__rill.eventListeners.size')).toBeGreaterThan(0);
+
+      await engine.sendToSandbox({
+        type: HostMsg.HOST_EVENT,
+        eventName: 'PING',
+        // biome-ignore lint/suspicious/noExplicitAny: BridgeValue payload
+        payload: {} as any,
+      });
+      expect(scope(engine).extract('__pings')).toBe(1);
+
+      // Drive the guest DESTROY handler directly. sendToSandbox({type:DESTROY}) would also
+      // call engine.destroy() and dispose the context, preventing host-side inspection of
+      // the cleared guest state — this isolates the guest-side cleanup (#7).
+      scope(engine).eval("globalThis.__rill_handleMessage({ type: 'DESTROY' })");
+      expect(scope(engine).eval('globalThis.__rill.eventListeners.size')).toBe(0);
+
+      engine.destroy();
+    });
+
+    it('updateConfig makes the new config visible to the guest', async () => {
+      const engine = new Engine({ sandbox });
+      await engine.loadBundle('globalThis.__noop = 1;', { mode: 'a', n: 1 });
+
+      // __rill_getConfig returns the live host config; after updateConfig the merged
+      // value must be readable by the guest on the isolated realm too.
+      engine.updateConfig({ n: 2, extra: true });
+      // updateConfig delivers CONFIG_UPDATE via a fire-and-forget sendToSandbox. Await a
+      // subsequent round-trip (FIFO) so that delivery settles before destroy() tears the
+      // context down — no timers/sleeps, and no post-destroy floating rejection.
+      await engine.sendToSandbox({
+        type: HostMsg.HOST_EVENT,
+        eventName: '__drain',
+        // biome-ignore lint/suspicious/noExplicitAny: BridgeValue payload
+        payload: {} as any,
+      });
+      expect(scope(engine).eval('globalThis.__rill_getConfig()')).toEqual({
+        mode: 'a',
+        n: 2,
+        extra: true,
+      });
+
+      engine.destroy();
+    });
+
+    it('pause queues host events; resume flushes them to the guest', async () => {
+      const engine = new Engine({ sandbox });
+      await engine.loadBundle(`
+        globalThis.__events = [];
+        globalThis.__rill_onHostEvent('TICK', function(p){ globalThis.__events.push(p); });
+      `);
+
+      engine.pause();
+      engine.sendEvent('TICK', { n: 1 });
+      // Paused: the event is held host-side and never reaches the guest.
+      expect(scope(engine).extract('__events')).toEqual([]);
+
+      engine.resume();
+      // resume() flushes queued events via a fire-and-forget sendToSandbox. Await a
+      // subsequent round-trip through the same bridge (FIFO) to flush deterministically —
+      // no timers/sleeps. The drain event has no listener, so it is a harmless no-op.
+      await engine.sendToSandbox({
+        type: HostMsg.HOST_EVENT,
+        eventName: '__drain',
+        // biome-ignore lint/suspicious/noExplicitAny: BridgeValue payload
+        payload: {} as any,
+      });
+      expect(scope(engine).extract('__events')).toEqual([{ n: 1 }]);
+
+      engine.destroy();
+    });
   });
 }
