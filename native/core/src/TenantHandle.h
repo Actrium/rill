@@ -6,7 +6,7 @@
 #include <mutex>
 #include <string>
 
-namespace rill::orchestrator {
+namespace rill::tenant_manager {
 
 /// Unified wrapper around engine-specific sandbox contexts.
 /// Engine type is determined at compile time by RILL_SANDBOX_ENGINE.
@@ -61,4 +61,4 @@ private:
   bool disposed_ = false;
 };
 
-} // namespace rill::orchestrator
+} // namespace rill::tenant_manager

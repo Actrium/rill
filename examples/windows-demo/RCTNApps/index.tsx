@@ -1,7 +1,7 @@
 /**
  * windows-demo — React Native + rill sandbox
  *
- * IMPORTANT: Sandbox JSI bindings and the Orchestrator shim MUST be installed
+ * IMPORTANT: Sandbox JSI bindings and the TenantManager shim MUST be installed
  * BEFORE importing rill. We use dynamic require() to ensure correct ordering
  * (static imports get hoisted by Babel).
  */
@@ -44,24 +44,24 @@ if (Platform.OS === 'windows') {
     console.log('[windows-demo] Globals check:', {
       __QuickJSSandboxJSI: typeof (globalThis as any).__QuickJSSandboxJSI,
       __HermesSandboxJSI: typeof (globalThis as any).__HermesSandboxJSI,
-      __RillOrchestrator: typeof (globalThis as any).__RillOrchestrator,
+      __RillTenantManager: typeof (globalThis as any).__RillTenantManager,
     });
   }
 }
 
-// Step 2: Create __RillOrchestrator shim wrapping whichever engine was installed.
-// The rill Engine checks OrchestratorProvider.isAvailable() first, which looks
-// for globalThis.__RillOrchestrator. On iOS/Android, the native Orchestrator
+// Step 2: Create __RillTenantManager shim wrapping whichever engine was installed.
+// The rill Engine checks TenantManagerProvider.isAvailable() first, which looks
+// for globalThis.__RillTenantManager. On iOS/Android, the native TenantManager
 // C++ module provides this. On Windows we only have the sandbox JSI bindings,
 // so we create a lightweight JS shim that delegates to the available engine.
-if (Platform.OS === 'windows' && typeof (globalThis as any).__RillOrchestrator === 'undefined') {
+if (Platform.OS === 'windows' && typeof (globalThis as any).__RillTenantManager === 'undefined') {
   const sandboxModule = getSandboxModuleForEngine(compiledEngine);
 
   if (sandboxModule) {
     let nextTenantId = 1;
     const tenants: Record<number, { runtime: any; context: any }> = {};
 
-    (globalThis as any).__RillOrchestrator = {
+    (globalThis as any).__RillTenantManager = {
       // --- Tenant lifecycle ---
       createTenant(config: any): number {
         const timeout = config?.timeout ?? 30000;
@@ -69,7 +69,7 @@ if (Platform.OS === 'windows' && typeof (globalThis as any).__RillOrchestrator =
         const context = runtime.createContext();
         const id = nextTenantId++;
         tenants[id] = { runtime, context };
-        console.log('[OrchestratorShim] createTenant:', id);
+        console.log('[TenantManagerShim] createTenant:', id);
         return id;
       },
       destroyTenant(tenantId: number): void {
@@ -86,7 +86,7 @@ if (Platform.OS === 'windows' && typeof (globalThis as any).__RillOrchestrator =
           /* ignore */
         }
         delete tenants[tenantId];
-        console.log('[OrchestratorShim] destroyTenant:', tenantId);
+        console.log('[TenantManagerShim] destroyTenant:', tenantId);
       },
       pauseTenant(_tenantId: number): void {
         /* stub */
@@ -125,7 +125,7 @@ if (Platform.OS === 'windows' && typeof (globalThis as any).__RillOrchestrator =
       // --- Per-tenant context operations (used by Engine) ---
       evalInTenant(tenantId: number, code: string): any {
         const t = tenants[tenantId];
-        if (!t) throw new Error(`[OrchestratorShim] Tenant ${tenantId} not found`);
+        if (!t) throw new Error(`[TenantManagerShim] Tenant ${tenantId} not found`);
         return t.context.eval(code);
       },
       setTenantGlobal(tenantId: number, name: string, value: any): void {
@@ -213,10 +213,10 @@ if (Platform.OS === 'windows' && typeof (globalThis as any).__RillOrchestrator =
     const engineName =
       compiledEngine ||
       (sandboxModule === (globalThis as any).__HermesSandboxJSI ? 'hermes' : 'quickjs');
-    console.log(`[windows-demo] __RillOrchestrator shim installed (backed by ${engineName})`);
+    console.log(`[windows-demo] __RillTenantManager shim installed (backed by ${engineName})`);
   } else if (compiledEngine) {
     console.error(
-      `[windows-demo] Compiled engine '${compiledEngine}' global is missing; orchestrator shim not installed`
+      `[windows-demo] Compiled engine '${compiledEngine}' global is missing; tenant-manager shim not installed`
     );
   }
 }

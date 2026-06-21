@@ -19,7 +19,7 @@ Rill 是一个轻量级、无头的、沙箱化的动态 UI 渲染引擎,专为 
 ```
 Platform Layer  (iOS / macOS / Android / Web)
   |
-  +-- C++ Orchestrator  (多租户管理、线程池、事件总线)
+  +-- C++ TenantManager  (多租户管理、线程池、事件总线)
   |     |
   |     +-- Per-Tenant Sandbox  (隔离的 JS 运行时、定时器轮、安全性)
   |           |
@@ -28,9 +28,9 @@ Platform Layer  (iOS / macOS / Android / Web)
   +-- Host Shell  (EngineView 渲染原生 React Native 组件)
 ```
 
-**Platform Layer** -- 原生入口点。在 Apple 平台上,这是一个 TurboModule (`RillSandboxNativeTurboModule`),它将 C++ orchestrator 安装到 React Native host 运行时中。
+**Platform Layer** -- 原生入口点。在 Apple 平台上,这是一个 TurboModule (`RillSandboxNativeTurboModule`),它将 C++ tenant manager 安装到 React Native host 运行时中。
 
-**C++ Orchestrator** -- 单例(`RillOrchestrator`),协调租户创建、线程分配、资源配额、事件总线、安全上下文和 CDP 调试。通过 JSI HostObject 安装为 `globalThis.__RillOrchestrator`。
+**C++ TenantManager** -- 单例(`RillTenantManager`),协调租户创建、线程分配、资源配额、事件总线、安全上下文和 CDP 调试。通过 JSI HostObject 安装为 `globalThis.__RillTenantManager`。
 
 **Per-Tenant Sandbox** -- 每个租户获得一个带有自己运行循环、`TimerWheel` 和 JS 运行时的 `TenantThread`。沙箱在完全隔离于其他租户和 host 的环境中执行 guest bundle。
 
@@ -55,7 +55,7 @@ src/
       types.ts
       stats.ts
     registry.ts          ComponentRegistry(白名单)
-    orchestrator/        OrchestratorProvider(C++ orchestrator 的 TS 适配器)
+    tenant manager/        TenantManagerProvider(C++ tenant manager 的 TS 适配器)
     preset/              内置组件预设
 
   guest/               Guest 运行时
@@ -93,8 +93,8 @@ src/
   cli/                 构建工具
   devtools/            运行时 DevTools 收集器
 
-native/core/src/      C++ Orchestrator 和支持模块
-    RillOrchestrator.h/.mm    单例 JSI HostObject
+native/core/src/      C++ TenantManager 和支持模块
+    RillTenantManager.h/.mm    单例 JSI HostObject
     TenantRegistry.h/.cpp     租户状态跟踪
     TenantHandle.h/.cpp       每个租户的包装器(运行时、上下文、状态机)
     TenantThread.h/.cpp       带优先级队列的专用执行线程

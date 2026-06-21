@@ -16,7 +16,7 @@ function makeBatch(n: number) {
 
 describe('Engine health receiverNodes', () => {
   it('reflects receiver node count after applyBatch', async () => {
-    const engine = new Engine({ sandbox: 'vm', debug: false });
+    const engine = new Engine({ sandbox: 'node-vm', debug: false });
     await Promise.resolve().then(() => engine.loadBundle('console.log("ok")'));
     const receiver = engine.createReceiver();
     receiver.applyBatch(makeBatch(7));

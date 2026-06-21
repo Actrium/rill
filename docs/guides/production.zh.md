@@ -209,7 +209,7 @@ useEffect(() => {
 
 在发布到生产之前,请验证以下内容:
 
-- 选择了具有完全隔离的沙箱 provider(不是 `'none'`)。
+- 针对不可信 guest 选择了真正隔离的沙箱 provider —— `node-vm` 不是安全边界,应使用 `wasm-quickjs`、`quickjs`、`jsc` 或 `tenant-manager`。
 - `requireWhitelist` 已显式设置,并且仅包含 guest 需要的模块。
 - `timeout` 配置了适合 bundle 复杂度的值。
 - 如果 guest 产生大型渲染批次,则调整了 `receiverMaxBatchSize`。

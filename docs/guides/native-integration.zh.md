@@ -8,7 +8,7 @@
 
 Rill 的原生层依赖 **JSI** 和 **TurboModules**:
 
-- **JSI (JavaScript Interface)** -- C++ 接口,允许 JavaScript 和原生代码直接互调,无需 JSON 序列化。Rill 通过 JSI 将 `RillOrchestrator` HostObject 和沙箱引擎绑定安装到 RN 的 JS 运行时中。
+- **JSI (JavaScript Interface)** -- C++ 接口,允许 JavaScript 和原生代码直接互调,无需 JSON 序列化。Rill 通过 JSI 将 `RillTenantManager` HostObject 和沙箱引擎绑定安装到 RN 的 JS 运行时中。
 - **TurboModules** -- 基于 JSI 的原生模块系统。Rill 通过 `RillSandboxNativeTurboModule` 让宿主 RN 应用从 JavaScript 端创建和管理沙箱实例(第二层 JS 运行时)。
 
 Rill **不依赖** **Fabric**(新渲染系统)。Guest UI 通过 Rill 自有的 reconciler-to-host 桥接渲染,而非 Fabric 的 C++ 渲染器。

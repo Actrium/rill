@@ -3,7 +3,7 @@
 #include <mutex>
 #include <stdexcept>
 
-namespace rill::orchestrator {
+namespace rill::tenant_manager {
 
 namespace {
 
@@ -59,7 +59,7 @@ void TenantRegistry::registerTenantWithId(TenantId id,
   }
 
   // Keep the auto-id generator monotonic to avoid future collisions if both
-  // modes are used (e.g. tests + Orchestrator in the same process).
+  // modes are used (e.g. tests + TenantManager in the same process).
   if (id >= nextId_) {
     nextId_ = id + 1;
   }
@@ -176,4 +176,4 @@ size_t TenantRegistry::activeTenants() const {
   return count;
 }
 
-}  // namespace rill::orchestrator
+}  // namespace rill::tenant_manager

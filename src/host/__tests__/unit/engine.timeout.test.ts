@@ -11,7 +11,7 @@ const silentLogger = {
 describe('Engine timeout behavior', () => {
   it('does not throw TimeoutError for quick microtask usage', async () => {
     const engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       timeout: 5000,
       debug: false,
       logger: silentLogger,
@@ -23,7 +23,7 @@ describe('Engine timeout behavior', () => {
 
   it('does not throw TimeoutError even for long sync work (best-effort guard)', async () => {
     const engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       timeout: 5000,
       debug: false,
       logger: silentLogger,
@@ -38,7 +38,7 @@ describe('Engine timeout behavior', () => {
   it('should handle forceDestroy when context.dispose() throws', async () => {
     let disposeThrew = false;
     const engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       timeout: 1000,
       debug: false,
       logger: silentLogger,
@@ -71,7 +71,7 @@ describe('Engine timeout behavior', () => {
   it('should handle forceDestroy when runtime.dispose() throws', async () => {
     let runtimeDisposeThrew = false;
     const engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       timeout: 1000,
       debug: false,
       logger: silentLogger,
@@ -103,7 +103,7 @@ describe('Engine timeout behavior', () => {
 
   it('should clear timers before disposing resources in forceDestroy', async () => {
     const engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       timeout: 1000,
       debug: false,
       logger: silentLogger,

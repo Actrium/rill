@@ -21,7 +21,7 @@ describe('Cross-Boundary: Function Serialization', () => {
 
   beforeEach(() => {
     engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       debug: false,
     });
     engine.register(MockComponents);
@@ -300,7 +300,7 @@ describe('Cross-Boundary: Complex Data Types', () => {
 
   beforeEach(() => {
     engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       debug: false,
     });
     engine.register(MockComponents);
@@ -509,7 +509,7 @@ describe('Cross-Boundary: Memory Management', () => {
 
   beforeEach(() => {
     engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       debug: false,
     });
     engine.register(MockComponents);

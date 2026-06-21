@@ -31,11 +31,11 @@ Pod::Spec.new do |s|
     fi
   CMD
 
-  # Common source files: TurboModule entry + Orchestrator infrastructure
+  # Common source files: TurboModule entry + TenantManager infrastructure
   common_sources = [
     "native/core/src/SandboxEngineConfig.h",
     "native/core/src/RillSandboxNativeTurboModule.{h,mm}",
-    "native/core/src/RillOrchestrator.{h,mm}",
+    "native/core/src/RillTenantManager.{h,mm}",
     "native/core/src/TenantHandle.{h,cpp}",
     "native/core/src/TimerWheel.{h,cpp}",
     "native/core/src/TenantThread.{h,cpp}",
@@ -61,7 +61,7 @@ Pod::Spec.new do |s|
     s.public_header_files = [
       "native/core/src/SandboxEngineConfig.h",
       "native/core/src/RillSandboxNativeTurboModule.h",
-      "native/core/src/RillOrchestrator.h",
+      "native/core/src/RillTenantManager.h",
       "native/quickjs/src/*.h",
       "native/quickjs/vendor/*.h"
     ]
@@ -72,7 +72,7 @@ Pod::Spec.new do |s|
     s.public_header_files = [
       "native/core/src/SandboxEngineConfig.h",
       "native/core/src/RillSandboxNativeTurboModule.h",
-      "native/core/src/RillOrchestrator.h",
+      "native/core/src/RillTenantManager.h",
       "native/hermes/src/HermesSandboxJSI.h"
     ]
     # Hermes sandbox needs hermes-engine from React Native (not CocoaPods trunk which is outdated 0.11.0)
@@ -87,7 +87,7 @@ Pod::Spec.new do |s|
     s.public_header_files = [
       "native/core/src/SandboxEngineConfig.h",
       "native/core/src/RillSandboxNativeTurboModule.h",
-      "native/core/src/RillOrchestrator.h",
+      "native/core/src/RillTenantManager.h",
       "native/jsc/src/**/*.h"
     ]
   end

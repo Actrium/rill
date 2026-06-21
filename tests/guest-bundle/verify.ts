@@ -283,7 +283,7 @@ async function verifyBundle(expected: ExpectedBehavior): Promise<VerificationRes
   // 2. Create engine with operation tracking
   // ─────────────────────────────────────────────────────────────────────────
   const engine = new Engine({
-    sandbox: 'vm',
+    sandbox: 'node-vm',
     timeout: 3000,
     debug: false,
   });

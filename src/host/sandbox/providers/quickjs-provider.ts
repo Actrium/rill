@@ -12,7 +12,7 @@ export type QuickJSProviderOptions = {
 export class QuickJSProvider implements JSEngineProvider {
   constructor(_options?: QuickJSProviderOptions) {
     throw new Error(
-      '[QuickJSProvider] Requires native JSI bindings. Use VMProvider (Node/Bun) or QuickJSNativeWASMProvider (Web) for non-native environments.'
+      '[QuickJSProvider] Requires native JSI bindings. Use NodeVMProvider (Node/Bun) or QuickJSNativeWASMProvider (Web) for non-native environments.'
     );
   }
 

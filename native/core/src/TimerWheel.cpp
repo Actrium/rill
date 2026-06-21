@@ -2,7 +2,7 @@
 #include <algorithm>
 #include <chrono>
 
-namespace rill::orchestrator {
+namespace rill::tenant_manager {
 
 double TimerWheel::currentTimeMs() const {
   using namespace std::chrono;
@@ -148,4 +148,4 @@ size_t TimerWheel::activeCount() const {
   return count;
 }
 
-} // namespace rill::orchestrator
+} // namespace rill::tenant_manager

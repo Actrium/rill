@@ -2,7 +2,7 @@
 #include <chrono>
 #include <stdexcept>
 
-namespace rill::orchestrator {
+namespace rill::tenant_manager {
 
 TenantThread::TenantThread(TenantId id)
     : id_(id), timerWheel_(std::make_unique<TimerWheel>()) {
@@ -160,4 +160,4 @@ void TenantThread::threadMain() {
   }
 }
 
-} // namespace rill::orchestrator
+} // namespace rill::tenant_manager

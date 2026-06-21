@@ -4,9 +4,9 @@
 
 import type { HostModuleImplementationMap, RillContractShape } from '../../contract';
 import type { RuntimeCollectorConfig } from '../../devtools/runtime';
-import type { OrchestratorTenantConfig } from '../orchestrator/types';
 import type { Receiver, ReceiverStats } from '../receiver';
 import type { ComponentMap, ComponentRegistry } from '../registry';
+import type { TenantConfig } from '../tenant-manager/types';
 import type { BridgeValueObject, OperationBatch } from '../types';
 
 /**
@@ -15,21 +15,22 @@ import type { BridgeValueObject, OperationBatch } from '../types';
 export interface EngineOptions {
   /**
    * Explicitly select a sandbox mode.
-   * - `vm`: (Default on Node/Bun) Uses Node's `vm` module for a secure, native sandbox.
+   * - `node-vm`: (Default on Node/Bun) Node's `vm` module. Fast, but NOT a security
+   *   boundary (escapable) — use only for tests, SSR, and trusted first-party guests.
+   *   For untrusted code pick an isolated backend (`wasm-quickjs`/`quickjs`/`jsc`/`tenant-manager`).
    * - `jsc`: Uses JavaScriptCore via JSI (Apple platforms only).
    * - `quickjs`: Uses QuickJS via JSI (cross-platform native).
    * - `wasm-quickjs`: Uses QuickJS via WASM (cross-platform, web-compatible).
-   * - `none`: Runs code directly in the host context via `eval`. Insecure, but fast and easy to debug.
    * If not set, the best available provider for the environment is chosen automatically.
    */
-  sandbox?: 'vm' | 'jsc' | 'hermes' | 'quickjs' | 'wasm-quickjs' | 'orchestrator' | 'none';
+  sandbox?: 'node-vm' | 'jsc' | 'hermes' | 'quickjs' | 'wasm-quickjs' | 'tenant-manager';
 
   /**
-   * Orchestrator tenant configuration.
-   * Required when sandbox='orchestrator' or when __RillOrchestrator is auto-detected.
+   * TenantManager tenant configuration.
+   * Required when sandbox='tenant-manager' or when __RillTenantManager is auto-detected.
    * At minimum, `appId` must be provided.
    */
-  orchestrator?: OrchestratorTenantConfig;
+  tenant?: TenantConfig;
 
   /**
    * Execution timeout (milliseconds)

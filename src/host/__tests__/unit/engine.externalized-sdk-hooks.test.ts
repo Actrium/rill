@@ -7,7 +7,7 @@ import { Engine } from '../../engine';
  */
 describe('Engine - externalized rill/guest hooks', () => {
   it('should expose hooks on global RillGuest (externalized bundles)', async () => {
-    const engine = new Engine({ sandbox: 'vm', debug: false });
+    const engine = new Engine({ sandbox: 'node-vm', debug: false });
 
     // This code simulates an externalized guest bundle that reads from global RillGuest directly.
     await engine.loadBundle(`

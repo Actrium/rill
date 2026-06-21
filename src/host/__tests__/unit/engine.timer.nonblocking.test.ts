@@ -42,7 +42,7 @@ describe('Engine Timer Non-Blocking', () => {
 
     globalThis.setTimeout = blockingSetTimeout;
 
-    engine = new Engine({ sandbox: 'vm', debug: false });
+    engine = new Engine({ sandbox: 'node-vm', debug: false });
     await engine.loadBundle(`// init`);
 
     const guestSetTimeout = (await engine.context?.extract('setTimeout')) as (
@@ -72,7 +72,7 @@ describe('Engine Timer Non-Blocking', () => {
     }) as typeof setTimeout;
 
     globalThis.setTimeout = countingSetTimeout;
-    engine = new Engine({ sandbox: 'vm', debug: false });
+    engine = new Engine({ sandbox: 'node-vm', debug: false });
     await engine.loadBundle(`// init`);
 
     const guestSetInterval = (await engine.context?.extract('setInterval')) as (

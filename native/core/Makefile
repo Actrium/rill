@@ -41,7 +41,7 @@ TEST_SOURCES = \
 	$(TEST_DIR)/test_tenant_registry.cpp \
 	$(TEST_DIR)/test_tenant_thread.cpp \
 	$(TEST_DIR)/test_thread_pool.cpp \
-	$(TEST_DIR)/test_orchestrator_integration.cpp \
+	$(TEST_DIR)/test_tenant_manager_integration.cpp \
 	$(TEST_DIR)/test_network_sandbox.cpp \
 	$(TEST_DIR)/test_file_sandbox.cpp \
 	$(TEST_DIR)/test_event_bus.cpp \

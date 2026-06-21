@@ -4,7 +4,7 @@ import { Engine } from '../../engine';
 describe('Engine async error handling', () => {
   describe('setInterval error handling', () => {
     it('should catch and emit errors from setInterval callbacks', async () => {
-      const engine = new Engine({ sandbox: 'vm', timeout: 5000, debug: false });
+      const engine = new Engine({ sandbox: 'node-vm', timeout: 5000, debug: false });
 
       const errorsCaught: Error[] = [];
 
@@ -56,7 +56,7 @@ describe('Engine async error handling', () => {
     });
 
     it('should not crash when interval callback throws non-Error', async () => {
-      const engine = new Engine({ sandbox: 'vm', timeout: 5000, debug: false });
+      const engine = new Engine({ sandbox: 'node-vm', timeout: 5000, debug: false });
 
       const errorsCaught: Error[] = [];
       engine.on('error', (error: Error) => {
@@ -144,7 +144,7 @@ describe('Engine async error handling', () => {
 
   describe('error event emission', () => {
     it('should increment errorCount when errors occur', async () => {
-      const engine = new Engine({ sandbox: 'vm', timeout: 5000, debug: false });
+      const engine = new Engine({ sandbox: 'node-vm', timeout: 5000, debug: false });
 
       await engine.loadBundle(`// init`);
 
@@ -180,7 +180,7 @@ describe('Engine async error handling', () => {
 
   describe('Unhandled Promise Rejection', () => {
     it('should emit error events when errors occur', async () => {
-      const engine = new Engine({ sandbox: 'vm', timeout: 5000, debug: false });
+      const engine = new Engine({ sandbox: 'node-vm', timeout: 5000, debug: false });
 
       const errorsCaught: Error[] = [];
       engine.on('error', (error: Error) => {
@@ -202,7 +202,7 @@ describe('Engine async error handling', () => {
     });
 
     it('should track error count correctly', async () => {
-      const engine = new Engine({ sandbox: 'vm', timeout: 5000, debug: false });
+      const engine = new Engine({ sandbox: 'node-vm', timeout: 5000, debug: false });
 
       await engine.loadBundle(`// init`);
 

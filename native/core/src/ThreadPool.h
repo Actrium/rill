@@ -3,7 +3,7 @@
 #include <shared_mutex>
 #include <unordered_map>
 
-namespace rill::orchestrator {
+namespace rill::tenant_manager {
 
 class ThreadPool {
 public:
@@ -34,4 +34,4 @@ private:
   uint32_t maxThreads_;
 };
 
-} // namespace rill::orchestrator
+} // namespace rill::tenant_manager

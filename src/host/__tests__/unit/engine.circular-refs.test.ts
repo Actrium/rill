@@ -19,7 +19,7 @@ describe('Engine inject Direct Object Passing', () => {
   let engine: Engine;
 
   beforeEach(() => {
-    engine = new Engine({ sandbox: 'vm'});
+    engine = new Engine({ sandbox: 'node-vm'});
   });
 
   afterEach(() => {
@@ -79,7 +79,7 @@ describe('Engine inject Cleanup', () => {
   let engine: Engine;
 
   beforeEach(() => {
-    engine = new Engine({ sandbox: 'vm'});
+    engine = new Engine({ sandbox: 'node-vm'});
   });
 
   afterEach(() => {

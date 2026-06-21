@@ -10,7 +10,7 @@
 #include <thread>
 #include <type_traits>
 
-namespace rill::orchestrator {
+namespace rill::tenant_manager {
 
 using TenantId = uint32_t;
 
@@ -108,4 +108,4 @@ R TenantThread::runSync(std::function<R()> task) {
   return future.get();
 }
 
-} // namespace rill::orchestrator
+} // namespace rill::tenant_manager

@@ -1,6 +1,6 @@
-# C++ Native Orchestrator
+# C++ Native TenantManager
 
-The native orchestrator is a C++ singleton that provides multi-tenant sandbox management, thread isolation, resource quotas, and centralized coordination. It is installed as a JSI HostObject in the React Native host runtime.
+The native tenant manager is a C++ singleton that provides multi-tenant sandbox management, thread isolation, resource quotas, and centralized coordination. It is installed as a JSI HostObject in the React Native host runtime.
 
 ## Design Motivation
 
@@ -10,9 +10,9 @@ The native orchestrator is a C++ singleton that provides multi-tenant sandbox ma
 
 ## Component Overview
 
-### RillOrchestrator (`native/core/src/RillOrchestrator.h`)
+### RillTenantManager (`native/core/src/RillTenantManager.h`)
 
-Singleton installed as `globalThis.__RillOrchestrator` via `jsi::HostObject`. All methods are exposed through the JSI `get()` interface and callable from TypeScript.
+Singleton installed as `globalThis.__RillTenantManager` via `jsi::HostObject`. All methods are exposed through the JSI `get()` interface and callable from TypeScript.
 
 Key responsibilities:
 - Tenant lifecycle (create, load, pause, resume, destroy)
@@ -120,44 +120,44 @@ Host VM Thread                    Tenant Thread
 
 ## JSI Binding
 
-The orchestrator is installed in the host runtime during TurboModule initialization:
+The tenant manager is installed in the host runtime during TurboModule initialization:
 
 ```cpp
-RillOrchestrator::install(hostRuntime, callInvoker);
+RillTenantManager::install(hostRuntime, callInvoker);
 ```
 
-This creates a singleton `RillOrchestrator` and sets it as `globalThis.__RillOrchestrator`. All methods are exposed via the `jsi::HostObject::get()` interface:
+This creates a singleton `RillTenantManager` and sets it as `globalThis.__RillTenantManager`. All methods are exposed via the `jsi::HostObject::get()` interface:
 
 ```
-__RillOrchestrator.createTenant(config)
-__RillOrchestrator.loadBundle(tenantId, code)
-__RillOrchestrator.destroyTenant(tenantId)
-__RillOrchestrator.sendEvent(tenantId, name, payload)
-__RillOrchestrator.evalInTenant(tenantId, code)
-__RillOrchestrator.setTenantGlobal(tenantId, name, value)
-__RillOrchestrator.getTenantGlobal(tenantId, name)
-__RillOrchestrator.setHostCallbacks(callbacks)
-__RillOrchestrator.getMetrics()
+__RillTenantManager.createTenant(config)
+__RillTenantManager.loadBundle(tenantId, code)
+__RillTenantManager.destroyTenant(tenantId)
+__RillTenantManager.sendEvent(tenantId, name, payload)
+__RillTenantManager.evalInTenant(tenantId, code)
+__RillTenantManager.setTenantGlobal(tenantId, name, value)
+__RillTenantManager.getTenantGlobal(tenantId, name)
+__RillTenantManager.setHostCallbacks(callbacks)
+__RillTenantManager.getMetrics()
 // ... EventBus methods, timer methods, etc.
 ```
 
 Host callbacks (`onBatch`, `onEvent`, `onError`, `onLog`, `onTimer`) are `jsi::Function` objects registered via `setHostCallbacks`. They are invoked on the Host VM thread via `CallInvoker::invokeAsync()`.
 
-## OrchestratorProvider (TypeScript Adapter)
+## TenantManagerProvider (TypeScript Adapter)
 
-`src/host/orchestrator/orchestrator-provider.ts` bridges the JSI interface to TypeScript.
+`src/host/tenant manager/tenant manager-provider.ts` bridges the JSI interface to TypeScript.
 
 ### Detection
 
 ```typescript
 static isAvailable(): boolean {
-  return typeof globalThis.__RillOrchestrator !== 'undefined';
+  return typeof globalThis.__RillTenantManager !== 'undefined';
 }
 ```
 
 ### Engine Integration
 
-When `globalThis.__RillOrchestrator` is available, `Engine` automatically delegates to it. Internally, the adapter wraps the raw JSI interface into a `JSEngineProvider` / `JSEngineRuntime` / `SandboxScope` implementation:
+When `globalThis.__RillTenantManager` is available, `Engine` automatically delegates to it. Internally, the adapter wraps the raw JSI interface into a `JSEngineProvider` / `JSEngineRuntime` / `SandboxScope` implementation:
 
 - `createRuntime()` -- Calls `createTenant(config)`, returns a wrapper
 - `context.eval(code)` -- Calls `evalInTenant(tenantId, code)`
@@ -165,4 +165,4 @@ When `globalThis.__RillOrchestrator` is available, `Engine` automatically delega
 - `context.extract(name)` -- Calls `getTenantGlobal(tenantId, name)`
 - `context.dispose()` -- Calls `destroyTenant(tenantId)`
 
-This allows the existing TypeScript Engine code to work transparently whether backed by the C++ orchestrator or a pure-TypeScript sandbox provider.
+This allows the existing TypeScript Engine code to work transparently whether backed by the C++ tenant manager or a pure-TypeScript sandbox provider.

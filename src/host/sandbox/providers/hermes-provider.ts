@@ -12,7 +12,7 @@ export interface HermesProviderOptions {
 export class HermesProvider implements JSEngineProvider {
   constructor(_options?: HermesProviderOptions) {
     throw new Error(
-      '[HermesProvider] Requires native JSI bindings (React Native with Hermes). Use VMProvider (Node/Bun) or QuickJSNativeWASMProvider (Web) for non-native environments.'
+      '[HermesProvider] Requires native JSI bindings (React Native with Hermes). Use NodeVMProvider (Node/Bun) or QuickJSNativeWASMProvider (Web) for non-native environments.'
     );
   }
 

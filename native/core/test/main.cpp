@@ -6,7 +6,7 @@ void registerTenantContextTests();
 void registerTenantRegistryTests();
 void registerTenantThreadTests();
 void registerThreadPoolTests();
-void registerOrchestratorIntegrationTests();
+void registerTenantManagerIntegrationTests();
 void registerNetworkSandboxTests();
 void registerFileSandboxTests();
 void registerEventBusTests();
@@ -22,7 +22,7 @@ int main() {
   registerTenantRegistryTests();
   registerTenantThreadTests();
   registerThreadPoolTests();
-  registerOrchestratorIntegrationTests();
+  registerTenantManagerIntegrationTests();
   registerNetworkSandboxTests();
   registerFileSandboxTests();
   registerEventBusTests();

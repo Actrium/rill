@@ -21,7 +21,7 @@ describe('Engine', () => {
   let engine: Engine;
 
   beforeEach(() => {
-    engine = new Engine({ sandbox: 'vm'});
+    engine = new Engine({ sandbox: 'node-vm'});
     mockFetch.mockReset();
   });
 
@@ -31,7 +31,7 @@ describe('Engine', () => {
 
   describe('constructor', () => {
     it('should create engine with default options', () => {
-      const e = new Engine({ sandbox: 'vm'});
+      const e = new Engine({ sandbox: 'node-vm'});
       expect(e.isLoaded).toBe(false);
       expect(e.isDestroyed).toBe(false);
       e.destroy();
@@ -45,7 +45,7 @@ describe('Engine', () => {
       };
 
       const e = new Engine({
-        sandbox: 'vm',
+        sandbox: 'node-vm',
         timeout: 10000,
         debug: false,
         logger: customLogger,
@@ -357,7 +357,7 @@ describe('Engine Polyfills', () => {
   const mockLogger = { log: mock(), warn: mock(), error: mock() };
 
   beforeEach(() => {
-    engine = new Engine({ sandbox: 'vm', debug: true, logger: mockLogger });
+    engine = new Engine({ sandbox: 'node-vm', debug: true, logger: mockLogger });
   });
 
   afterEach(() => {
@@ -420,7 +420,7 @@ describe('Engine Runtime API', () => {
   let engine: Engine;
 
   beforeEach(() => {
-    engine = new Engine({ sandbox: 'vm'});
+    engine = new Engine({ sandbox: 'node-vm'});
   });
 
   afterEach(() => {
@@ -459,7 +459,7 @@ describe('Engine Error Handling', () => {
   let errorHandler: ReturnType<typeof mock>;
 
   beforeEach(() => {
-    engine = new Engine({ sandbox: 'vm'});
+    engine = new Engine({ sandbox: 'node-vm'});
     errorHandler = mock();
     engine.on('error', errorHandler);
   });

@@ -1,19 +1,19 @@
 /**
- * OrchestratorProvider Unit Tests
+ * TenantManagerProvider Unit Tests
  *
  * Tests the TypeScript delegation layer that routes Engine sandbox operations
- * through the native __RillOrchestrator JSI HostObject.
+ * through the native __RillTenantManager JSI HostObject.
  *
- * Since __RillOrchestrator is a native JSI object not available in Bun/Node,
+ * Since __RillTenantManager is a native JSI object not available in Bun/Node,
  * we mock it to verify correct delegation behavior.
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import type { RillOrchestratorJSI } from '../../orchestrator/types';
+import type { RillTenantManagerJSI } from '../../tenant-manager/types';
 
-// --- Mock __RillOrchestrator ---
+// --- Mock __RillTenantManager ---
 
-function createMockOrchestrator() {
+function createMockTenantManager() {
   let nextTenantId = 1;
   let nextTimerId = 100;
   let nextSubId = 1;
@@ -37,7 +37,7 @@ function createMockOrchestrator() {
     apiViolations: number;
   }>();
 
-  const orchestrator: RillOrchestratorJSI = {
+  const tenantManager: RillTenantManagerJSI = {
     createTenant: mock((config: { appId: string; apis?: string[]; quota?: { maxTimers?: number } }) => {
       const id = nextTenantId++;
       tenants.set(id, {
@@ -266,39 +266,39 @@ function createMockOrchestrator() {
     }),
   };
 
-  return { orchestrator, tenants, channels, channelSubs, busStats };
+  return { tenantManager, tenants, channels, channelSubs, busStats };
 }
 
 // Import after defining mocks
-import { OrchestratorProvider } from '../../orchestrator/orchestrator-provider';
+import { TenantManagerProvider } from '../../tenant-manager/tenant-manager-provider';
 
-describe('OrchestratorProvider', () => {
-  let mockOrch: ReturnType<typeof createMockOrchestrator>;
+describe('TenantManagerProvider', () => {
+  let mockOrch: ReturnType<typeof createMockTenantManager>;
 
   beforeEach(() => {
-    mockOrch = createMockOrchestrator();
-    (globalThis as Record<string, unknown>).__RillOrchestrator = mockOrch.orchestrator;
+    mockOrch = createMockTenantManager();
+    (globalThis as Record<string, unknown>).__RillTenantManager = mockOrch.tenantManager;
   });
 
   afterEach(() => {
-    delete (globalThis as Record<string, unknown>).__RillOrchestrator;
+    delete (globalThis as Record<string, unknown>).__RillTenantManager;
   });
 
   // ─── Static: isAvailable ───
 
   describe('isAvailable', () => {
-    it('should return true when __RillOrchestrator is set', () => {
-      expect(OrchestratorProvider.isAvailable()).toBe(true);
+    it('should return true when __RillTenantManager is set', () => {
+      expect(TenantManagerProvider.isAvailable()).toBe(true);
     });
 
-    it('should return false when __RillOrchestrator is not set', () => {
-      delete (globalThis as Record<string, unknown>).__RillOrchestrator;
-      expect(OrchestratorProvider.isAvailable()).toBe(false);
+    it('should return false when __RillTenantManager is not set', () => {
+      delete (globalThis as Record<string, unknown>).__RillTenantManager;
+      expect(TenantManagerProvider.isAvailable()).toBe(false);
     });
 
-    it('should return false when __RillOrchestrator is undefined', () => {
-      (globalThis as Record<string, unknown>).__RillOrchestrator = undefined;
-      expect(OrchestratorProvider.isAvailable()).toBe(false);
+    it('should return false when __RillTenantManager is undefined', () => {
+      (globalThis as Record<string, unknown>).__RillTenantManager = undefined;
+      expect(TenantManagerProvider.isAvailable()).toBe(false);
     });
   });
 
@@ -306,14 +306,14 @@ describe('OrchestratorProvider', () => {
 
   describe('constructor', () => {
     it('should create provider with minimal config', () => {
-      const provider = new OrchestratorProvider({
+      const provider = new TenantManagerProvider({
         tenantConfig: { appId: 'com.test' },
       });
       expect(provider).toBeDefined();
     });
 
     it('should create provider with full config', () => {
-      const provider = new OrchestratorProvider({
+      const provider = new TenantManagerProvider({
 	        tenantConfig: {
 	          appId: 'com.test',
 	          debug: true,
@@ -331,88 +331,88 @@ describe('OrchestratorProvider', () => {
 
   describe('createRuntime', () => {
     it('should call native createTenant with appId', () => {
-      const provider = new OrchestratorProvider({
+      const provider = new TenantManagerProvider({
         tenantConfig: { appId: 'com.myapp' },
       });
       const runtime = provider.createRuntime();
       expect(runtime).toBeDefined();
-      expect(mockOrch.orchestrator.createTenant).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.createTenant).toHaveBeenCalled();
 
-      const callArgs = (mockOrch.orchestrator.createTenant as ReturnType<typeof mock>).mock.calls[0];
+      const callArgs = (mockOrch.tenantManager.createTenant as ReturnType<typeof mock>).mock.calls[0];
       expect(callArgs[0].appId).toBe('com.myapp');
     });
 
     it('should pass timeout to createTenant config', () => {
-      const provider = new OrchestratorProvider({
+      const provider = new TenantManagerProvider({
         tenantConfig: { appId: 'com.timeout' },
         timeout: 7000,
       });
       provider.createRuntime();
 
-      const callArgs = (mockOrch.orchestrator.createTenant as ReturnType<typeof mock>).mock.calls[0];
+      const callArgs = (mockOrch.tenantManager.createTenant as ReturnType<typeof mock>).mock.calls[0];
       expect(callArgs[0].timeout).toBe(7000);
     });
 
     it('should merge runtime options into config', () => {
-      const provider = new OrchestratorProvider({
+      const provider = new TenantManagerProvider({
         tenantConfig: { appId: 'com.opts' },
       });
       provider.createRuntime({ timeout: 9000, memoryLimit: 64 * 1024 * 1024 });
 
-	      const callArgs = (mockOrch.orchestrator.createTenant as ReturnType<typeof mock>).mock.calls[0];
+	      const callArgs = (mockOrch.tenantManager.createTenant as ReturnType<typeof mock>).mock.calls[0];
 	      expect(callArgs[0].timeout).toBe(9000);
 	      expect(callArgs[0].quota?.maxHeapBytes).toBe(64 * 1024 * 1024);
 	    });
 
     it('should return synchronously (not a Promise)', () => {
-      const provider = new OrchestratorProvider({
+      const provider = new TenantManagerProvider({
         tenantConfig: { appId: 'com.sync' },
       });
       const result = provider.createRuntime();
-      // Must be synchronous — OrchestratorProvider.createRuntime returns JSEngineRuntime, not Promise
+      // Must be synchronous — TenantManagerProvider.createRuntime returns JSEngineRuntime, not Promise
       expect(result).toBeDefined();
       expect(result.createContext).toBeInstanceOf(Function);
       expect(result.dispose).toBeInstanceOf(Function);
     });
 
-    it('should throw when __RillOrchestrator is not available', () => {
-      delete (globalThis as Record<string, unknown>).__RillOrchestrator;
+    it('should throw when __RillTenantManager is not available', () => {
+      delete (globalThis as Record<string, unknown>).__RillTenantManager;
 
-      const provider = new OrchestratorProvider({
+      const provider = new TenantManagerProvider({
         tenantConfig: { appId: 'com.missing' },
       });
 
-      expect(() => provider.createRuntime()).toThrow('__RillOrchestrator not available');
+      expect(() => provider.createRuntime()).toThrow('__RillTenantManager not available');
     });
 
     it('should create unique tenant IDs for multiple runtimes', () => {
-      const provider1 = new OrchestratorProvider({ tenantConfig: { appId: 'app1' } });
-      const provider2 = new OrchestratorProvider({ tenantConfig: { appId: 'app2' } });
+      const provider1 = new TenantManagerProvider({ tenantConfig: { appId: 'app1' } });
+      const provider2 = new TenantManagerProvider({ tenantConfig: { appId: 'app2' } });
 
       provider1.createRuntime();
       provider2.createRuntime();
 
-      expect(mockOrch.orchestrator.createTenant).toHaveBeenCalledTimes(2);
+      expect(mockOrch.tenantManager.createTenant).toHaveBeenCalledTimes(2);
       expect(mockOrch.tenants.size).toBe(2);
     });
 
     it('should preserve debug flag from tenantConfig', () => {
-      const provider = new OrchestratorProvider({
+      const provider = new TenantManagerProvider({
         tenantConfig: { appId: 'com.debug', debug: true },
       });
       provider.createRuntime();
 
-      const callArgs = (mockOrch.orchestrator.createTenant as ReturnType<typeof mock>).mock.calls[0];
+      const callArgs = (mockOrch.tenantManager.createTenant as ReturnType<typeof mock>).mock.calls[0];
       expect(callArgs[0].debug).toBe(true);
     });
 
     it('should preserve APIs whitelist', () => {
-      const provider = new OrchestratorProvider({
+      const provider = new TenantManagerProvider({
         tenantConfig: { appId: 'com.apis', apis: ['fetch', 'storage'] },
       });
       provider.createRuntime();
 
-      const callArgs = (mockOrch.orchestrator.createTenant as ReturnType<typeof mock>).mock.calls[0];
+      const callArgs = (mockOrch.tenantManager.createTenant as ReturnType<typeof mock>).mock.calls[0];
       expect(callArgs[0].apis).toEqual(['fetch', 'storage']);
     });
   });
@@ -421,7 +421,7 @@ describe('OrchestratorProvider', () => {
 
   describe('runtime', () => {
     it('should have createContext and dispose methods', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.rt' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.rt' } });
       const runtime = provider.createRuntime();
 
       expect(typeof runtime.createContext).toBe('function');
@@ -429,16 +429,16 @@ describe('OrchestratorProvider', () => {
     });
 
     it('dispose should call native destroyTenant', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.dispose' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.dispose' } });
       const runtime = provider.createRuntime();
 
       runtime.dispose();
 
-      expect(mockOrch.orchestrator.destroyTenant).toHaveBeenCalledTimes(1);
+      expect(mockOrch.tenantManager.destroyTenant).toHaveBeenCalledTimes(1);
     });
 
     it('dispose should be idempotent', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.idem' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.idem' } });
       const runtime = provider.createRuntime();
 
       runtime.dispose();
@@ -446,11 +446,11 @@ describe('OrchestratorProvider', () => {
       runtime.dispose();
 
       // Only one actual destroyTenant call
-      expect(mockOrch.orchestrator.destroyTenant).toHaveBeenCalledTimes(1);
+      expect(mockOrch.tenantManager.destroyTenant).toHaveBeenCalledTimes(1);
     });
 
     it('createContext after dispose should throw', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.after-dispose' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.after-dispose' } });
       const runtime = provider.createRuntime();
 
       runtime.dispose();
@@ -463,35 +463,35 @@ describe('OrchestratorProvider', () => {
 
   describe('context.eval', () => {
     it('should delegate to native evalInTenant', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.eval' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.eval' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       const result = context.eval('1 + 1');
 
-      expect(mockOrch.orchestrator.evalInTenant).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.evalInTenant).toHaveBeenCalled();
       expect(result).toBe('eval:1 + 1');
     });
 
     it('should pass correct tenantId to evalInTenant', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.eval-id' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.eval-id' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       context.eval('test code');
 
-      const callArgs = (mockOrch.orchestrator.evalInTenant as ReturnType<typeof mock>).mock.calls[0];
+      const callArgs = (mockOrch.tenantManager.evalInTenant as ReturnType<typeof mock>).mock.calls[0];
       expect(typeof callArgs[0]).toBe('number');
       expect(callArgs[1]).toBe('test code');
     });
 
     it('should propagate errors from native eval', () => {
       // Override mock to throw
-      (mockOrch.orchestrator.evalInTenant as ReturnType<typeof mock>).mockImplementation(() => {
+      (mockOrch.tenantManager.evalInTenant as ReturnType<typeof mock>).mockImplementation(() => {
         throw new Error('SyntaxError: unexpected token');
       });
 
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.eval-err' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.eval-err' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -499,7 +499,7 @@ describe('OrchestratorProvider', () => {
     });
 
     it('should throw after context is disposed', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.eval-disposed' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.eval-disposed' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -509,7 +509,7 @@ describe('OrchestratorProvider', () => {
     });
 
     it('should handle empty code string', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.empty' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.empty' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -519,13 +519,13 @@ describe('OrchestratorProvider', () => {
 
     it('should handle multiline code', () => {
       const code = 'var a = 1;\nvar b = 2;\na + b;';
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.multi' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.multi' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       context.eval(code);
 
-      const callArgs = (mockOrch.orchestrator.evalInTenant as ReturnType<typeof mock>).mock.calls[0];
+      const callArgs = (mockOrch.tenantManager.evalInTenant as ReturnType<typeof mock>).mock.calls[0];
       expect(callArgs[1]).toBe(code);
     });
   });
@@ -534,52 +534,52 @@ describe('OrchestratorProvider', () => {
 
   describe('context.inject', () => {
     it('should delegate to native setTenantGlobal', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.set' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.set' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       context.inject('myVar', 42);
 
-      expect(mockOrch.orchestrator.setTenantGlobal).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.setTenantGlobal).toHaveBeenCalled();
     });
 
     it('should pass correct arguments', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.set-args' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.set-args' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       context.inject('testName', { key: 'value' });
 
-      const callArgs = (mockOrch.orchestrator.setTenantGlobal as ReturnType<typeof mock>).mock.calls[0];
+      const callArgs = (mockOrch.tenantManager.setTenantGlobal as ReturnType<typeof mock>).mock.calls[0];
       expect(typeof callArgs[0]).toBe('number'); // tenantId
       expect(callArgs[1]).toBe('testName');
       expect(callArgs[2]).toEqual({ key: 'value' });
     });
 
     it('should handle function values', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.set-fn' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.set-fn' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       const fn = () => 'hello';
       context.inject('myFn', fn);
 
-      const callArgs = (mockOrch.orchestrator.setTenantGlobal as ReturnType<typeof mock>).mock.calls[0];
+      const callArgs = (mockOrch.tenantManager.setTenantGlobal as ReturnType<typeof mock>).mock.calls[0];
       expect(callArgs[2]).toBe(fn);
     });
 
     it('should handle undefined values', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.set-undef' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.set-undef' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       context.inject('gone', undefined);
 
-      expect(mockOrch.orchestrator.setTenantGlobal).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.setTenantGlobal).toHaveBeenCalled();
     });
 
     it('should silently no-op after dispose', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.set-disposed' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.set-disposed' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -588,11 +588,11 @@ describe('OrchestratorProvider', () => {
       context.inject('x', 1);
 
       // setTenantGlobal should NOT have been called after dispose
-      expect(mockOrch.orchestrator.setTenantGlobal).not.toHaveBeenCalled();
+      expect(mockOrch.tenantManager.setTenantGlobal).not.toHaveBeenCalled();
     });
 
     it('should support multiple inject calls', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.set-multi' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.set-multi' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -600,7 +600,7 @@ describe('OrchestratorProvider', () => {
       context.inject('b', 'hello');
       context.inject('c', [1, 2, 3]);
 
-      expect(mockOrch.orchestrator.setTenantGlobal).toHaveBeenCalledTimes(3);
+      expect(mockOrch.tenantManager.setTenantGlobal).toHaveBeenCalledTimes(3);
     });
   });
 
@@ -608,7 +608,7 @@ describe('OrchestratorProvider', () => {
 
   describe('context.extract', () => {
     it('should delegate to native getTenantGlobal', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.get' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.get' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -616,12 +616,12 @@ describe('OrchestratorProvider', () => {
       context.inject('myVar', 42);
       const result = context.extract('myVar');
 
-      expect(mockOrch.orchestrator.getTenantGlobal).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.getTenantGlobal).toHaveBeenCalled();
       expect(result).toBe(42); // Mock stores and returns it
     });
 
     it('should return undefined for non-existent globals', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.get-none' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.get-none' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -631,7 +631,7 @@ describe('OrchestratorProvider', () => {
     });
 
     it('should return undefined after context is disposed', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.get-disposed' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.get-disposed' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -641,11 +641,11 @@ describe('OrchestratorProvider', () => {
       // Should return undefined, not throw
       expect(result).toBeUndefined();
       // Should NOT call native method
-      expect(mockOrch.orchestrator.getTenantGlobal).not.toHaveBeenCalled();
+      expect(mockOrch.tenantManager.getTenantGlobal).not.toHaveBeenCalled();
     });
 
     it('should retrieve value set by inject', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.roundtrip' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.roundtrip' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -661,7 +661,7 @@ describe('OrchestratorProvider', () => {
 
   describe('context.dispose', () => {
     it('should be idempotent', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.ctx-dispose' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.ctx-dispose' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -673,7 +673,7 @@ describe('OrchestratorProvider', () => {
     });
 
     it('should prevent further eval calls', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.ctx-dis-eval' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.ctx-dis-eval' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -683,14 +683,14 @@ describe('OrchestratorProvider', () => {
     });
 
     it('should not call destroyTenant (runtime owns lifecycle)', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.ctx-no-destroy' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.ctx-no-destroy' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       context.dispose();
 
       // Context dispose does NOT destroy the tenant — only runtime.dispose does
-      expect(mockOrch.orchestrator.destroyTenant).not.toHaveBeenCalled();
+      expect(mockOrch.tenantManager.destroyTenant).not.toHaveBeenCalled();
     });
   });
 
@@ -698,13 +698,13 @@ describe('OrchestratorProvider', () => {
 
   describe('multi-tenant isolation', () => {
     it('should create separate tenants for each runtime', () => {
-      const p1 = new OrchestratorProvider({ tenantConfig: { appId: 'app-1' } });
-      const p2 = new OrchestratorProvider({ tenantConfig: { appId: 'app-2' } });
+      const p1 = new TenantManagerProvider({ tenantConfig: { appId: 'app-1' } });
+      const p2 = new TenantManagerProvider({ tenantConfig: { appId: 'app-2' } });
 
       const r1 = p1.createRuntime();
       const r2 = p2.createRuntime();
 
-      expect(mockOrch.orchestrator.createTenant).toHaveBeenCalledTimes(2);
+      expect(mockOrch.tenantManager.createTenant).toHaveBeenCalledTimes(2);
       expect(mockOrch.tenants.size).toBe(2);
 
       r1.dispose();
@@ -712,8 +712,8 @@ describe('OrchestratorProvider', () => {
     });
 
     it('should have isolated globals between tenants', () => {
-      const p1 = new OrchestratorProvider({ tenantConfig: { appId: 'iso-1' } });
-      const p2 = new OrchestratorProvider({ tenantConfig: { appId: 'iso-2' } });
+      const p1 = new TenantManagerProvider({ tenantConfig: { appId: 'iso-1' } });
+      const p2 = new TenantManagerProvider({ tenantConfig: { appId: 'iso-2' } });
 
       const c1 = p1.createRuntime().createContext();
       const c2 = p2.createRuntime().createContext();
@@ -727,8 +727,8 @@ describe('OrchestratorProvider', () => {
     });
 
     it('should destroy only the targeted tenant', () => {
-      const p1 = new OrchestratorProvider({ tenantConfig: { appId: 'destroy-1' } });
-      const p2 = new OrchestratorProvider({ tenantConfig: { appId: 'destroy-2' } });
+      const p1 = new TenantManagerProvider({ tenantConfig: { appId: 'destroy-1' } });
+      const p2 = new TenantManagerProvider({ tenantConfig: { appId: 'destroy-2' } });
 
       const r1 = p1.createRuntime();
       const r2 = p2.createRuntime();
@@ -736,7 +736,7 @@ describe('OrchestratorProvider', () => {
       r1.dispose();
 
       // Only one destroyTenant call
-      expect(mockOrch.orchestrator.destroyTenant).toHaveBeenCalledTimes(1);
+      expect(mockOrch.tenantManager.destroyTenant).toHaveBeenCalledTimes(1);
 
       // r2 should still work
       const c2 = r2.createContext();
@@ -751,31 +751,31 @@ describe('OrchestratorProvider', () => {
 
   describe('context.scheduleTimeout', () => {
     it('should delegate to native scheduleTenantTimeout', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.timeout' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.timeout' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       const timerId = (context as any).scheduleTimeout('cb-1', 1000);
 
-      expect(mockOrch.orchestrator.scheduleTenantTimeout).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.scheduleTenantTimeout).toHaveBeenCalled();
       expect(typeof timerId).toBe('number');
     });
 
     it('should pass correct tenantId, callbackId, and delay', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.to-args' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.to-args' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       (context as any).scheduleTimeout('my-callback', 500);
 
-      const callArgs = (mockOrch.orchestrator.scheduleTenantTimeout as ReturnType<typeof mock>).mock.calls[0];
+      const callArgs = (mockOrch.tenantManager.scheduleTenantTimeout as ReturnType<typeof mock>).mock.calls[0];
       expect(typeof callArgs[0]).toBe('number'); // tenantId
       expect(callArgs[1]).toBe('my-callback');
       expect(callArgs[2]).toBe(500);
     });
 
     it('should return unique timer IDs', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.to-ids' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.to-ids' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -786,7 +786,7 @@ describe('OrchestratorProvider', () => {
     });
 
     it('should throw after context is disposed', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.to-disposed' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.to-disposed' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -798,30 +798,30 @@ describe('OrchestratorProvider', () => {
 
   describe('context.scheduleInterval', () => {
     it('should delegate to native scheduleTenantInterval', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.interval' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.interval' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       const timerId = (context as any).scheduleInterval('cb-int', 200);
 
-      expect(mockOrch.orchestrator.scheduleTenantInterval).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.scheduleTenantInterval).toHaveBeenCalled();
       expect(typeof timerId).toBe('number');
     });
 
     it('should pass correct arguments', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.int-args' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.int-args' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       (context as any).scheduleInterval('repeat-cb', 300);
 
-      const callArgs = (mockOrch.orchestrator.scheduleTenantInterval as ReturnType<typeof mock>).mock.calls[0];
+      const callArgs = (mockOrch.tenantManager.scheduleTenantInterval as ReturnType<typeof mock>).mock.calls[0];
       expect(callArgs[1]).toBe('repeat-cb');
       expect(callArgs[2]).toBe(300);
     });
 
     it('should throw after context is disposed', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.int-disposed' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.int-disposed' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -833,20 +833,20 @@ describe('OrchestratorProvider', () => {
 
   describe('context.cancelTimer', () => {
     it('should delegate to native cancelTenantTimer', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.cancel' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.cancel' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       const timerId = (context as any).scheduleTimeout('cb-cancel', 1000);
       (context as any).cancelTimer(timerId);
 
-      expect(mockOrch.orchestrator.cancelTenantTimer).toHaveBeenCalled();
-      const callArgs = (mockOrch.orchestrator.cancelTenantTimer as ReturnType<typeof mock>).mock.calls[0];
+      expect(mockOrch.tenantManager.cancelTenantTimer).toHaveBeenCalled();
+      const callArgs = (mockOrch.tenantManager.cancelTenantTimer as ReturnType<typeof mock>).mock.calls[0];
       expect(callArgs[1]).toBe(timerId);
     });
 
     it('should remove timer from mock state', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.cancel-state' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.cancel-state' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -860,7 +860,7 @@ describe('OrchestratorProvider', () => {
     });
 
     it('should silently no-op after context is disposed', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.cancel-disposed' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.cancel-disposed' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -869,7 +869,7 @@ describe('OrchestratorProvider', () => {
 
       // Should not throw
       (context as any).cancelTimer(timerId);
-      expect(mockOrch.orchestrator.cancelTenantTimer).not.toHaveBeenCalled();
+      expect(mockOrch.tenantManager.cancelTenantTimer).not.toHaveBeenCalled();
     });
   });
 
@@ -877,37 +877,37 @@ describe('OrchestratorProvider', () => {
 
   describe('runtime.pauseTimers', () => {
     it('should delegate to native pauseTenantTimers', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.pause-t' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.pause-t' } });
       const runtime = provider.createRuntime();
 
       (runtime as any).pauseTimers();
 
-      expect(mockOrch.orchestrator.pauseTenantTimers).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.pauseTenantTimers).toHaveBeenCalled();
     });
 
     it('should pass correct tenantId', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.pause-id' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.pause-id' } });
       const runtime = provider.createRuntime();
 
       (runtime as any).pauseTimers();
 
-      const callArgs = (mockOrch.orchestrator.pauseTenantTimers as ReturnType<typeof mock>).mock.calls[0];
+      const callArgs = (mockOrch.tenantManager.pauseTenantTimers as ReturnType<typeof mock>).mock.calls[0];
       expect(typeof callArgs[0]).toBe('number');
     });
 
     it('should silently no-op after runtime is disposed', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.pause-disposed' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.pause-disposed' } });
       const runtime = provider.createRuntime();
 
       runtime.dispose();
       (runtime as any).pauseTimers();
 
       // pauseTenantTimers should not be called after dispose
-      expect(mockOrch.orchestrator.pauseTenantTimers).not.toHaveBeenCalled();
+      expect(mockOrch.tenantManager.pauseTenantTimers).not.toHaveBeenCalled();
     });
 
     it('should update mock timer state', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.pause-state' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.pause-state' } });
       const runtime = provider.createRuntime();
 
       (runtime as any).pauseTimers();
@@ -919,18 +919,18 @@ describe('OrchestratorProvider', () => {
 
   describe('runtime.resumeTimers', () => {
     it('should delegate to native resumeTenantTimers', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.resume-t' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.resume-t' } });
       const runtime = provider.createRuntime();
 
       // Pause first, then resume
       (runtime as any).pauseTimers();
       (runtime as any).resumeTimers();
 
-      expect(mockOrch.orchestrator.resumeTenantTimers).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.resumeTenantTimers).toHaveBeenCalled();
     });
 
     it('should update mock timer state back to unpaused', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.resume-state' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.resume-state' } });
       const runtime = provider.createRuntime();
 
       (runtime as any).pauseTimers();
@@ -942,13 +942,13 @@ describe('OrchestratorProvider', () => {
     });
 
     it('should silently no-op after runtime is disposed', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.resume-disposed' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.resume-disposed' } });
       const runtime = provider.createRuntime();
 
       runtime.dispose();
       (runtime as any).resumeTimers();
 
-      expect(mockOrch.orchestrator.resumeTenantTimers).not.toHaveBeenCalled();
+      expect(mockOrch.tenantManager.resumeTenantTimers).not.toHaveBeenCalled();
     });
   });
 
@@ -956,8 +956,8 @@ describe('OrchestratorProvider', () => {
 
   describe('multi-tenant timer isolation', () => {
     it('should schedule timers on different tenants independently', () => {
-      const p1 = new OrchestratorProvider({ tenantConfig: { appId: 'timer-1' } });
-      const p2 = new OrchestratorProvider({ tenantConfig: { appId: 'timer-2' } });
+      const p1 = new TenantManagerProvider({ tenantConfig: { appId: 'timer-1' } });
+      const p2 = new TenantManagerProvider({ tenantConfig: { appId: 'timer-2' } });
 
       const r1 = p1.createRuntime();
       const r2 = p2.createRuntime();
@@ -968,7 +968,7 @@ describe('OrchestratorProvider', () => {
       const t2 = (c2 as any).scheduleTimeout('cb-t2', 200);
 
       expect(t1).not.toBe(t2);
-      expect(mockOrch.orchestrator.scheduleTenantTimeout).toHaveBeenCalledTimes(2);
+      expect(mockOrch.tenantManager.scheduleTenantTimeout).toHaveBeenCalledTimes(2);
 
       // Verify each tenant has its own timer
       const [tenant1, tenant2] = [...mockOrch.tenants.values()];
@@ -980,8 +980,8 @@ describe('OrchestratorProvider', () => {
     });
 
     it('should cancel timers without affecting other tenants', () => {
-      const p1 = new OrchestratorProvider({ tenantConfig: { appId: 'cancel-1' } });
-      const p2 = new OrchestratorProvider({ tenantConfig: { appId: 'cancel-2' } });
+      const p1 = new TenantManagerProvider({ tenantConfig: { appId: 'cancel-1' } });
+      const p2 = new TenantManagerProvider({ tenantConfig: { appId: 'cancel-2' } });
 
       const r1 = p1.createRuntime();
       const r2 = p2.createRuntime();
@@ -1002,8 +1002,8 @@ describe('OrchestratorProvider', () => {
     });
 
     it('should pause/resume timers per tenant independently', () => {
-      const p1 = new OrchestratorProvider({ tenantConfig: { appId: 'pr-1' } });
-      const p2 = new OrchestratorProvider({ tenantConfig: { appId: 'pr-2' } });
+      const p1 = new TenantManagerProvider({ tenantConfig: { appId: 'pr-1' } });
+      const p2 = new TenantManagerProvider({ tenantConfig: { appId: 'pr-2' } });
 
       const r1 = p1.createRuntime();
       const r2 = p2.createRuntime();
@@ -1029,18 +1029,18 @@ describe('OrchestratorProvider', () => {
 
   describe('context.canUseComponent', () => {
     it('should delegate to native canUseComponent', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.perm' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.perm' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       const result = (context as any).canUseComponent('View');
 
-      expect(mockOrch.orchestrator.canUseComponent).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.canUseComponent).toHaveBeenCalled();
       expect(result).toBe(true); // allowAll = true by default
     });
 
     it('should deny when component not in whitelist', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.perm-deny' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.perm-deny' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -1054,7 +1054,7 @@ describe('OrchestratorProvider', () => {
     });
 
     it('should return false after context is disposed', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.perm-dis' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.perm-dis' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -1065,18 +1065,18 @@ describe('OrchestratorProvider', () => {
 
   describe('context.canUseAPI', () => {
     it('should delegate to native canUseAPI', () => {
-      const provider = new OrchestratorProvider({
+      const provider = new TenantManagerProvider({
         tenantConfig: { appId: 'com.api', apis: ['fetch', 'storage'] },
       });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       expect((context as any).canUseAPI('fetch')).toBe(true);
-      expect(mockOrch.orchestrator.canUseAPI).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.canUseAPI).toHaveBeenCalled();
     });
 
     it('should deny unlisted APIs', () => {
-      const provider = new OrchestratorProvider({
+      const provider = new TenantManagerProvider({
         tenantConfig: { appId: 'com.api-deny', apis: ['fetch'] },
       });
       const runtime = provider.createRuntime();
@@ -1087,7 +1087,7 @@ describe('OrchestratorProvider', () => {
     });
 
     it('should return false after context is disposed', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.api-dis' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.api-dis' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -1098,25 +1098,25 @@ describe('OrchestratorProvider', () => {
 
   describe('context.isOverQuota / isNearQuota', () => {
     it('should delegate isOverQuota to native', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.quota' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.quota' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       expect((context as any).isOverQuota()).toBe(false);
-      expect(mockOrch.orchestrator.isOverQuota).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.isOverQuota).toHaveBeenCalled();
     });
 
     it('should delegate isNearQuota to native', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.near-q' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.near-q' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       expect((context as any).isNearQuota()).toBe(false);
-      expect(mockOrch.orchestrator.isNearQuota).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.isNearQuota).toHaveBeenCalled();
     });
 
     it('should return false after context is disposed', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.q-dis' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.q-dis' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -1130,44 +1130,44 @@ describe('OrchestratorProvider', () => {
 
   describe('context.busCreateChannel', () => {
     it('should delegate to native busCreateChannel', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.bus-ch' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.bus-ch' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       (context as any).busCreateChannel({ name: 'test-channel' });
 
-      expect(mockOrch.orchestrator.busCreateChannel).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.busCreateChannel).toHaveBeenCalled();
       expect(mockOrch.channels.has('test-channel')).toBe(true);
     });
 
     it('should no-op after context is disposed', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.bus-ch-dis' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.bus-ch-dis' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       context.dispose();
       (context as any).busCreateChannel({ name: 'never' });
 
-      expect(mockOrch.orchestrator.busCreateChannel).not.toHaveBeenCalled();
+      expect(mockOrch.tenantManager.busCreateChannel).not.toHaveBeenCalled();
     });
   });
 
   describe('context.busSubscribe', () => {
     it('should delegate to native busSubscribe with tenantId', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.bus-sub' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.bus-sub' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       (context as any).busCreateChannel({ name: 'events' });
       const subId = (context as any).busSubscribe('events', '*');
 
-      expect(mockOrch.orchestrator.busSubscribe).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.busSubscribe).toHaveBeenCalled();
       expect(typeof subId).toBe('number');
       expect(subId).toBeGreaterThan(0);
     });
 
     it('should return 0 for non-existent channel', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.bus-sub-none' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.bus-sub-none' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -1176,7 +1176,7 @@ describe('OrchestratorProvider', () => {
     });
 
     it('should return 0 after context is disposed', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.bus-sub-dis' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.bus-sub-dis' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -1188,7 +1188,7 @@ describe('OrchestratorProvider', () => {
 
   describe('context.busUnsubscribe', () => {
     it('should delegate to native busUnsubscribe', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.bus-unsub' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.bus-unsub' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -1196,48 +1196,48 @@ describe('OrchestratorProvider', () => {
       const subId = (context as any).busSubscribe('ch', '*');
       (context as any).busUnsubscribe(subId);
 
-      expect(mockOrch.orchestrator.busUnsubscribe).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.busUnsubscribe).toHaveBeenCalled();
     });
   });
 
   describe('context.busUnsubscribeAll', () => {
     it('should delegate to native busUnsubscribeAll with tenantId', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.bus-unsub-all' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.bus-unsub-all' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       (context as any).busUnsubscribeAll();
 
-      expect(mockOrch.orchestrator.busUnsubscribeAll).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.busUnsubscribeAll).toHaveBeenCalled();
     });
 
     it('should no-op after context is disposed', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.bus-unsub-dis' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.bus-unsub-dis' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       context.dispose();
       (context as any).busUnsubscribeAll();
 
-      expect(mockOrch.orchestrator.busUnsubscribeAll).not.toHaveBeenCalled();
+      expect(mockOrch.tenantManager.busUnsubscribeAll).not.toHaveBeenCalled();
     });
   });
 
   describe('context.busBroadcast', () => {
     it('should delegate to native busBroadcast', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.bus-bcast' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.bus-bcast' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       (context as any).busCreateChannel({ name: 'broadcast-ch' });
       const result = (context as any).busBroadcast('broadcast-ch', 'ping', '{}');
 
-      expect(mockOrch.orchestrator.busBroadcast).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.busBroadcast).toHaveBeenCalled();
       expect(result).toBe(true);
     });
 
     it('should return false for non-existent channel', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.bus-bcast-none' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.bus-bcast-none' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -1246,7 +1246,7 @@ describe('OrchestratorProvider', () => {
     });
 
     it('should return false after context is disposed', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.bus-bcast-dis' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.bus-bcast-dis' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -1258,7 +1258,7 @@ describe('OrchestratorProvider', () => {
 
   describe('context.busPublish', () => {
     it('should delegate to native busPublish', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.bus-pub' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.bus-pub' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -1269,12 +1269,12 @@ describe('OrchestratorProvider', () => {
         payload: '{"key":"value"}',
       });
 
-      expect(mockOrch.orchestrator.busPublish).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.busPublish).toHaveBeenCalled();
       expect(result).toBe(true);
     });
 
     it('should auto-set sourceTenantId to context tenantId', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.bus-pub-id' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.bus-pub-id' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -1285,12 +1285,12 @@ describe('OrchestratorProvider', () => {
         payload: '{}',
       });
 
-      const callArgs = (mockOrch.orchestrator.busPublish as ReturnType<typeof mock>).mock.calls[0];
+      const callArgs = (mockOrch.tenantManager.busPublish as ReturnType<typeof mock>).mock.calls[0];
       expect(callArgs[0].sourceTenantId).toBeGreaterThan(0);
     });
 
     it('should return false after context is disposed', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.bus-pub-dis' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.bus-pub-dis' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -1304,19 +1304,19 @@ describe('OrchestratorProvider', () => {
 
   describe('context.busUnicast', () => {
     it('should delegate to native busUnicast', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.bus-uni' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.bus-uni' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       (context as any).busCreateChannel({ name: 'uni-ch' });
       const result = (context as any).busUnicast(42, 'uni-ch', 'hello', '{}');
 
-      expect(mockOrch.orchestrator.busUnicast).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.busUnicast).toHaveBeenCalled();
       expect(result).toBe(true);
     });
 
     it('should return false after context is disposed', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.bus-uni-dis' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.bus-uni-dis' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -1328,19 +1328,19 @@ describe('OrchestratorProvider', () => {
 
   describe('context.busMulticast', () => {
     it('should delegate to native busMulticast', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.bus-multi' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.bus-multi' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
       (context as any).busCreateChannel({ name: 'mcast-ch' });
       const result = (context as any).busMulticast([1, 2, 3], 'mcast-ch', 'hello', '{}');
 
-      expect(mockOrch.orchestrator.busMulticast).toHaveBeenCalled();
+      expect(mockOrch.tenantManager.busMulticast).toHaveBeenCalled();
       expect(result).toBe(true);
     });
 
     it('should return false after context is disposed', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.bus-multi-dis' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.bus-multi-dis' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -1352,7 +1352,7 @@ describe('OrchestratorProvider', () => {
 
   describe('context.busGetStats', () => {
     it('should return stats even after publish activity', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.bus-stats' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.bus-stats' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -1365,7 +1365,7 @@ describe('OrchestratorProvider', () => {
     });
 
     it('should work even after context is disposed', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.bus-stats-dis' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.bus-stats-dis' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -1381,7 +1381,7 @@ describe('OrchestratorProvider', () => {
 
   describe('JSEngineProvider interface', () => {
     it('createRuntime returns object with createContext and dispose', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.iface' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.iface' } });
       const runtime = provider.createRuntime();
 
       expect(runtime).toHaveProperty('createContext');
@@ -1389,7 +1389,7 @@ describe('OrchestratorProvider', () => {
     });
 
     it('createContext returns object with eval, inject, extract, dispose', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.ctx-iface' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.ctx-iface' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 
@@ -1400,7 +1400,7 @@ describe('OrchestratorProvider', () => {
     });
 
     it('all context methods are functions', () => {
-      const provider = new OrchestratorProvider({ tenantConfig: { appId: 'com.fns' } });
+      const provider = new TenantManagerProvider({ tenantConfig: { appId: 'com.fns' } });
       const runtime = provider.createRuntime();
       const context = runtime.createContext();
 

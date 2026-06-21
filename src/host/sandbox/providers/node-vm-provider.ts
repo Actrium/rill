@@ -8,7 +8,7 @@ import type { JSEngineProvider, JSEngineRuntime, SandboxScope } from '../types/p
  * Timeout Support:
  * - Hard timeout: YES. Uses vm.Script.runInContext({ timeout }) which is a true hard interrupt.
  */
-export class VMProvider implements JSEngineProvider {
+export class NodeVMProvider implements JSEngineProvider {
   private options: { timeout?: number };
 
   constructor(options?: { timeout?: number }) {

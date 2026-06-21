@@ -1,35 +1,35 @@
-# Orchestrator API 参考
+# TenantManager API 参考
 
-Orchestrator 是一个通过 JSI（JavaScript Interface）暴露给 Host JS 运行时的原生 C++ 多租户沙箱管理器。它提供租户生命周期管理、每租户资源配额和权限强制执行、通过 EventBus 的跨租户通信，以及原生线程级隔离。
+TenantManager 是一个通过 JSI（JavaScript Interface）暴露给 Host JS 运行时的原生 C++ 多租户沙箱管理器。它提供租户生命周期管理、每租户资源配额和权限强制执行、通过 EventBus 的跨租户通信，以及原生线程级隔离。
 
 ---
 
 ## Engine 集成
 
-Rill 通过 `EngineOptions.sandbox = 'orchestrator'`（或自动检测）来集成 Orchestrator。内部实现上，`Engine` 会通过一个内部的 TypeScript 适配器（`src/host/orchestrator/orchestrator-provider.ts`）把沙箱操作委托给原生 `__RillOrchestrator` HostObject，但该适配器不属于对外 API。
+Rill 通过 `EngineOptions.sandbox = 'tenant-manager'`（或自动检测）来集成 TenantManager。内部实现上，`Engine` 会通过一个内部的 TypeScript 适配器（`src/host/tenant manager/tenant manager-provider.ts`）把沙箱操作委托给原生 `__RillTenantManager` HostObject，但该适配器不属于对外 API。
 
 ### 检测
 
-原生 Orchestrator 作为全局对象安装在 Host JS 运行时上：
+原生 TenantManager 作为全局对象安装在 Host JS 运行时上：
 
 ```typescript
-globalThis.__RillOrchestrator: RillOrchestratorJSI | undefined
+globalThis.__RillTenantManager: RillTenantManagerJSI | undefined
 ```
 
-若 `globalThis.__RillOrchestrator` 已定义，则 Orchestrator 可用。
+若 `globalThis.__RillTenantManager` 已定义，则 TenantManager 可用。
 
 ### 用法
 
-当检测到 Orchestrator 时会自动选择，或通过 `sandbox` 选项明确选择：
+当检测到 TenantManager 时会自动选择，或通过 `sandbox` 选项明确选择：
 
 ```typescript
-// 自动检测（在 __RillOrchestrator 可用时使用）
+// 自动检测（在 __RillTenantManager 可用时使用）
 const engine = new Engine();
 
 // 明确选择
 const engine = new Engine({
-  sandbox: 'orchestrator',
-  orchestrator: {
+  sandbox: 'tenant-manager',
+  tenant: {
     appId: 'com.example.miniapp',
     quota: { maxHeapBytes: 16 * 1024 * 1024 },
   },
@@ -38,9 +38,9 @@ const engine = new Engine({
 
 ---
 
-## RillOrchestratorJSI
+## RillTenantManagerJSI
 
-原生 `__RillOrchestrator` HostObject 的完整 JSI 接口。除非另有说明，所有方法都是同步 JSI 调用。
+原生 `__RillTenantManager` HostObject 的完整 JSI 接口。除非另有说明，所有方法都是同步 JSI 调用。
 
 ### 租户生命周期
 
@@ -49,7 +49,7 @@ const engine = new Engine({
 创建一个具有自己的 JS 运行时和专用线程的新隔离租户。
 
 ```typescript
-createTenant(config: OrchestratorTenantConfig): number
+createTenant(config: TenantConfig): number
 ```
 
 返回用于对该租户的所有后续操作的租户 ID（整数）。
@@ -113,10 +113,10 @@ broadcast(name: string, payload?: unknown): void
 注册从原生租户到 Host JS 运行时的事件流的回调。
 
 ```typescript
-setHostCallbacks(callbacks: OrchestratorHostCallbacks): void
+setHostCallbacks(callbacks: TenantManagerHostCallbacks): void
 ```
 
-**OrchestratorHostCallbacks：**
+**TenantManagerHostCallbacks：**
 
 | 回调 | 签名 | 描述 |
 |---|---|---|
@@ -133,7 +133,7 @@ setHostCallbacks(callbacks: OrchestratorHostCallbacks): void
 获取有关特定租户的详细信息。
 
 ```typescript
-getTenantInfo(tenantId: number): OrchestratorTenantInfo
+getTenantInfo(tenantId: number): TenantInfo
 ```
 
 #### getMetrics()
@@ -141,7 +141,7 @@ getTenantInfo(tenantId: number): OrchestratorTenantInfo
 获取所有租户的聚合指标。
 
 ```typescript
-getMetrics(): OrchestratorMetrics
+getMetrics(): TenantManagerMetrics
 ```
 
 ### 每租户上下文
@@ -336,12 +336,12 @@ busCreateChannel(policy: ChannelPolicyConfig): void
 
 ## 类型定义
 
-### OrchestratorTenantConfig
+### TenantConfig
 
 创建新租户的配置。
 
 ```typescript
-interface OrchestratorTenantConfig {
+interface TenantConfig {
   /** 此租户的唯一应用程序标识符。 */
   appId: string;
 
@@ -368,12 +368,12 @@ interface OrchestratorTenantConfig {
 }
 ```
 
-### OrchestratorTenantInfo
+### TenantInfo
 
 由 `getTenantInfo()` 返回的有关租户的详细信息。
 
 ```typescript
-interface OrchestratorTenantInfo {
+interface TenantInfo {
   /** 租户 ID。 */
   id: number;
 
@@ -414,12 +414,12 @@ interface OrchestratorTenantInfo {
 }
 ```
 
-### OrchestratorMetrics
+### TenantManagerMetrics
 
 由 `getMetrics()` 返回的所有租户的聚合指标。
 
 ```typescript
-interface OrchestratorMetrics {
+interface TenantManagerMetrics {
   /** 曾经创建的租户总数。 */
   totalTenants: number;
 

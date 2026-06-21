@@ -1,5 +1,5 @@
 #import "RillSandboxNativeTurboModule.h"
-#include "RillOrchestrator.h"
+#include "RillTenantManager.h"
 
 #include <atomic>
 #include <exception>
@@ -112,13 +112,13 @@ void RillSandboxNativeInstall(facebook::jsi::Runtime *runtime) {
 
 } // extern "C"
 
-void RillSandboxNativeInstallWithOrchestrator(
+void RillSandboxNativeInstallWithTenantManager(
     facebook::jsi::Runtime *runtime,
     std::shared_ptr<facebook::react::CallInvoker> callInvoker) {
-  ensureSandboxInstalled(runtime, "RillSandboxNativeInstallWithOrchestrator");
+  ensureSandboxInstalled(runtime, "RillSandboxNativeInstallWithTenantManager");
 
-  if (runtime && !runtime->global().hasProperty(*runtime, "__RillOrchestrator")) {
-    rill::orchestrator::RillOrchestrator::install(*runtime, std::move(callInvoker));
+  if (runtime && !runtime->global().hasProperty(*runtime, "__RillTenantManager")) {
+    rill::tenant_manager::RillTenantManager::install(*runtime, std::move(callInvoker));
   }
 }
 
@@ -234,7 +234,7 @@ RCT_EXPORT_MODULE(RillSandboxNative)
   // Also store the host runtime pointer so app-local perf tooling (ios-demo)
   // can synchronously access the host JSI runtime without relying on swizzles.
   gHostRuntime.store(&runtime, std::memory_order_release);
-  RillSandboxNativeInstallWithOrchestrator(&runtime, callinvoker);
+  RillSandboxNativeInstallWithTenantManager(&runtime, callinvoker);
 }
 
 @end

@@ -6,7 +6,7 @@
 
 **文件:** `native/core/src/security/SecurityManager.h`
 
-`SecurityManager` 由 `RillOrchestrator` 拥有,并管理每个租户的安全上下文的生命周期。
+`SecurityManager` 由 `RillTenantManager` 拥有,并管理每个租户的安全上下文的生命周期。
 
 ### 职责
 

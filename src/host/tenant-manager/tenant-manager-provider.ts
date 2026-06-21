@@ -1,15 +1,15 @@
 /**
- * OrchestratorProvider - JSEngineProvider that delegates to native __RillOrchestrator.
+ * TenantManagerProvider - JSEngineProvider that delegates to native __RillTenantManager.
  *
  * Instead of creating a sandbox runtime/context directly in TS, this provider
  * creates a "virtual" runtime and context that route all operations through
- * the native C++ Orchestrator via JSI.
+ * the native C++ TenantManager via JSI.
  *
  * This allows the host Engine to transparently work with either:
  * - Direct sandbox providers (JSC/QuickJS/VM) — existing path
- * - Orchestrator-managed tenants — new path (this file)
+ * - TenantManager-managed tenants — new path (this file)
  *
- * The Orchestrator manages the actual sandbox lifecycle in native code,
+ * The TenantManager manages the actual sandbox lifecycle in native code,
  * while the Engine retains its polyfill injection, Bridge setup, and
  * event handling logic unchanged.
  */
@@ -25,55 +25,55 @@ import type {
   BusEventData,
   ChannelPolicyConfig,
   EventBusStats,
-  OrchestratorTenantConfig,
-  RillOrchestratorJSI,
+  RillTenantManagerJSI,
+  TenantConfig,
 } from './types';
 
 /**
- * Options for creating an OrchestratorProvider.
+ * Options for creating an TenantManagerProvider.
  */
-export interface OrchestratorProviderOptions {
+export interface TenantManagerProviderOptions {
   /** Tenant configuration for createTenant */
-  tenantConfig: OrchestratorTenantConfig;
+  tenantConfig: TenantConfig;
   /** Execution timeout (ms), passed to createTenant */
   timeout?: number;
 }
 
 /**
- * A SandboxScope that delegates to the native Orchestrator's per-tenant API.
+ * A SandboxScope that delegates to the native TenantManager's per-tenant API.
  * All eval/inject/extract calls are routed through JSI to the C++ TenantHandle.
  */
-class OrchestratorContext implements SandboxScope {
+class TenantManagerContext implements SandboxScope {
   private tenantId: number;
-  private orchestrator: RillOrchestratorJSI;
+  private tenantManager: RillTenantManagerJSI;
   private disposed = false;
 
-  constructor(tenantId: number, orchestrator: RillOrchestratorJSI) {
+  constructor(tenantId: number, tenantManager: RillTenantManagerJSI) {
     this.tenantId = tenantId;
-    this.orchestrator = orchestrator;
+    this.tenantManager = tenantManager;
   }
 
   eval = (code: string): ReviewedUnknown => {
     if (this.disposed) {
-      throw new Error('[OrchestratorContext] Context has been disposed');
+      throw new Error('[TenantManagerContext] Context has been disposed');
     }
-    return this.orchestrator.evalInTenant(this.tenantId, code);
+    return this.tenantManager.evalInTenant(this.tenantId, code);
   };
 
   inject = (name: string, value: ReviewedUnknown): void => {
     if (this.disposed) return;
-    this.orchestrator.setTenantGlobal(this.tenantId, name, value);
+    this.tenantManager.setTenantGlobal(this.tenantId, name, value);
   };
 
   extract = (name: string): ReviewedUnknown => {
     if (this.disposed) return undefined;
-    return this.orchestrator.getTenantGlobal(this.tenantId, name);
+    return this.tenantManager.getTenantGlobal(this.tenantId, name);
   };
 
   dispose = (): void => {
     if (this.disposed) return;
     this.disposed = true;
-    // Context disposal is handled by Orchestrator's destroyTenant.
+    // Context disposal is handled by TenantManager's destroyTenant.
     // We don't call destroyTenant here because the Runtime owns the lifecycle.
   };
 
@@ -85,9 +85,9 @@ class OrchestratorContext implements SandboxScope {
    */
   scheduleTimeout = (callbackId: string, delayMs: number): number => {
     if (this.disposed) {
-      throw new Error('[OrchestratorContext] Context has been disposed');
+      throw new Error('[TenantManagerContext] Context has been disposed');
     }
-    return this.orchestrator.scheduleTenantTimeout(this.tenantId, callbackId, delayMs);
+    return this.tenantManager.scheduleTenantTimeout(this.tenantId, callbackId, delayMs);
   };
 
   /**
@@ -96,9 +96,9 @@ class OrchestratorContext implements SandboxScope {
    */
   scheduleInterval = (callbackId: string, intervalMs: number): number => {
     if (this.disposed) {
-      throw new Error('[OrchestratorContext] Context has been disposed');
+      throw new Error('[TenantManagerContext] Context has been disposed');
     }
-    return this.orchestrator.scheduleTenantInterval(this.tenantId, callbackId, intervalMs);
+    return this.tenantManager.scheduleTenantInterval(this.tenantId, callbackId, intervalMs);
   };
 
   /**
@@ -106,29 +106,29 @@ class OrchestratorContext implements SandboxScope {
    */
   cancelTimer = (timerId: number): void => {
     if (this.disposed) return;
-    this.orchestrator.cancelTenantTimer(this.tenantId, timerId);
+    this.tenantManager.cancelTenantTimer(this.tenantId, timerId);
   };
 
   // --- Permission / quota queries (P1) ---
 
   canUseComponent = (name: string): boolean => {
     if (this.disposed) return false;
-    return this.orchestrator.canUseComponent(this.tenantId, name);
+    return this.tenantManager.canUseComponent(this.tenantId, name);
   };
 
   canUseAPI = (api: string): boolean => {
     if (this.disposed) return false;
-    return this.orchestrator.canUseAPI(this.tenantId, api);
+    return this.tenantManager.canUseAPI(this.tenantId, api);
   };
 
   isOverQuota = (): boolean => {
     if (this.disposed) return false;
-    return this.orchestrator.isOverQuota(this.tenantId);
+    return this.tenantManager.isOverQuota(this.tenantId);
   };
 
   isNearQuota = (): boolean => {
     if (this.disposed) return false;
-    return this.orchestrator.isNearQuota(this.tenantId);
+    return this.tenantManager.isNearQuota(this.tenantId);
   };
 
   // --- EventBus delegation (P2) ---
@@ -136,7 +136,7 @@ class OrchestratorContext implements SandboxScope {
   /** Publish an event to the cross-tenant EventBus. */
   busPublish = (event: BusEventData): boolean => {
     if (this.disposed) return false;
-    return this.orchestrator.busPublish({
+    return this.tenantManager.busPublish({
       ...event,
       sourceTenantId: event.sourceTenantId ?? this.tenantId,
     });
@@ -145,7 +145,7 @@ class OrchestratorContext implements SandboxScope {
   /** Broadcast a system event to all subscribers on a channel. */
   busBroadcast = (channel: string, name: string, payload: string): boolean => {
     if (this.disposed) return false;
-    return this.orchestrator.busBroadcast(channel, name, payload);
+    return this.tenantManager.busBroadcast(channel, name, payload);
   };
 
   /** Send a unicast event to a specific tenant. */
@@ -156,7 +156,7 @@ class OrchestratorContext implements SandboxScope {
     payload: string
   ): boolean => {
     if (this.disposed) return false;
-    return this.orchestrator.busUnicast(targetTenantId, channel, name, payload);
+    return this.tenantManager.busUnicast(targetTenantId, channel, name, payload);
   };
 
   /** Send a multicast event to selected tenants. */
@@ -167,66 +167,66 @@ class OrchestratorContext implements SandboxScope {
     payload: string
   ): boolean => {
     if (this.disposed) return false;
-    return this.orchestrator.busMulticast(targetTenantIds, channel, name, payload);
+    return this.tenantManager.busMulticast(targetTenantIds, channel, name, payload);
   };
 
   /** Subscribe to events on a channel. Returns subscription ID. */
   busSubscribe = (channel: string, filter: string): number => {
     if (this.disposed) return 0;
-    return this.orchestrator.busSubscribe(this.tenantId, channel, filter);
+    return this.tenantManager.busSubscribe(this.tenantId, channel, filter);
   };
 
   /** Cancel a subscription. */
   busUnsubscribe = (subscriptionId: number): void => {
     if (this.disposed) return;
-    this.orchestrator.busUnsubscribe(subscriptionId);
+    this.tenantManager.busUnsubscribe(subscriptionId);
   };
 
   /** Cancel all subscriptions for this tenant. */
   busUnsubscribeAll = (): void => {
     if (this.disposed) return;
-    this.orchestrator.busUnsubscribeAll(this.tenantId);
+    this.tenantManager.busUnsubscribeAll(this.tenantId);
   };
 
   /** Get EventBus statistics. */
   busGetStats = (): EventBusStats => {
-    return this.orchestrator.busGetStats();
+    return this.tenantManager.busGetStats();
   };
 
   /** Create a channel with the given policy. */
   busCreateChannel = (policy: ChannelPolicyConfig): void => {
     if (this.disposed) return;
-    this.orchestrator.busCreateChannel(policy);
+    this.tenantManager.busCreateChannel(policy);
   };
 }
 
 /**
- * A JSEngineRuntime that wraps an Orchestrator-managed tenant.
- * createContext() returns an OrchestratorContext bound to the tenant ID.
+ * A JSEngineRuntime that wraps an TenantManager-managed tenant.
+ * createContext() returns an TenantManagerContext bound to the tenant ID.
  */
-class OrchestratorRuntime implements JSEngineRuntime {
+class TenantManagerRuntime implements JSEngineRuntime {
   private tenantId: number;
-  private orchestrator: RillOrchestratorJSI;
+  private tenantManager: RillTenantManagerJSI;
   private disposed = false;
 
-  constructor(tenantId: number, orchestrator: RillOrchestratorJSI) {
+  constructor(tenantId: number, tenantManager: RillTenantManagerJSI) {
     this.tenantId = tenantId;
-    this.orchestrator = orchestrator;
+    this.tenantManager = tenantManager;
   }
 
   createContext = (): SandboxScope => {
     if (this.disposed) {
-      throw new Error('[OrchestratorRuntime] Runtime has been disposed');
+      throw new Error('[TenantManagerRuntime] Runtime has been disposed');
     }
     // The native sandbox context was already created by createTenant.
     // We return a TS wrapper that delegates to the per-tenant JSI methods.
-    return new OrchestratorContext(this.tenantId, this.orchestrator);
+    return new TenantManagerContext(this.tenantId, this.tenantManager);
   };
 
   dispose = (): void => {
     if (this.disposed) return;
     this.disposed = true;
-    this.orchestrator.destroyTenant(this.tenantId);
+    this.tenantManager.destroyTenant(this.tenantId);
   };
 
   /** Expose tenant ID for Engine-level orchestration (e.g., pause/resume) */
@@ -239,31 +239,31 @@ class OrchestratorRuntime implements JSEngineRuntime {
   /** Pause all timers on this tenant's thread. */
   pauseTimers = (): void => {
     if (this.disposed) return;
-    this.orchestrator.pauseTenantTimers(this.tenantId);
+    this.tenantManager.pauseTenantTimers(this.tenantId);
   };
 
   /** Resume all timers on this tenant's thread. */
   resumeTimers = (): void => {
     if (this.disposed) return;
-    this.orchestrator.resumeTenantTimers(this.tenantId);
+    this.tenantManager.resumeTenantTimers(this.tenantId);
   };
 }
 
 /**
- * JSEngineProvider that creates tenants via native __RillOrchestrator.
+ * JSEngineProvider that creates tenants via native __RillTenantManager.
  *
  * Usage:
  * ```typescript
- * const provider = new OrchestratorProvider({
+ * const provider = new TenantManagerProvider({
  *   tenantConfig: { appId: 'com.example.app' },
  * });
- * const engine = new Engine({ sandbox: 'orchestrator', orchestrator: { appId: 'com.example' } });
+ * const engine = new Engine({ sandbox: 'tenant-manager', tenant: { appId: 'com.example' } });
  * ```
  */
-export class OrchestratorProvider implements JSEngineProvider {
-  private config: OrchestratorTenantConfig;
+export class TenantManagerProvider implements JSEngineProvider {
+  private config: TenantConfig;
 
-  constructor(options: OrchestratorProviderOptions) {
+  constructor(options: TenantManagerProviderOptions) {
     this.config = { ...options.tenantConfig };
     if (options.timeout != null) {
       this.config.timeout = options.timeout;
@@ -271,16 +271,16 @@ export class OrchestratorProvider implements JSEngineProvider {
   }
 
   createRuntime = (options?: JSEngineRuntimeOptions): JSEngineRuntime => {
-    const orchestrator = globalThis.__RillOrchestrator;
-    if (!orchestrator) {
+    const tenantManager = globalThis.__RillTenantManager;
+    if (!tenantManager) {
       throw new Error(
-        '[OrchestratorProvider] __RillOrchestrator not available. ' +
+        '[TenantManagerProvider] __RillTenantManager not available. ' +
           'Ensure the native module is installed before creating an Engine.'
       );
     }
 
     // Merge runtime options into tenant config
-    const config: OrchestratorTenantConfig = { ...this.config };
+    const config: TenantConfig = { ...this.config };
     if (options?.timeout != null) {
       config.timeout = options.timeout;
     }
@@ -289,15 +289,15 @@ export class OrchestratorProvider implements JSEngineProvider {
     }
 
     // Create tenant in native layer — synchronous JSI call
-    const tenantId = orchestrator.createTenant(config);
+    const tenantId = tenantManager.createTenant(config);
 
-    return new OrchestratorRuntime(tenantId, orchestrator);
+    return new TenantManagerRuntime(tenantId, tenantManager);
   };
 
   /**
-   * Check if the native Orchestrator is available in the current runtime.
+   * Check if the native TenantManager is available in the current runtime.
    */
   static isAvailable(): boolean {
-    return typeof globalThis.__RillOrchestrator !== 'undefined';
+    return typeof globalThis.__RillTenantManager !== 'undefined';
   }
 }

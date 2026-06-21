@@ -1,7 +1,7 @@
 #include "test_framework.h"
 #include "../src/TimerWheel.h"
 
-using namespace rill::orchestrator;
+using namespace rill::tenant_manager;
 using namespace rill::test;
 
 namespace {

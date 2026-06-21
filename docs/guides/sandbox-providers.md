@@ -110,7 +110,7 @@ Uses the built-in `node:vm` module. Available in Node.js and Bun environments --
 import { Engine } from 'rill/host';
 
 const engine = new Engine({
-  sandbox: 'vm',
+  sandbox: 'node-vm',
   // ...
 });
 ```
@@ -132,7 +132,7 @@ When no explicit `sandbox` option is provided, Rill selects the best available p
 | React Native with Hermes (`RILL_SANDBOX_ENGINE=hermes`) | `HermesProvider` |
 | Apple platform (iOS / macOS) | `JSCProvider` |
 | Any other React Native platform | `QuickJSProvider` |
-| Node.js or Bun runtime | `VMProvider` |
+| Node.js or Bun runtime | `NodeVMProvider` |
 | Web browser | `QuickJSNativeWASMProvider` |
 
 The auto-selection runs once at engine creation time. You can override it by passing the `sandbox` option explicitly.
@@ -149,9 +149,8 @@ The `sandbox` field in `EngineOptions` accepts the following string values:
 | `'hermes'` | Hermes Native |
 | `'quickjs'` | QuickJS Native |
 | `'wasm-quickjs'` | QuickJS WASM |
-| `'vm'` | Node VM |
-| `'orchestrator'` | Native Orchestrator (multi-tenant mode) |
-| `'none'` | No sandbox -- executes in the host context (development only) |
+| `'node-vm'` | Node VM |
+| `'tenant-manager'` | Native TenantManager (multi-tenant mode) |
 
 ```ts
 const engine = new Engine({

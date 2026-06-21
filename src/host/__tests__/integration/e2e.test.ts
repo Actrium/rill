@@ -59,7 +59,7 @@ describe('E2E Integration Tests', () => {
       // Silent logger to prevent expected error logs from cluttering output
       const silentLogger = { log: () => {}, warn: () => {}, error: () => {} };
       engine = new Engine({
-        sandbox: 'vm',
+        sandbox: 'node-vm',
         debug: false,
         logger: silentLogger,
       });
@@ -392,7 +392,7 @@ describe('E2E Integration Tests', () => {
       // Silent logger to prevent expected error logs from cluttering output
       const silentLogger = { log: () => {}, warn: () => {}, error: () => {} };
       engine = new Engine({
-        sandbox: 'vm',
+        sandbox: 'node-vm',
         debug: false,
         logger: silentLogger,
       });
@@ -490,7 +490,7 @@ describe('E2E Integration Tests', () => {
       // Silent logger to prevent expected error logs from cluttering output
       const silentLogger = { log: () => {}, warn: () => {}, error: () => {} };
       engine = new Engine({
-        sandbox: 'vm',
+        sandbox: 'node-vm',
         debug: false,
         logger: silentLogger,
       });
@@ -650,7 +650,7 @@ describe('E2E Integration Tests', () => {
 describe('Full Stack Simulation', () => {
   it('should simulate complete render cycle', async () => {
     // 1. Create Engine
-    const engine = new Engine({ sandbox: 'vm', debug: false });
+    const engine = new Engine({ sandbox: 'node-vm', debug: false });
     engine.register({
       View: MockView,
       Text: MockText,

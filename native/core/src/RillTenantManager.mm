@@ -1,39 +1,39 @@
-#include "RillOrchestrator.h"
+#include "RillTenantManager.h"
 #include <stdexcept>
 #import <Foundation/Foundation.h>
 
-namespace rill::orchestrator {
+namespace rill::tenant_manager {
 
 // Singleton instance
-std::shared_ptr<RillOrchestrator> RillOrchestrator::instance_ = nullptr;
+std::shared_ptr<RillTenantManager> RillTenantManager::instance_ = nullptr;
 
-RillOrchestrator::RillOrchestrator(
+RillTenantManager::RillTenantManager(
     facebook::jsi::Runtime& hostRuntime,
     std::shared_ptr<facebook::react::CallInvoker> callInvoker)
     : hostRuntime_(&hostRuntime),
       callInvoker_(std::move(callInvoker)) {}
 
-void RillOrchestrator::install(
+void RillTenantManager::install(
     facebook::jsi::Runtime& hostRuntime,
     std::shared_ptr<facebook::react::CallInvoker> callInvoker) {
-  auto orchestrator =
-      std::shared_ptr<RillOrchestrator>(
-          new RillOrchestrator(hostRuntime, std::move(callInvoker)));
-  instance_ = orchestrator;
+  auto tenant_manager =
+      std::shared_ptr<RillTenantManager>(
+          new RillTenantManager(hostRuntime, std::move(callInvoker)));
+  instance_ = tenant_manager;
 
   auto obj = facebook::jsi::Object::createFromHostObject(
-      hostRuntime, orchestrator);
+      hostRuntime, tenant_manager);
   hostRuntime.global().setProperty(
-      hostRuntime, "__RillOrchestrator", std::move(obj));
+      hostRuntime, "__RillTenantManager", std::move(obj));
 }
 
-RillOrchestrator* RillOrchestrator::instance() {
+RillTenantManager* RillTenantManager::instance() {
   return instance_.get();
 }
 
 // --- jsi::HostObject interface ---
 
-facebook::jsi::Value RillOrchestrator::get(
+facebook::jsi::Value RillTenantManager::get(
     facebook::jsi::Runtime& rt,
     const facebook::jsi::PropNameID& name) {
   auto propName = name.utf8(rt);
@@ -534,13 +534,13 @@ facebook::jsi::Value RillOrchestrator::get(
   return facebook::jsi::Value::undefined();
 }
 
-void RillOrchestrator::set(facebook::jsi::Runtime&,
+void RillTenantManager::set(facebook::jsi::Runtime&,
                            const facebook::jsi::PropNameID&,
                            const facebook::jsi::Value&) {
   // Read-only host object
 }
 
-std::vector<facebook::jsi::PropNameID> RillOrchestrator::getPropertyNames(
+std::vector<facebook::jsi::PropNameID> RillTenantManager::getPropertyNames(
     facebook::jsi::Runtime& rt) {
   std::vector<facebook::jsi::PropNameID> props;
   props.push_back(facebook::jsi::PropNameID::forUtf8(rt, "createTenant"));
@@ -582,7 +582,7 @@ std::vector<facebook::jsi::PropNameID> RillOrchestrator::getPropertyNames(
 
 // --- Tenant lifecycle ---
 
-TenantConfig RillOrchestrator::parseTenantConfig(
+TenantConfig RillTenantManager::parseTenantConfig(
     facebook::jsi::Runtime& rt,
     const facebook::jsi::Object& config) {
   TenantConfig tc;
@@ -634,7 +634,7 @@ TenantConfig RillOrchestrator::parseTenantConfig(
   return tc;
 }
 
-TenantId RillOrchestrator::createTenant(facebook::jsi::Runtime& rt,
+TenantId RillTenantManager::createTenant(facebook::jsi::Runtime& rt,
                                         const facebook::jsi::Object& config) {
   std::unique_lock<std::recursive_mutex> lock(mutex_);
 
@@ -671,7 +671,7 @@ TenantId RillOrchestrator::createTenant(facebook::jsi::Runtime& rt,
     handle->createSandbox(rt, tc.timeout);
   } catch (const std::exception& e) {
     // Copy callback under a dedicated mutex; do NOT call Host JS while holding
-    // the Orchestrator state mutex (risk of re-entrant deadlocks).
+    // the TenantManager state mutex (risk of re-entrant deadlocks).
     std::shared_ptr<facebook::jsi::Function> onError;
     {
       std::lock_guard<std::mutex> cbLock(callbacksMutex_);
@@ -719,7 +719,7 @@ TenantId RillOrchestrator::createTenant(facebook::jsi::Runtime& rt,
   try {
     threadPool_.createThread(id);
 
-    // Register in TenantRegistry using Orchestrator's tenant id.
+    // Register in TenantRegistry using TenantManager's tenant id.
     // This avoids id mismatches during unregister and keeps metrics consistent.
     auto* inserted = tenants_.at(id).get();
     registry_.registerTenantWithId(
@@ -746,7 +746,7 @@ TenantId RillOrchestrator::createTenant(facebook::jsi::Runtime& rt,
   return id;
 }
 
-void RillOrchestrator::destroyTenant(TenantId id) {
+void RillTenantManager::destroyTenant(TenantId id) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 
   auto it = tenants_.find(id);
@@ -766,7 +766,7 @@ void RillOrchestrator::destroyTenant(TenantId id) {
   registry_.unregisterTenant(id);
 }
 
-void RillOrchestrator::pauseTenant(TenantId id) {
+void RillTenantManager::pauseTenant(TenantId id) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 
   auto* handle = getTenantOrThrow(id);
@@ -778,7 +778,7 @@ void RillOrchestrator::pauseTenant(TenantId id) {
   }
 }
 
-void RillOrchestrator::resumeTenant(TenantId id) {
+void RillTenantManager::resumeTenant(TenantId id) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 
   auto* handle = getTenantOrThrow(id);
@@ -792,7 +792,7 @@ void RillOrchestrator::resumeTenant(TenantId id) {
 
 // --- Code loading ---
 
-void RillOrchestrator::loadBundle(TenantId id, const std::string& code) {
+void RillTenantManager::loadBundle(TenantId id, const std::string& code) {
   std::unique_lock<std::recursive_mutex> lock(mutex_);
 
   auto* handle = getTenantOrThrow(id);
@@ -822,7 +822,7 @@ void RillOrchestrator::loadBundle(TenantId id, const std::string& code) {
 
 // --- Communication ---
 
-void RillOrchestrator::sendEvent(TenantId id, const std::string& name,
+void RillTenantManager::sendEvent(TenantId id, const std::string& name,
                                  facebook::jsi::Runtime& rt,
                                  const facebook::jsi::Value& payload) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -846,7 +846,7 @@ void RillOrchestrator::sendEvent(TenantId id, const std::string& name,
       "__RILL_EVENT_HANDLER(__RILL_INCOMING_EVENT);");
 }
 
-void RillOrchestrator::broadcast(const std::string& name,
+void RillTenantManager::broadcast(const std::string& name,
                                  facebook::jsi::Runtime& rt,
                                  const facebook::jsi::Value& payload) {
   // IMPORTANT: Do not call sendEvent() while holding mutex_.
@@ -868,7 +868,7 @@ void RillOrchestrator::broadcast(const std::string& name,
 
 // --- Host callbacks ---
 
-void RillOrchestrator::setHostCallbacks(facebook::jsi::Runtime& rt,
+void RillTenantManager::setHostCallbacks(facebook::jsi::Runtime& rt,
                                         const facebook::jsi::Object& callbacks) {
   std::lock_guard<std::mutex> cbLock(callbacksMutex_);
   if (callbacks.hasProperty(rt, "onBatch")) {
@@ -900,7 +900,7 @@ void RillOrchestrator::setHostCallbacks(facebook::jsi::Runtime& rt,
 
 // --- Metrics ---
 
-facebook::jsi::Object RillOrchestrator::getTenantInfo(
+facebook::jsi::Object RillTenantManager::getTenantInfo(
     facebook::jsi::Runtime& rt, TenantId id) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 
@@ -943,7 +943,7 @@ facebook::jsi::Object RillOrchestrator::getTenantInfo(
   return info;
 }
 
-facebook::jsi::Object RillOrchestrator::getMetrics(facebook::jsi::Runtime& rt) {
+facebook::jsi::Object RillTenantManager::getMetrics(facebook::jsi::Runtime& rt) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 
   auto metrics = facebook::jsi::Object(rt);
@@ -977,14 +977,14 @@ facebook::jsi::Object RillOrchestrator::getMetrics(facebook::jsi::Runtime& rt) {
 
 // --- Per-tenant context operations ---
 
-facebook::jsi::Value RillOrchestrator::evalInTenant(
+facebook::jsi::Value RillTenantManager::evalInTenant(
     facebook::jsi::Runtime& rt, TenantId id, const std::string& code) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto* handle = getTenantOrThrow(id);
   return handle->eval(rt, code);
 }
 
-void RillOrchestrator::setTenantGlobal(
+void RillTenantManager::setTenantGlobal(
     facebook::jsi::Runtime& rt, TenantId id,
     const std::string& name, const facebook::jsi::Value& value) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -992,7 +992,7 @@ void RillOrchestrator::setTenantGlobal(
   handle->inject(rt, name, value);
 }
 
-facebook::jsi::Value RillOrchestrator::getTenantGlobal(
+facebook::jsi::Value RillTenantManager::getTenantGlobal(
     facebook::jsi::Runtime& rt, TenantId id, const std::string& name) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto* handle = getTenantOrThrow(id);
@@ -1001,13 +1001,13 @@ facebook::jsi::Value RillOrchestrator::getTenantGlobal(
 
 // --- Per-tenant timer operations ---
 
-double RillOrchestrator::scheduleTenantTimeout(
+double RillTenantManager::scheduleTenantTimeout(
     TenantId id, const std::string& callbackId, double delayMs) {
   std::unique_lock<std::recursive_mutex> lock(mutex_);
   auto* thread = threadPool_.getThread(id);
   if (!thread) {
     throw std::runtime_error(
-        "[RillOrchestrator] No thread for tenant: " + std::to_string(id));
+        "[RillTenantManager] No thread for tenant: " + std::to_string(id));
   }
 
   // P1: Quota enforcement — check before scheduling
@@ -1036,13 +1036,13 @@ double RillOrchestrator::scheduleTenantTimeout(
   return static_cast<double>(timerId);
 }
 
-double RillOrchestrator::scheduleTenantInterval(
+double RillTenantManager::scheduleTenantInterval(
     TenantId id, const std::string& callbackId, double intervalMs) {
   std::unique_lock<std::recursive_mutex> lock(mutex_);
   auto* thread = threadPool_.getThread(id);
   if (!thread) {
     throw std::runtime_error(
-        "[RillOrchestrator] No thread for tenant: " + std::to_string(id));
+        "[RillTenantManager] No thread for tenant: " + std::to_string(id));
   }
 
   // P1: Quota enforcement
@@ -1067,7 +1067,7 @@ double RillOrchestrator::scheduleTenantInterval(
   return static_cast<double>(timerId);
 }
 
-void RillOrchestrator::cancelTenantTimer(TenantId id, double timerId) {
+void RillTenantManager::cancelTenantTimer(TenantId id, double timerId) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto* thread = threadPool_.getThread(id);
   if (!thread) return;  // Tenant already destroyed — silently ignore
@@ -1088,19 +1088,19 @@ void RillOrchestrator::cancelTenantTimer(TenantId id, double timerId) {
   }
 }
 
-void RillOrchestrator::pauseTenantTimers(TenantId id) {
+void RillTenantManager::pauseTenantTimers(TenantId id) {
   auto* thread = threadPool_.getThread(id);
   if (!thread) return;
   thread->pauseTimers();
 }
 
-void RillOrchestrator::resumeTenantTimers(TenantId id) {
+void RillTenantManager::resumeTenantTimers(TenantId id) {
   auto* thread = threadPool_.getThread(id);
   if (!thread) return;
   thread->resumeTimers();
 }
 
-void RillOrchestrator::onTimerFired(TenantId tenantId,
+void RillTenantManager::onTimerFired(TenantId tenantId,
                                      const std::string& callbackId) {
   // This is called from a TenantThread. Route to Host VM thread via CallInvoker.
   if (!callInvoker_) return;
@@ -1128,7 +1128,7 @@ void RillOrchestrator::onTimerFired(TenantId tenantId,
 
 // --- Permission / quota queries ---
 
-bool RillOrchestrator::canUseComponent(TenantId id, const std::string& name) {
+bool RillTenantManager::canUseComponent(TenantId id, const std::string& name) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto* handle = getTenantOrThrow(id);
   auto& ctx = handle->context();
@@ -1139,7 +1139,7 @@ bool RillOrchestrator::canUseComponent(TenantId id, const std::string& name) {
   return allowed;
 }
 
-bool RillOrchestrator::canUseAPI(TenantId id, const std::string& name) {
+bool RillTenantManager::canUseAPI(TenantId id, const std::string& name) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto* handle = getTenantOrThrow(id);
   auto& ctx = handle->context();
@@ -1150,13 +1150,13 @@ bool RillOrchestrator::canUseAPI(TenantId id, const std::string& name) {
   return allowed;
 }
 
-bool RillOrchestrator::isOverQuota(TenantId id) {
+bool RillTenantManager::isOverQuota(TenantId id) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto* handle = getTenantOrThrow(id);
   return handle->context().isOverQuota();
 }
 
-bool RillOrchestrator::isNearQuota(TenantId id) {
+bool RillTenantManager::isNearQuota(TenantId id) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto* handle = getTenantOrThrow(id);
   return handle->context().isNearQuota();
@@ -1164,7 +1164,7 @@ bool RillOrchestrator::isNearQuota(TenantId id) {
 
 // --- EventBus JSI method implementations (P2) ---
 
-bool RillOrchestrator::busPublish(facebook::jsi::Runtime& rt,
+bool RillTenantManager::busPublish(facebook::jsi::Runtime& rt,
                                    const facebook::jsi::Object& opts) {
   BusEvent event;
   event.channel = opts.getProperty(rt, "channel").asString(rt).utf8(rt);
@@ -1183,21 +1183,21 @@ bool RillOrchestrator::busPublish(facebook::jsi::Runtime& rt,
   return eventBus_.publish(std::move(event));
 }
 
-bool RillOrchestrator::busBroadcast(facebook::jsi::Runtime&,
+bool RillTenantManager::busBroadcast(facebook::jsi::Runtime&,
                                      const std::string& channel,
                                      const std::string& name,
                                      const std::string& payload) {
   return eventBus_.broadcast(channel, name, payload);
 }
 
-bool RillOrchestrator::busUnicast(TenantId targetId,
+bool RillTenantManager::busUnicast(TenantId targetId,
                                    const std::string& channel,
                                    const std::string& name,
                                    const std::string& payload) {
   return eventBus_.unicast(targetId, channel, name, payload);
 }
 
-bool RillOrchestrator::busMulticast(facebook::jsi::Runtime& rt,
+bool RillTenantManager::busMulticast(facebook::jsi::Runtime& rt,
                                      const facebook::jsi::Array& targetIds,
                                      const std::string& channel,
                                      const std::string& name,
@@ -1211,7 +1211,7 @@ bool RillOrchestrator::busMulticast(facebook::jsi::Runtime& rt,
   return eventBus_.multicast(ids, channel, name, payload);
 }
 
-double RillOrchestrator::busSubscribe(TenantId tenantId,
+double RillTenantManager::busSubscribe(TenantId tenantId,
                                        const std::string& channel,
                                        const std::string& filter) {
   // Subscribe with a handler that routes events to the host JS thread.
@@ -1250,15 +1250,15 @@ double RillOrchestrator::busSubscribe(TenantId tenantId,
   return static_cast<double>(subId);
 }
 
-void RillOrchestrator::busUnsubscribe(double subscriptionId) {
+void RillTenantManager::busUnsubscribe(double subscriptionId) {
   eventBus_.unsubscribe(static_cast<uint64_t>(subscriptionId));
 }
 
-void RillOrchestrator::busUnsubscribeAll(TenantId tenantId) {
+void RillTenantManager::busUnsubscribeAll(TenantId tenantId) {
   eventBus_.unsubscribeAll(tenantId);
 }
 
-facebook::jsi::Object RillOrchestrator::busGetStats(facebook::jsi::Runtime& rt) {
+facebook::jsi::Object RillTenantManager::busGetStats(facebook::jsi::Runtime& rt) {
   auto stats = eventBus_.getStats();
   auto obj = facebook::jsi::Object(rt);
   obj.setProperty(rt, "totalPublished", static_cast<double>(stats.totalPublished));
@@ -1269,7 +1269,7 @@ facebook::jsi::Object RillOrchestrator::busGetStats(facebook::jsi::Runtime& rt) 
   return obj;
 }
 
-void RillOrchestrator::busCreateChannel(facebook::jsi::Runtime& rt,
+void RillTenantManager::busCreateChannel(facebook::jsi::Runtime& rt,
                                          const facebook::jsi::Object& policy) {
   ChannelPolicy cp;
   cp.name = policy.getProperty(rt, "name").asString(rt).utf8(rt);
@@ -1301,13 +1301,13 @@ void RillOrchestrator::busCreateChannel(facebook::jsi::Runtime& rt,
 
 // --- Helpers ---
 
-TenantHandle* RillOrchestrator::getTenantOrThrow(TenantId id) {
+TenantHandle* RillTenantManager::getTenantOrThrow(TenantId id) {
   auto it = tenants_.find(id);
   if (it == tenants_.end()) {
     throw std::runtime_error(
-        "[RillOrchestrator] Tenant not found: " + std::to_string(id));
+        "[RillTenantManager] Tenant not found: " + std::to_string(id));
   }
   return it->second.get();
 }
 
-} // namespace rill::orchestrator
+} // namespace rill::tenant_manager

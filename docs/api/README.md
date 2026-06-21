@@ -42,14 +42,14 @@ The Guest SDK provides the components, hooks, and platform APIs available inside
 
 See [guest.md](./guest.md) for the full Guest API reference.
 
-### Orchestrator (`rill/host` with `sandbox: 'orchestrator'`)
+### TenantManager (`rill/host` with `sandbox: 'tenant-manager'`)
 
-The Orchestrator is a native C++ multi-tenant sandbox manager exposed to the host JS runtime via JSI. It provides tenant lifecycle management, per-tenant resource quotas, permission enforcement, and a cross-tenant EventBus.
+The TenantManager is a native C++ multi-tenant sandbox manager exposed to the host JS runtime via JSI. It provides tenant lifecycle management, per-tenant resource quotas, permission enforcement, and a cross-tenant EventBus.
 
-- **Note:** You don't import a provider. `Engine` auto-detects `globalThis.__RillOrchestrator` and delegates internally, or you can force it via `EngineOptions.sandbox = 'orchestrator'`.
-- **RillOrchestratorJSI** -- The full JSI interface for tenant management, code loading, communication, metrics, and EventBus operations.
+- **Note:** You don't import a provider. `Engine` auto-detects `globalThis.__RillTenantManager` and delegates internally, or you can force it via `EngineOptions.sandbox = 'tenant-manager'`.
+- **RillTenantManagerJSI** -- The full JSI interface for tenant management, code loading, communication, metrics, and EventBus operations.
 
-See [orchestrator.md](./orchestrator.md) for the full Orchestrator API reference.
+See [tenant-manager.md](./tenant-manager.md) for the full TenantManager API reference.
 
 ### Sandbox Providers (internal)
 
@@ -59,13 +59,12 @@ Use `EngineOptions.sandbox` to select an engine backend.
 
 | Backend | Platform | Isolation | Notes |
 |---|---|---|---|
-| `vm` | Node.js / Bun | Process-level | Default for server/test environments |
+| `node-vm` | Node.js / Bun | Process-level | Default for server/test environments |
 | `jsc` | Apple (iOS/macOS) | JSI native | JavaScriptCore via JSI |
 | `hermes` | React Native | JSI native | Hermes sandbox via JSI |
 | `quickjs` | Cross-platform | JSI native | QuickJS via JSI |
 | `wasm-quickjs` | Web / React Native | WASM | QuickJS compiled to WebAssembly |
-| `orchestrator` | Apple (iOS/macOS) | Native C++ | Multi-tenant with dedicated threads |
-| `none` | Any | None | Direct eval in host context (insecure) |
+| `tenant-manager` | Apple (iOS/macOS) | Native C++ | Multi-tenant with dedicated threads |
 
 ### DevTools (`rill/devtools`)
 

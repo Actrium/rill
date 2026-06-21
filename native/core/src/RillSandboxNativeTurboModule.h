@@ -17,15 +17,15 @@ extern "C" {
  *
  * The sandbox engine (JSC or Hermes) is determined by RILL_SANDBOX_ENGINE at compile time.
  */
-/// Install sandbox bindings only (no Orchestrator).
+/// Install sandbox bindings only (no TenantManager).
 void RillSandboxNativeInstall(facebook::jsi::Runtime *runtime);
 
 #ifdef __cplusplus
 }
 
-/// Install sandbox bindings AND the Orchestrator HostObject.
-/// Preferred entry point — provides CallInvoker for Orchestrator scheduling.
-void RillSandboxNativeInstallWithOrchestrator(
+/// Install sandbox bindings AND the TenantManager HostObject.
+/// Preferred entry point — provides CallInvoker for TenantManager scheduling.
+void RillSandboxNativeInstallWithTenantManager(
     facebook::jsi::Runtime *runtime,
     std::shared_ptr<facebook::react::CallInvoker> callInvoker);
 

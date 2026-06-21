@@ -4,7 +4,7 @@ import { Engine } from '../../engine';
 
 describe('Engine observability metrics', () => {
   it('tracks errors and exposes getHealth', async () => {
-    const engine = new Engine({ sandbox: 'vm', debug: false });
+    const engine = new Engine({ sandbox: 'node-vm', debug: false });
     await expect(
       Promise.resolve().then(() => engine.loadBundle('throw new Error("boom")'))
     ).rejects.toThrow();
@@ -16,7 +16,7 @@ describe('Engine observability metrics', () => {
 
   it('emits metrics for sendToSandbox and receiver', async () => {
     const onMetric = mock();
-    const engine = new Engine({ sandbox: 'vm', debug: false, onMetric });
+    const engine = new Engine({ sandbox: 'node-vm', debug: false, onMetric });
     await Promise.resolve().then(() => engine.loadBundle('console.log("hi")'));
     engine.createReceiver();
     // Use sendToSandbox directly to ensure we wait for the async operation
@@ -33,7 +33,7 @@ describe('Engine observability metrics', () => {
     // biome-ignore lint/suspicious/noExplicitAny: Test telemetry data has dynamic structure
     const metrics: any[] = [];
     const engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       onMetric: (n, v, e) => metrics.push({ n, v, e }),
       debug: false,
     });
@@ -49,7 +49,7 @@ describe('Engine observability metrics', () => {
 describe('Engine setMaxListeners', () => {
   it('should set and get maxListeners', async () => {
     const engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       debug: false,
     });
     await engine.loadBundle('/* noop */');
@@ -67,7 +67,7 @@ describe('Engine setMaxListeners', () => {
 
   it('should warn when listeners exceed maxListeners limit', async () => {
     const engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       debug: false,
     });
     await engine.loadBundle('/* noop */');
@@ -99,7 +99,7 @@ describe('Engine console.debug and console.info', () => {
     };
 
     const engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       debug: true,
       logger: customLogger,
     });
@@ -119,7 +119,7 @@ describe('Engine console.debug and console.info', () => {
     };
 
     const engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       debug: true,
       logger: customLogger,
     });
@@ -139,7 +139,7 @@ describe('Engine console.debug and console.info', () => {
     };
 
     const engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       debug: false,
       logger: customLogger,
     });
@@ -159,7 +159,7 @@ describe('Engine console.debug and console.info', () => {
     };
 
     const engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       debug: false,
       logger: customLogger,
     });

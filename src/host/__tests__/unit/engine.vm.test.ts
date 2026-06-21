@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'bun:test';
 import vm from 'node:vm';
-import { VMProvider } from '../../sandbox/index';
+import { NodeVMProvider } from '../../sandbox/index';
 import { Engine } from '../../engine';
 
-// These tests are specific to the VMProvider and should only run in a Node.js/Bun environment.
-describe.skipIf(!vm)('VMProvider', () => {
+// These tests are specific to the NodeVMProvider and should only run in a Node.js/Bun environment.
+describe.skipIf(!vm)('NodeVMProvider', () => {
   it('should interrupt a dead-loop with a timeout', async () => {
     const engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       debug: false,
       timeout: 100,
     });
@@ -29,7 +29,7 @@ describe.skipIf(!vm)('VMProvider', () => {
   });
 
   it('should handle dispose correctly', () => {
-    const provider = new VMProvider({ timeout: 1000 });
+    const provider = new NodeVMProvider({ timeout: 1000 });
     const runtime = provider.createRuntime();
     const context = runtime.createContext();
 
@@ -48,7 +48,7 @@ describe.skipIf(!vm)('VMProvider', () => {
   });
 
   it('should execute code in isolated context', () => {
-    const provider = new VMProvider({ timeout: 1000 });
+    const provider = new NodeVMProvider({ timeout: 1000 });
     const runtime = provider.createRuntime();
     const context = runtime.createContext();
 
@@ -65,7 +65,7 @@ describe.skipIf(!vm)('VMProvider', () => {
   });
 
   it('should use default timeout when not specified', () => {
-    const provider = new VMProvider(); // No timeout specified
+    const provider = new NodeVMProvider(); // No timeout specified
     const runtime = provider.createRuntime();
     const context = runtime.createContext();
 

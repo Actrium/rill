@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import vm from 'node:vm';
 import { DefaultProvider } from '../default/default-provider';
-import { VMProvider } from '../providers/vm-provider';
+import { NodeVMProvider } from '../providers/node-vm-provider';
 import { SandboxType } from '../types/provider';
 
 describe('DefaultProvider', () => {
@@ -13,17 +13,17 @@ describe('DefaultProvider', () => {
       expect(typeof provider.createRuntime).toBe('function');
     });
 
-    it('should auto-select VMProvider in Node.js environment', () => {
+    it('should auto-select NodeVMProvider in Node.js environment', () => {
       const provider = new DefaultProvider();
 
-      // In Node.js/Bun, resolved provider should be VMProvider
-      expect(provider.resolvedProvider).toBeInstanceOf(VMProvider);
+      // In Node.js/Bun, resolved provider should be NodeVMProvider
+      expect(provider.resolvedProvider).toBeInstanceOf(NodeVMProvider);
     });
 
     it('should respect explicit vm sandbox mode', () => {
-      const provider = new DefaultProvider({ sandbox: SandboxType.VM });
+      const provider = new DefaultProvider({ sandbox: SandboxType.NodeVM });
 
-      expect(provider.resolvedProvider).toBeInstanceOf(VMProvider);
+      expect(provider.resolvedProvider).toBeInstanceOf(NodeVMProvider);
     });
 
     it('should pass timeout to provider', () => {

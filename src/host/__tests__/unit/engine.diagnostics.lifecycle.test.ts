@@ -3,7 +3,7 @@ import { Engine } from '../../engine';
 
 describe('Engine diagnostics - lifecycle', () => {
   it('tracks loaded/destroyed in health', async () => {
-    const engine = new Engine({ sandbox: 'vm', debug: false });
+    const engine = new Engine({ sandbox: 'node-vm', debug: false });
 
     // before load
     expect(engine.getDiagnostics().health.loaded).toBe(false);
@@ -18,7 +18,7 @@ describe('Engine diagnostics - lifecycle', () => {
   });
 
   it('tracks recordError when bundle execution fails', async () => {
-    const engine = new Engine({ sandbox: 'vm', debug: false });
+    const engine = new Engine({ sandbox: 'node-vm', debug: false });
 
     await expect(
       Promise.resolve().then(() => engine.loadBundle('throw new Error("boom");'))
