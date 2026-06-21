@@ -143,7 +143,7 @@ async function runtimeVerify(): Promise<void> {
   const calls: RecordedCalls = { track: [], openProfile: [], themeHandlers: [] };
 
   const engine = new Engine({
-    sandbox: 'vm',
+    sandbox: 'node-vm',
     timeout: 3000,
     logger: quietLogger,
     contract,
@@ -278,7 +278,7 @@ async function verifyParseOutput(): Promise<void> {
   });
 
   const engine = new Engine({
-    sandbox: 'vm',
+    sandbox: 'node-vm',
     timeout: 3000,
     logger: quietLogger,
     contract: localContract,
