@@ -39,6 +39,13 @@ const customConfig = {
         };
       }
 
+      if (moduleName === 'rill/host') {
+        return {
+          type: 'sourceFile',
+          filePath: path.resolve(rillPath, 'src', 'host', 'index.ts'),
+        };
+      }
+
       if (moduleName === 'rill/host/preset') {
         return {
           type: 'sourceFile',
