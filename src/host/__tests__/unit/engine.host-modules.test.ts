@@ -248,6 +248,29 @@ describe('Engine host:* module runtime wiring', () => {
     engine.destroy();
   });
 
+  it('unsubscribe stops host event delivery to the guest (direct injection)', async () => {
+    const { engine, calls } = createEngine();
+    await engine.loadBundle(GUEST_BUNDLE);
+
+    scope(engine).eval('globalThis.__unsub = globalThis.__guest.subscribeTheme()');
+    expect(calls.themeHandlers).toHaveLength(1);
+
+    // Host emits to all current subscribers -> reaches the guest handler.
+    for (const handler of calls.themeHandlers) handler({ theme: 'dark' });
+    expect(scope(engine).extract('__themeEvents')).toEqual([{ theme: 'dark' }]);
+
+    // Guest unsubscribes: the host impl's unsubscribe runs and empties the subscriber
+    // list — host-side proof that delivery is severed at the source.
+    scope(engine).eval('globalThis.__unsub()');
+    expect(calls.themeHandlers).toHaveLength(0);
+
+    // A further emit to the (now-empty) subscriber set reaches no one.
+    for (const handler of calls.themeHandlers) handler({ theme: 'light' });
+    expect(scope(engine).extract('__themeEvents')).toEqual([{ theme: 'dark' }]);
+
+    engine.destroy();
+  });
+
   it('fails closed when the guest imports an unregistered host module', async () => {
     const { engine } = createEngine();
     await engine.loadBundle(GUEST_BUNDLE);

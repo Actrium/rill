@@ -65,6 +65,9 @@ function buildContract(): RillContractShape {
             },
           },
         }),
+        // No boundary schema: a plain (non-boundary) error thrown by the impl must
+        // still cross the JSON bridge back to the guest as a promise rejection.
+        failHard: rpc<void, void>(),
       },
       'host:navigation': {
         openProfile: rpc<{ userId: string }, void>(),
@@ -109,6 +112,9 @@ describeIfWASM('QuickJSNativeWASMProvider host:* modules', () => {
         },
         // Returns a value the contract forbids -> parseOutput must reject.
         broken: async () => ({ ok: false }) as never,
+        failHard: async () => {
+          throw new Error('backend exploded');
+        },
       },
       'host:navigation': {
         openProfile: (input) => {
@@ -220,5 +226,117 @@ describeIfWASM('QuickJSNativeWASMProvider host:* modules', () => {
 
     handler?.({ theme: 'dark' });
     expect(context.extract('__ev2')).toEqual([{ theme: 'light' }]);
+  });
+
+  it('propagates a non-boundary impl error to the guest as a rejection', async () => {
+    // failHard has no boundary schema: the impl throws a plain Error, which must
+    // round-trip across the JSON bridge as a guest promise rejection (reason carries
+    // the message), not be swallowed or surface as a resolved value.
+    const out = await callRpc(`globalThis.__rill.hostModules['host:analytics'].failHard()`);
+    expect(out.ok).toBe(false);
+    expect(out.reason).toContain('backend exploded');
+  });
+
+  it('correlates multiple concurrent rpc calls by id', async () => {
+    // Two distinct invokes started in one eval (no await between them), then a single
+    // flush. Each result must round-trip to its OWN guest global with the ackId derived
+    // from its OWN input — proving id correlation holds with calls in flight together.
+    context.eval(`
+      globalThis.__outA = undefined;
+      globalThis.__outB = undefined;
+      globalThis.__rill.hostModules['host:analytics'].track({ name: 'a' }).then(function(v){ globalThis.__outA = v; });
+      globalThis.__rill.hostModules['host:analytics'].track({ name: 'b' }).then(function(v){ globalThis.__outB = v; });
+    `);
+    await context.flushHostModuleCalls?.();
+    expect(context.extract('__outA')).toEqual({ ackId: 'ack:a' });
+    expect(context.extract('__outB')).toEqual({ ackId: 'ack:b' });
+  });
+});
+
+describeIfWASM('QuickJSNativeWASMProvider host:* module lifecycle', () => {
+  it('dispose() runs the host-side unsubscribe for active subscriptions', async () => {
+    const provider = new QuickJSNativeWASMProvider({ debug: false });
+    const runtime = await provider.createRuntime();
+    const context = runtime.createContext();
+
+    const contract = defineRillContract({
+      version: '1.0.0',
+      hostModules: {
+        'host:theme': {
+          onThemeChanged: subscription<{ theme: 'light' | 'dark' }>(),
+        },
+      },
+      guestExports: {},
+    });
+
+    let unsubscribed = false;
+    const table = createHostModuleDispatch(contract, {
+      'host:theme': {
+        onThemeChanged: () => () => {
+          unsubscribed = true;
+        },
+      },
+    });
+    context.installHostModules?.(table, contract);
+
+    context.eval(
+      `globalThis.__unsub = globalThis.__rill.hostModules['host:theme'].onThemeChanged(function(){});`
+    );
+    expect(unsubscribed).toBe(false);
+
+    // Disposing the context with a live subscription must release it host-side, so the
+    // host stops holding the guest handler (no leak across context teardown).
+    context.dispose();
+    expect(unsubscribed).toBe(true);
+
+    runtime.dispose();
+  });
+
+  it('a single flush drains transitively-enqueued (chained) host calls', async () => {
+    const provider = new QuickJSNativeWASMProvider({ debug: false });
+    const runtime = await provider.createRuntime();
+    const context = runtime.createContext();
+
+    const contract = defineRillContract({
+      version: '1.0.0',
+      hostModules: {
+        'host:analytics': {
+          track: rpc<{ name: string }, { ackId: string }>(),
+        },
+      },
+      guestExports: {},
+    });
+
+    const recorded: string[] = [];
+    const table = createHostModuleDispatch(contract, {
+      'host:analytics': {
+        track: async (input) => {
+          recorded.push(input.name);
+          if (input.name === 'first') {
+            // Re-entrant: from inside the first impl, issue a SECOND rpc into the guest.
+            // This enqueues another host call while flush is still draining the first.
+            context.eval(
+              `globalThis.__rill.hostModules['host:analytics'].track({ name: 'second' }).then(function(v){ globalThis.__secondOut = v; });`
+            );
+          }
+          return { ackId: `ack:${input.name}` };
+        },
+      },
+    });
+    context.installHostModules?.(table, contract);
+
+    context.eval(
+      `globalThis.__rill.hostModules['host:analytics'].track({ name: 'first' }).then(function(v){ globalThis.__firstOut = v; });`
+    );
+
+    // A SINGLE flush must drain both the original and the transitively-enqueued call.
+    await context.flushHostModuleCalls?.();
+
+    expect(recorded).toEqual(['first', 'second']);
+    expect(context.extract('__firstOut')).toEqual({ ackId: 'ack:first' });
+    expect(context.extract('__secondOut')).toEqual({ ackId: 'ack:second' });
+
+    context.dispose();
+    runtime.dispose();
   });
 });

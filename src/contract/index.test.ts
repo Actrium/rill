@@ -410,4 +410,47 @@ describe('createHostModuleDispatch', () => {
       'Boundary output validation failed for "host:analytics.track": output.ok must be true'
     );
   });
+
+  test('no-input (void) rpc runs parseInput with undefined and rejects an unexpected arg', () => {
+    const seenInputs: unknown[] = [];
+    const contract = defineRillContract({
+      version: '1.0.0',
+      hostModules: {
+        'host:lifecycle': {
+          ping: rpc<void, void>({
+            schema: {
+              parseInput: (value) => {
+                seenInputs.push(value);
+                if (value !== undefined) {
+                  throw new Error('expected no input');
+                }
+                return undefined;
+              },
+            },
+          }),
+        },
+      },
+      guestExports: {},
+    });
+
+    let implCalls = 0;
+    const dispatch = createHostModuleDispatch(contract, {
+      'host:lifecycle': {
+        ping: () => {
+          implCalls++;
+        },
+      },
+    });
+
+    // Called with no args: parseInput receives undefined and the impl runs.
+    dispatch['host:lifecycle']?.ping?.();
+    expect(seenInputs).toEqual([undefined]);
+    expect(implCalls).toBe(1);
+
+    // Called with an unexpected arg: rejected at the input boundary, impl never re-runs.
+    expect(() => dispatch['host:lifecycle']?.ping?.({ unexpected: true } as never)).toThrow(
+      'Boundary input validation failed for "host:lifecycle.ping": expected no input'
+    );
+    expect(implCalls).toBe(1);
+  });
 });
