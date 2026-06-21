@@ -199,4 +199,26 @@ describeIfWASM('QuickJSNativeWASMProvider host:* modules', () => {
     expect(() => calls.themeHandler?.({ theme: 'rainbow' })).toThrow('theme must be light or dark');
     expect(context.extract('__events')).toEqual([{ theme: 'dark' }]);
   });
+
+  it('unsubscribe stops event delivery to the guest', () => {
+    context.eval(`
+      globalThis.__ev2 = [];
+      globalThis.__unsub2 = globalThis.__rill.hostModules['host:theme'].onThemeChanged(function(e){
+        globalThis.__ev2.push(e);
+      });
+    `);
+    expect(typeof calls.themeHandler).toBe('function');
+    const handler = calls.themeHandler;
+
+    handler?.({ theme: 'light' });
+    expect(context.extract('__ev2')).toEqual([{ theme: 'light' }]);
+
+    // Guest unsubscribes: the host impl's unsubscribe fires AND the guest-side
+    // subscription is removed, so further host emits do not reach the guest.
+    context.eval('globalThis.__unsub2()');
+    expect(calls.themeHandler).toBeNull();
+
+    handler?.({ theme: 'dark' });
+    expect(context.extract('__ev2')).toEqual([{ theme: 'light' }]);
+  });
 });

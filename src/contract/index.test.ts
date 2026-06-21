@@ -383,4 +383,31 @@ describe('createHostModuleDispatch', () => {
       } as never)
     ).toThrow('Missing implementation for host module "host:theme"');
   });
+
+  test('synchronous rpc impl: parseOutput runs inline and the result returns synchronously', () => {
+    const dispatch = createHostModuleDispatch(buildContract(), {
+      'host:analytics': {
+        // Synchronous (non-async) implementation — exercises the non-thenable branch.
+        track: () => ({ ok: true }) as never,
+      },
+      'host:theme': { onThemeChanged: () => () => {} },
+    });
+
+    const result = dispatch['host:analytics']?.track?.({ name: 'x' });
+    // Not a promise: a sync impl returns the parsed value directly.
+    expect(result).toEqual({ ok: true });
+    expect(typeof (result as { then?: unknown })?.then).not.toBe('function');
+  });
+
+  test('synchronous rpc impl: parseOutput rejects malformed output synchronously (throws, not rejects)', () => {
+    const dispatch = createHostModuleDispatch(buildContract(), {
+      'host:analytics': {
+        track: () => ({ ok: false }) as never,
+      },
+      'host:theme': { onThemeChanged: () => () => {} },
+    });
+    expect(() => dispatch['host:analytics']?.track?.({ name: 'x' })).toThrow(
+      'Boundary output validation failed for "host:analytics.track": output.ok must be true'
+    );
+  });
 });

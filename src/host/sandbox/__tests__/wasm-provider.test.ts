@@ -53,6 +53,17 @@ describeIfWASM('QuickJSNativeWASMProvider', () => {
       expect(context.eval('null')).toBeNull();
       expect(context.eval('undefined')).toBeUndefined();
     });
+
+    // evalAsync is the path the Engine actually uses on this provider (engine.ts routes
+    // through ctx.evalAsync whenever a context defines it), yet was never asserted.
+    it('evalAsync resolves with the value and rejects on a runtime error', async () => {
+      // biome-ignore lint/style/noNonNullAssertion: evalAsync is defined on this provider
+      expect(await context.evalAsync!('1 + 2')).toBe(3);
+      // biome-ignore lint/style/noNonNullAssertion: see above
+      expect(await context.evalAsync!('({ a: 1, b: [2, 3] })')).toEqual({ a: 1, b: [2, 3] });
+      // biome-ignore lint/style/noNonNullAssertion: see above
+      await expect(context.evalAsync!('undefinedVariable.property')).rejects.toThrow();
+    });
   });
 
   describe('Global Variables', () => {

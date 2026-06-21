@@ -84,4 +84,33 @@ describeIfWASM('QuickJSNativeWASMProvider by-name host-fn bridge', () => {
     expect(theme).toBe('dark');
     expect(events).toEqual([{ name: 'PING', payload: { ok: 1 } }]);
   });
+
+  it('fails closed when an injected host fn throws (guest gets null, no crash)', () => {
+    context.inject('__boom', () => {
+      throw new Error('host fn exploded');
+    });
+    // The host swallows the throw and writes null back; the guest must not crash
+    // (this is the exact failure class — host-fn error reaching the guest realm — #8 guards).
+    let result: unknown;
+    expect(() => {
+      result = context.eval('globalThis.__boom()');
+    }).not.toThrow();
+    expect(result).toBeNull();
+    // sandbox still usable afterwards
+    expect(context.eval('1 + 1')).toBe(2);
+  });
+
+  it('fails closed when an injected host fn returns a non-serializable value', () => {
+    context.inject('__circular', () => {
+      const o: Record<string, unknown> = {};
+      o.self = o;
+      return o;
+    });
+    let result: unknown;
+    expect(() => {
+      result = context.eval('globalThis.__circular()');
+    }).not.toThrow();
+    expect(result).toBeNull();
+    expect(context.eval('"still alive"')).toBe('still alive');
+  });
 });
