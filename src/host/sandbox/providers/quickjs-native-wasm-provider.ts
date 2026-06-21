@@ -103,6 +103,124 @@ export interface QuickJSNativeWASMProviderOptions {
   debug?: boolean;
 }
 
+// Timer/microtask host functions whose FIRST argument is a guest callback. The isolated
+// WASM realm can't pass a function reference over the JSON bridge, so the guest shim
+// registers the callback in __rill.callbacks (the same registry the reconciler uses for
+// function props) and sends a {__rill_cb:id} marker instead (issue #10). Release lifetimes
+// differ, so the timer family gets per-shape shims.
+const ONE_SHOT_CALLBACK_FNS = new Set(['setTimeout', 'setImmediate', 'queueMicrotask']);
+const REPEATING_CALLBACK_FNS = new Set(['setInterval']);
+const CLEAR_TIMER_FNS = new Set(['clearTimeout', 'clearInterval', 'clearImmediate']);
+// A clear maps to the family it cancels. The host timer id -> cb id map is keyed by
+// "<family>:<hostId>" because setTimeout/setInterval/setImmediate use INDEPENDENT id
+// counters that all start at 1 — a flat numeric key would let a clearTimeout(1) release
+// an unrelated setInterval(1) callback (cross-family collision).
+const CLEAR_TO_FAMILY: Record<string, string> = {
+  clearTimeout: 'setTimeout',
+  clearInterval: 'setInterval',
+  clearImmediate: 'setImmediate',
+};
+
+// Guest-side preamble: ensure the callback registry exists. The timer/console shims are
+// injected before the guest runtime helpers eval, so a host fn may be called before
+// RUNTIME_HELPERS_CODE defines the registry — this seeds a compatible one (same Map, same
+// 'fn_N' id scheme, idempotent) so a callback argument is never silently dropped.
+const ENSURE_CB_REGISTRY = `
+  var R = globalThis.__rill || (globalThis.__rill = {});
+  if (!R.callbacks) { R.callbacks = new Map(); }
+  if (typeof R.callbackId !== 'number') { R.callbackId = 0; }
+  if (typeof R.registerCallback !== 'function') { R.registerCallback = function(fn){ var id = 'fn_' + (++R.callbackId); R.callbacks.set(id, fn); return id; }; }
+  if (typeof R.invokeCallback !== 'function') { R.invokeCallback = function(id, args){ var fn = R.callbacks.get(id); if (fn) return fn.apply(null, args || []); }; }
+  if (typeof R.removeCallback !== 'function') { R.removeCallback = function(id){ R.callbacks.delete(id); }; }
+  if (!R.__timerCb) { R.__timerCb = {}; }`;
+
+/**
+ * Build the guest-side shim for a by-name host function (issue #8 + #10).
+ *
+ * The shim posts the call to the host over __sendToHost and reads back the synchronous
+ * return value (the host writes it to __rill_fn_ret). For #10, any FUNCTION argument is
+ * replaced with a {__rill_cb:id} marker after registering it in __rill.callbacks; the host
+ * reconstructs a proxy that invokes the guest callback by id (see onHostFnCall).
+ *
+ * Callback lifetime is managed guest-side so the registry doesn't leak:
+ * - one-shot (setTimeout/setImmediate/queueMicrotask): a self-removing wrapper drops the
+ *   id when it fires; the host timer id -> cb id map entry is cleared too.
+ * - repeating (setInterval): the cb id lives until the matching clear releases it.
+ * - clear (clearTimeout/clearInterval/clearImmediate): release the cb id paired to the
+ *   host timer id, then forward the clear to the host.
+ * - generic (everything else, e.g. __rill_sendBatch/__console_log): function args are
+ *   markered so they survive the bridge, but without an auto-release lifetime (no host fn
+ *   today keeps such a callback; timers are the only stateful case).
+ */
+function buildHostFnShim(name: string): string {
+  const nameKey = JSON.stringify(name);
+  const eventKey = JSON.stringify(`__rill_fn:${name}`);
+
+  if (ONE_SHOT_CALLBACK_FNS.has(name)) {
+    const keyPrefix = JSON.stringify(`${name}:`);
+    return `globalThis[${nameKey}] = function() {
+      var a = Array.prototype.slice.call(arguments);${ENSURE_CB_REGISTRY}
+      var cb = a[0];
+      var id, hostId, fired = false;
+      var wrapper = function() {
+        try { return (typeof cb === 'function') ? cb.apply(null, arguments) : undefined; }
+        finally { fired = true; R.removeCallback(id); if (hostId != null) delete R.__timerCb[${keyPrefix} + hostId]; }
+      };
+      id = R.registerCallback(wrapper);
+      a[0] = { __rill_cb: id, __rill_marker: 1 };
+      globalThis.__rill_fn_ret = null;
+      __sendToHost(${eventKey}, { args: a });
+      hostId = globalThis.__rill_fn_ret;
+      // Guard 'fired': if the host invoked the callback synchronously inside __sendToHost,
+      // the wrapper already ran (with hostId undefined) — don't re-insert a stale mapping.
+      if (hostId != null && !fired) R.__timerCb[${keyPrefix} + hostId] = id;
+      return hostId;
+    };`;
+  }
+
+  if (REPEATING_CALLBACK_FNS.has(name)) {
+    const keyPrefix = JSON.stringify(`${name}:`);
+    return `globalThis[${nameKey}] = function() {
+      var a = Array.prototype.slice.call(arguments);${ENSURE_CB_REGISTRY}
+      var cb = a[0];
+      var id = R.registerCallback(function() { return (typeof cb === 'function') ? cb.apply(null, arguments) : undefined; });
+      a[0] = { __rill_cb: id, __rill_marker: 1 };
+      globalThis.__rill_fn_ret = null;
+      __sendToHost(${eventKey}, { args: a });
+      var hostId = globalThis.__rill_fn_ret;
+      if (hostId != null) R.__timerCb[${keyPrefix} + hostId] = id;
+      return hostId;
+    };`;
+  }
+
+  if (CLEAR_TIMER_FNS.has(name)) {
+    // Release the cb id paired to this host timer id under the family it cancels.
+    const keyPrefix = JSON.stringify(`${CLEAR_TO_FAMILY[name]}:`);
+    return `globalThis[${nameKey}] = function() {
+      var a = Array.prototype.slice.call(arguments);${ENSURE_CB_REGISTRY}
+      var hostId = a[0];
+      var key = ${keyPrefix} + hostId;
+      if (hostId != null && R.__timerCb[key] != null) { R.removeCallback(R.__timerCb[key]); delete R.__timerCb[key]; }
+      globalThis.__rill_fn_ret = null;
+      __sendToHost(${eventKey}, { args: a });
+      return globalThis.__rill_fn_ret;
+    };`;
+  }
+
+  // Generic: marker any function arguments so they survive the JSON bridge.
+  return `globalThis[${nameKey}] = function() {
+    var a = Array.prototype.slice.call(arguments);
+    var hasFn = false;
+    for (var i = 0; i < a.length; i++) { if (typeof a[i] === 'function') { hasFn = true; break; } }
+    if (hasFn) {${ENSURE_CB_REGISTRY}
+      a = a.map(function(x){ return (typeof x === 'function') ? { __rill_cb: R.registerCallback(x), __rill_marker: 1 } : x; });
+    }
+    globalThis.__rill_fn_ret = null;
+    __sendToHost(${eventKey}, { args: a });
+    return globalThis.__rill_fn_ret;
+  };`;
+}
+
 /**
  * QuickJS Native WASM Provider
  *
@@ -141,10 +259,7 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
           throw new Error(`[QuickJSWASM] Failed to initialize: ${initResult}`);
         }
 
-        // Track pending timers for cleanup
-        const pendingTimers = new Map<number, ReturnType<typeof setTimeout>>();
         let hostCallbackPtr = 0;
-        let timerCallbackPtr = 0;
 
         // host:* module bridge handler. Assigned once the eval helpers below are
         // defined; the guest reaches it by posting `__rill_host_*` events through
@@ -193,28 +308,14 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
         module._qjs_install_host_functions();
         module._qjs_install_console();
 
-        // Install timer support
-        const timerCallback = (encodedValue: number) => {
-          const timerId = encodedValue >> 16;
-          const delay = encodedValue & 0xffff;
-
-          if (this.options.debug) {
-            console.log(`[QuickJSWASM] Timer scheduled: id=${timerId}, delay=${delay}`);
-          }
-
-          const handle = setTimeout(() => {
-            pendingTimers.delete(timerId);
-            module._qjs_fire_timer(timerId);
-            // Process any promises that might have resolved
-            module._qjs_execute_pending_jobs();
-          }, delay);
-
-          pendingTimers.set(timerId, handle);
-        };
-
-        timerCallbackPtr = module.addFunction(timerCallback, 'vi');
-        module._qjs_set_timer_callback(timerCallbackPtr);
-        module._qjs_install_timer_functions();
+        // NOTE: the native C timer functions (qjs_install_timer_functions) are intentionally
+        // NOT installed here (issue #10, approach A). The host Engine injects its own
+        // TimerManager-backed setTimeout/setInterval/setImmediate polyfills, and those now
+        // work on WASM because callback arguments cross the bridge by id (approach B, see
+        // buildHostFnShim + onHostFnCall). Keeping the engine's TimerManager as the single
+        // clock owner preserves pause()/resume() clock-freeze and the setImmediate drain that
+        // React's concurrent scheduler relies on — installing native timers here would create
+        // a second, unfreezable clock. (The C functions remain in the binary, unused.)
 
         // Use cwrap for string operations since HEAPU8 is not exported
         const evalCode = module.cwrap('qjs_eval', 'number', ['string']) as (code: string) => number;
@@ -248,12 +349,45 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
         // shim is blocked inside __sendToHost while this runs, so writing the result
         // back to a guest global lets the shim return it synchronously. One-way hooks
         // (render/event) simply ignore the written value.
+        // Invoke a guest callback by id (issue #10). A function can't cross the JSON
+        // bridge, so the guest registered it in __rill.callbacks and passed an id; here the
+        // host fires it later (e.g. when a TimerManager timer elapses) by evaluating
+        // invokeCallback in the guest realm and draining the resulting microtasks.
+        const invokeGuestCallback = (id: string, cbArgs: ReviewedUnknown[]): void => {
+          injectJson('__rill_cb_args', JSON.stringify(cbArgs ?? []));
+          // Surface a throwing guest callback to the host logger (via __console_error)
+          // rather than swallowing it silently at the evalVoid C boundary; always clear the
+          // shared arg global afterward.
+          evalVoid(
+            `try { globalThis.__rill.invokeCallback(${JSON.stringify(id)},globalThis.__rill_cb_args); } catch (e) { if (typeof __console_error === 'function') { __console_error('[rill] guest callback threw:', e && e.message ? e.message : String(e)); } } finally { delete globalThis.__rill_cb_args; }`
+          );
+          drainJobs();
+        };
+
+        // Turn a {__rill_cb:id, __rill_marker:1} marker back into a host-side proxy function
+        // the host fn can store and call; non-marker args pass through unchanged. The
+        // __rill_marker brand (set only by buildHostFnShim) distinguishes a real callback
+        // marker from a same-shaped data object a caller might legitimately pass.
+        const reconstructCallbackArg = (a: ReviewedUnknown): ReviewedUnknown => {
+          if (
+            a &&
+            typeof a === 'object' &&
+            (a as { __rill_marker?: ReviewedUnknown }).__rill_marker === 1 &&
+            typeof (a as { __rill_cb?: ReviewedUnknown }).__rill_cb === 'string'
+          ) {
+            const id = (a as { __rill_cb: string }).__rill_cb;
+            return (...cbArgs: ReviewedUnknown[]) => invokeGuestCallback(id, cbArgs);
+          }
+          return a;
+        };
+
         onHostFnCall = (name: string, data: string): void => {
           const fn = injectedHostFns.get(name);
           let args: ReviewedUnknown[] = [];
           try {
             const parsed = JSON.parse(data) as { args?: ReviewedUnknown[] };
-            if (parsed && Array.isArray(parsed.args)) args = parsed.args;
+            if (parsed && Array.isArray(parsed.args))
+              args = parsed.args.map(reconstructCallbackArg);
           } catch {
             /* malformed payload -> no args */
           }
@@ -269,7 +403,14 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
           try {
             injectJson('__rill_fn_ret', JSON.stringify(result === undefined ? null : result));
           } catch {
-            /* result not serializable -> guest sees null */
+            // Result not serializable -> restore the documented 'guest sees null' contract.
+            // Must explicitly reset: __rill_fn_ret is a shared global and a nested host call
+            // may have left a value there, which the outer shim would otherwise return.
+            try {
+              injectJson('__rill_fn_ret', 'null');
+            } catch {
+              /* ignore */
+            }
           }
         };
 
@@ -416,16 +557,7 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
             // single ops (__rill_sendOperation), etc. — none of which worked before.
             if (typeof value === 'function') {
               injectedHostFns.set(name, value as (...args: ReviewedUnknown[]) => ReviewedUnknown);
-              const nameKey = JSON.stringify(name);
-              const eventKey = JSON.stringify(`__rill_fn:${name}`);
-              evalVoid(`
-                globalThis[${nameKey}] = function() {
-                  var args = Array.prototype.slice.call(arguments);
-                  globalThis.__rill_fn_ret = null;
-                  __sendToHost(${eventKey}, { args: args });
-                  return globalThis.__rill_fn_ret;
-                };
-              `);
+              evalVoid(buildHostFnShim(name));
               return;
             }
 
@@ -548,18 +680,9 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
             hostSubscriptions.clear();
             hostModuleTable = null;
 
-            // Clear pending timers
-            for (const handle of pendingTimers.values()) {
-              clearTimeout(handle);
-            }
-            pendingTimers.clear();
-
             // Remove function pointers
             if (hostCallbackPtr) {
               module.removeFunction(hostCallbackPtr);
-            }
-            if (timerCallbackPtr) {
-              module.removeFunction(timerCallbackPtr);
             }
 
             // Destroy QuickJS context

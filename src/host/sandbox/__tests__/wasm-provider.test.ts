@@ -86,31 +86,15 @@ describeIfWASM('QuickJSNativeWASMProvider', () => {
     });
   });
 
-  describe('Timer Functions', () => {
-    it('should have setTimeout defined', () => {
-      const result = context.eval('typeof setTimeout');
-      expect(result).toBe('function');
-    });
-
-    it('should have clearTimeout defined', () => {
-      const result = context.eval('typeof clearTimeout');
-      expect(result).toBe('function');
-    });
-
-    it('should execute setTimeout callback', async () => {
-      // Set up a flag that will be set by the timeout
-      context.eval(`
-        globalThis.timerFired = false;
-        setTimeout(() => {
-          globalThis.timerFired = true;
-        }, 10);
-      `);
-
-      // Wait for timer to fire
-      await new Promise((resolve) => setTimeout(resolve, 50));
-
-      const result = context.eval('globalThis.timerFired');
-      expect(result).toBe(true);
+  describe('Timers (engine-owned, not provider-native)', () => {
+    // Issue #10 (approach A): the WASM provider no longer installs the native C timers.
+    // The host Engine injects its own TimerManager-backed setTimeout/setInterval/
+    // setImmediate polyfills (whose callback arguments now cross the bridge by id —
+    // approach B), keeping a single, freezable clock. So the BARE provider realm — used
+    // without an Engine — has no setTimeout/clearTimeout of its own.
+    it('does not install native setTimeout/clearTimeout (the engine owns timing)', () => {
+      expect(context.eval('typeof setTimeout')).toBe('undefined');
+      expect(context.eval('typeof clearTimeout')).toBe('undefined');
     });
   });
 
