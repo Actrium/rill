@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rill Engine WASM E2E</title>
+  </head>
+  <body>
+    <h1>Rill Engine-in-browser WASM E2E</h1>
+    <div id="output"></div>
+    <!-- engine-harness.js (bundled Engine) sets window.RillEngine. The bundled WASM
+         provider dynamically imports ../wasm/quickjs-sandbox.js relative to this /dist/
+         bundle, i.e. /wasm/quickjs-sandbox.js (served from tests/wasm-sandbox/wasm/). -->
+    <script type="module" src="/dist/engine-harness.js"></script>
+  </body>
+</html>
