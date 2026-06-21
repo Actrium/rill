@@ -113,4 +113,128 @@ describeIfWASM('QuickJSNativeWASMProvider by-name host-fn bridge', () => {
     expect(result).toBeNull();
     expect(context.eval('"still alive"')).toBe('still alive');
   });
+
+  // ---- callback ARGUMENTS across the bridge (issue #10, approach B) ----
+  // A function arg can't cross the JSON bridge; the guest shim registers it in
+  // __rill.callbacks and passes a {__rill_cb:id} marker, the host reconstructs a proxy
+  // that invokes the guest callback by id. This is what makes the engine's TimerManager
+  // setTimeout/setImmediate polyfills work on WASM.
+
+  it('passes a guest function argument to the host as a callable proxy (invoked synchronously)', () => {
+    context.inject('__withCb', (cb: (n: number) => void) => {
+      cb(7);
+    });
+    context.eval(`globalThis.__got = null; globalThis.__withCb(function(x){ globalThis.__got = x; });`);
+    expect(context.extract('__got')).toBe(7);
+  });
+
+  it('lets the host STORE a guest callback and invoke it LATER (the deferred/timer case)', () => {
+    let stored: ((...a: unknown[]) => void) | null = null;
+    context.inject('__defer', (cb: (...a: unknown[]) => void) => {
+      stored = cb;
+    });
+    context.eval(`globalThis.__late = null; globalThis.__defer(function(x){ globalThis.__late = x; });`);
+    // Not invoked yet — the proxy outlives the original __sendToHost call.
+    expect(context.extract('__late')).toBeNull();
+    expect(typeof stored).toBe('function');
+    stored?.('late');
+    expect(context.extract('__late')).toBe('late');
+  });
+
+  it('preserves argument order when only some args are functions', () => {
+    context.inject('__mix', (a: number, cb: (n: number) => void, b: number) => {
+      cb(a + b);
+    });
+    context.eval(`globalThis.__sum = null; globalThis.__mix(2, function(x){ globalThis.__sum = x; }, 40);`);
+    expect(context.extract('__sum')).toBe(42);
+  });
+
+  it('one-shot timer callback self-removes from the registry after firing (no leak)', () => {
+    let stored: ((...a: unknown[]) => void) | null = null;
+    // A host fn named 'setTimeout' gets the one-shot shim shape.
+    context.inject('setTimeout', (cb: (...a: unknown[]) => void) => {
+      stored = cb;
+      return 123; // stand-in host timer id
+    });
+    expect(context.eval(`globalThis.__fired = false; globalThis.setTimeout(function(){ globalThis.__fired = true; }, 5);`)).toBe(123);
+    expect(context.eval('globalThis.__rill.callbacks.size')).toBe(1);
+    expect(context.eval("globalThis.__rill.__timerCb['setTimeout:123'] != null")).toBe(true);
+
+    stored?.(); // host fires the one-shot
+    expect(context.extract('__fired')).toBe(true);
+    // self-removed: registry empty again, host-id map entry cleared
+    expect(context.eval('globalThis.__rill.callbacks.size')).toBe(0);
+    expect(context.eval("globalThis.__rill.__timerCb['setTimeout:123'] == null")).toBe(true);
+  });
+
+  it('one-shot shim leaves no stale __timerCb entry if the callback fires synchronously', () => {
+    // A host fn that invokes the callback INLINE runs the wrapper before the shim has
+    // assigned hostId. The `fired` guard must skip the post-send map write so no stale
+    // entry is left pointing at an already-removed callback.
+    context.inject('setTimeout', (cb: (...a: unknown[]) => void) => {
+      cb(); // synchronous fire, inside __sendToHost
+      return 55;
+    });
+    context.eval(`globalThis.__n = 0; globalThis.setTimeout(function(){ globalThis.__n++; }, 0);`);
+    expect(context.extract('__n')).toBe(1); // fired
+    expect(context.eval('globalThis.__rill.callbacks.size')).toBe(0); // self-removed
+    expect(context.eval('Object.keys(globalThis.__rill.__timerCb).length')).toBe(0); // no leak
+  });
+
+  it('namespaces timer callbacks by family so colliding host ids do not cross-cancel', () => {
+    // setTimeout / setInterval / setImmediate use INDEPENDENT id counters that all start at
+    // 1, so different families return the same numeric host id. A flat id->cb map would let
+    // clearTimeout(1) release a setInterval(1) callback. Namespacing by family prevents it.
+    let intervalCb: ((...a: unknown[]) => void) | null = null;
+    let clearedTimeout: number | null = null;
+    context.inject('setTimeout', (_cb: (...a: unknown[]) => void) => 1); // host id 1
+    context.inject('setInterval', (cb: (...a: unknown[]) => void) => {
+      intervalCb = cb;
+      return 1; // SAME numeric host id, different family
+    });
+    context.inject('clearTimeout', (id: number) => {
+      clearedTimeout = id;
+    });
+
+    context.eval(`
+      globalThis.__iFired = 0;
+      globalThis.setTimeout(function(){}, 5);
+      globalThis.setInterval(function(){ globalThis.__iFired++; }, 5);
+    `);
+    expect(context.eval('globalThis.__rill.callbacks.size')).toBe(2);
+
+    // Clearing the timeout (host id 1) must NOT touch the interval (also host id 1).
+    context.eval('globalThis.clearTimeout(1)');
+    expect(clearedTimeout).toBe(1);
+    expect(context.eval('globalThis.__rill.callbacks.size')).toBe(1); // only the timeout cb released
+    intervalCb?.();
+    expect(context.extract('__iFired')).toBe(1); // interval still alive
+  });
+
+  it('repeating timer callback persists across fires and is released only on clear', () => {
+    let stored: ((...a: unknown[]) => void) | null = null;
+    let clearedId: number | null = null;
+    context.inject('setInterval', (cb: (...a: unknown[]) => void) => {
+      stored = cb;
+      return 7;
+    });
+    context.inject('clearInterval', (id: number) => {
+      clearedId = id;
+    });
+    context.eval(`globalThis.__ticks = 0; globalThis.setInterval(function(){ globalThis.__ticks++; }, 5);`);
+    expect(context.eval('globalThis.__rill.callbacks.size')).toBe(1);
+
+    stored?.();
+    stored?.();
+    expect(context.extract('__ticks')).toBe(2);
+    // not one-shot: still registered after firing
+    expect(context.eval('globalThis.__rill.callbacks.size')).toBe(1);
+
+    context.eval('globalThis.clearInterval(7)');
+    expect(clearedId).toBe(7);
+    // released on clear — and a later fire reaches no one
+    expect(context.eval('globalThis.__rill.callbacks.size')).toBe(0);
+    stored?.();
+    expect(context.extract('__ticks')).toBe(2);
+  });
 });
