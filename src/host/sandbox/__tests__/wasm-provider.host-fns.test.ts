@@ -237,4 +237,37 @@ describeIfWASM('QuickJSNativeWASMProvider by-name host-fn bridge', () => {
     stored?.();
     expect(context.extract('__ticks')).toBe(2);
   });
+
+  // ---- fixed regression guards for the other by-name host fns (issue #17 #3) ----
+  // sendOperation / registerComponentType go through the SAME generic shim as the render
+  // channel. They had no fixed test, so a future special-case in buildHostFnShim could break
+  // them silently. Pin their bridge behavior.
+
+  it('registerComponentType-style host fn: receives a function arg and returns a sync ctype id', () => {
+    let receivedType: string | null = null;
+    // The engine injects __rill_registerComponentType as a host fn that takes the guest
+    // component function and returns a synchronous "ctype_*" id.
+    context.inject('__rill_registerComponentType', (fn: unknown) => {
+      receivedType = typeof fn;
+      return 'ctype_7';
+    });
+    const ret = context.eval(
+      `globalThis.__rill_registerComponentType(function MyComp(){ return null; })`
+    );
+    // The function arg crossed the bridge as a callable proxy, and the ctype id returned sync.
+    expect(receivedType).toBe('function');
+    expect(ret).toBe('ctype_7');
+  });
+
+  it('sendOperation-style host fn: routes a single op object to the host intact (one-way)', () => {
+    const ops: unknown[] = [];
+    context.inject('__rill_sendOperation', (op: unknown) => {
+      ops.push(op);
+    });
+    // A REF_CALL-shaped single op (the real caller of __rill_sendOperation).
+    context.eval(
+      `globalThis.__rill_sendOperation({ op: 'REF_CALL', refId: 5, method: 'focus', args: [], callId: 1 })`
+    );
+    expect(ops).toEqual([{ op: 'REF_CALL', refId: 5, method: 'focus', args: [], callId: 1 }]);
+  });
 });

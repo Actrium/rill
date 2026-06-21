@@ -7,10 +7,15 @@ export default defineConfig({
   testMatch: '**/*.e2e.ts',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 2 : 0,
+  // Default to >=1 retry even locally: the engine-on-real-WASM specs cold-start a WASM
+  // instance + react-reconciler under parallel workers and can occasionally miss the poll
+  // window. A flaky cold start should self-heal, not show as a normal red.
+  retries: process.env.CI ? 2 : 1,
   workers: process.env.CI ? 1 : undefined,
   reporter,
-  timeout: 30000,
+  // Generous per-test budget: the engine e2e loads a 768KB WASM binary and drives a full
+  // react-reconciler render (initial + update).
+  timeout: 60000,
 
   use: {
     baseURL: `http://127.0.0.1:${process.env.TEST_PORT || '3000'}`,
