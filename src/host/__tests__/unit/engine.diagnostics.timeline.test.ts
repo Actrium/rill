@@ -17,7 +17,7 @@ function makeBatch(batchId: number, ops: number) {
 describe('Engine diagnostics timeline', () => {
   it('aggregates ops/skip/apply into activity.timeline buckets', async () => {
     const engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       receiverMaxBatchSize: 2,
       diagnostics: { activityHistoryMs: 10_000, activityBucketMs: 1000 },
     });

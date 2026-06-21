@@ -22,8 +22,8 @@ new Engine(options?: EngineOptions)
 
 | Property | Type | Default | Description |
 |---|---|---|---|
-| `sandbox` | `'vm' \| 'jsc' \| 'quickjs' \| 'hermes' \| 'wasm-quickjs' \| 'tenant-manager'` | Auto-detected | Explicitly select a sandbox backend. |
-| `tenant manager` | `TenantConfig` | `undefined` | Tenant configuration when using the TenantManager sandbox. |
+| `sandbox` | `'node-vm' \| 'jsc' \| 'quickjs' \| 'hermes' \| 'wasm-quickjs' \| 'tenant-manager'` | Auto-detected | Explicitly select a sandbox backend. |
+| `tenant` | `TenantConfig` | `undefined` | Tenant configuration when using the TenantManager sandbox. |
 | `timeout` | `number` | `5000` | Execution timeout in milliseconds. |
 | `debug` | `boolean` | `false` | Enable debug logging. |
 | `logger` | `{ log, warn, error }` | `console` | Custom logger implementation. |

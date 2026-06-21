@@ -3,7 +3,7 @@ import { Engine } from '../../engine';
 
 describe('Engine health trend', () => {
   it('increments errorCount on failure, then can recover and load successfully', async () => {
-    const engine = new Engine({ sandbox: 'vm', debug: false });
+    const engine = new Engine({ sandbox: 'node-vm', debug: false });
 
     await expect(
       Promise.resolve().then(() => engine.loadBundle('throw new Error("e1")'))

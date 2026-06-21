@@ -110,7 +110,7 @@ const engine = new Engine({
 import { Engine } from 'rill/host';
 
 const engine = new Engine({
-  sandbox: 'vm',
+  sandbox: 'node-vm',
   // ...
 });
 ```
@@ -132,7 +132,7 @@ const engine = new Engine({
 | React Native with Hermes (`RILL_SANDBOX_ENGINE=hermes`) | `HermesProvider` |
 | Apple 平台 (iOS / macOS) | `JSCProvider` |
 | 任何其他 React Native 平台 | `QuickJSProvider` |
-| Node.js 或 Bun 运行时 | `VMProvider` |
+| Node.js 或 Bun 运行时 | `NodeVMProvider` |
 | Web 浏览器 | `QuickJSNativeWASMProvider` |
 
 自动选择在引擎创建时运行一次。您可以通过显式传递 `sandbox` 选项来覆盖它。
@@ -149,7 +149,7 @@ const engine = new Engine({
 | `'hermes'` | Hermes Native |
 | `'quickjs'` | QuickJS Native |
 | `'wasm-quickjs'` | QuickJS WASM |
-| `'vm'` | Node VM |
+| `'node-vm'` | Node VM |
 | `'tenant-manager'` | Native TenantManager (多租户模式) |
 
 ```ts

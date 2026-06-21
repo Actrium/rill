@@ -19,11 +19,11 @@ export {
   type NativeJSIProviderConfig,
   type NativeJSIProviderOptions,
 } from './native-jsi-provider';
+// Node.js VM (Node/Bun only)
+export { NodeVMProvider } from './node-vm-provider';
 export type { QuickJSNativeWASMProviderOptions } from './quickjs-native-wasm-provider';
 // QuickJS Native WASM (Web - compiled from native/quickjs)
 export { QuickJSNativeWASMProvider } from './quickjs-native-wasm-provider';
 export type { QuickJSProviderOptions } from './quickjs-provider';
 // QuickJS Native (React Native - cross-platform)
 export { isQuickJSAvailable, QuickJSProvider } from './quickjs-provider';
-// Node.js VM (Node/Bun only)
-export { VMProvider } from './vm-provider';

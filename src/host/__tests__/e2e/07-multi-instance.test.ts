@@ -27,7 +27,7 @@ function createMultiInstanceContext(count: number): MultiInstanceContext {
 
   for (let i = 0; i < count; i++) {
     const engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       debug: false,
     });
     engine.register(MockComponents);

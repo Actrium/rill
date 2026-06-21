@@ -24,7 +24,7 @@ describe('Engine enhanced behaviors', () => {
 
   it('enforces require whitelist', async () => {
     const engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       debug: false,
       logger: silentLogger,
       requireWhitelist: ['react'],
@@ -37,7 +37,7 @@ describe('Engine enhanced behaviors', () => {
 
   it('supports requireWhitelist wildcard patterns', async () => {
     const engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       debug: false,
       logger: silentLogger,
       requireWhitelist: ['react', 'react/jsx-runtime', 'rill/*'],
@@ -48,7 +48,7 @@ describe('Engine enhanced behaviors', () => {
 
   it('reports metrics via onMetric', async () => {
     const onMetric = mock();
-    const engine = new Engine({ sandbox: 'vm', debug: false, logger: silentLogger, onMetric });
+    const engine = new Engine({ sandbox: 'node-vm', debug: false, logger: silentLogger, onMetric });
     const src = buildBundle(`console.log('hello')`);
     await load(engine, src);
     // Should have at least these metrics
@@ -58,7 +58,7 @@ describe('Engine enhanced behaviors', () => {
   });
 
   it('throws ExecutionError for runtime errors', async () => {
-    const engine = new Engine({ sandbox: 'vm', debug: false, logger: silentLogger });
+    const engine = new Engine({ sandbox: 'node-vm', debug: false, logger: silentLogger });
     const src = buildBundle(`throw new Error('boom')`);
     await expect(load(engine, src)).rejects.toThrow('boom');
   });

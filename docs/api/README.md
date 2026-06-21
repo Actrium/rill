@@ -59,12 +59,12 @@ Use `EngineOptions.sandbox` to select an engine backend.
 
 | Backend | Platform | Isolation | Notes |
 |---|---|---|---|
-| `vm` | Node.js / Bun | Process-level | Default for server/test environments |
+| `node-vm` | Node.js / Bun | Process-level | Default for server/test environments |
 | `jsc` | Apple (iOS/macOS) | JSI native | JavaScriptCore via JSI |
 | `hermes` | React Native | JSI native | Hermes sandbox via JSI |
 | `quickjs` | Cross-platform | JSI native | QuickJS via JSI |
 | `wasm-quickjs` | Web / React Native | WASM | QuickJS compiled to WebAssembly |
-| `tenant manager` | Apple (iOS/macOS) | Native C++ | Multi-tenant with dedicated threads |
+| `tenant-manager` | Apple (iOS/macOS) | Native C++ | Multi-tenant with dedicated threads |
 
 ### DevTools (`rill/devtools`)
 

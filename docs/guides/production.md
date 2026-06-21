@@ -209,7 +209,7 @@ Failing to destroy the engine on unmount will leak the sandbox runtime and all a
 
 Before shipping to production, verify the following:
 
-- A sandbox provider with real isolation is selected for untrusted guests — `vm` is not a security boundary; use `wasm-quickjs`, `quickjs`, `jsc`, or `tenant-manager`.
+- A sandbox provider with real isolation is selected for untrusted guests — `node-vm` is not a security boundary; use `wasm-quickjs`, `quickjs`, `jsc`, or `tenant-manager`.
 - `requireWhitelist` is explicitly set and contains only the modules the guest needs.
 - `timeout` is configured with a value appropriate for the bundle complexity.
 - `receiverMaxBatchSize` is tuned if the guest produces large render batches.

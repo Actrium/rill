@@ -3,9 +3,9 @@ import { DefaultProvider } from '../../sandbox/index';
 import { Engine } from '../../engine';
 
 // Check if a timeout-capable provider is available
-// VMProvider uses node:vm timeout; Web/WASM providers don't have hard interrupts.
+// NodeVMProvider uses node:vm timeout; Web/WASM providers don't have hard interrupts.
 const testProvider = new DefaultProvider({ timeout: 100 });
-const canInterruptLoop = testProvider.resolvedProvider.constructor.name === 'VMProvider';
+const canInterruptLoop = testProvider.resolvedProvider.constructor.name === 'NodeVMProvider';
 
 describe('DefaultProvider (auto) - Node/Web', () => {
   it('simple eval without passing provider', async () => {
@@ -28,7 +28,7 @@ describe('DefaultProvider (auto) - Node/Web', () => {
   // Skip this test if we're using NoSandboxProvider, as it
   // cannot interrupt infinite loops (it uses eval which blocks forever)
   it.skipIf(!canInterruptLoop)('dead-loop should be interrupted by timeout', async () => {
-    // This test relies on the default provider (VMProvider in this env)
+    // This test relies on the default provider (NodeVMProvider in this env)
     // to handle the timeout correctly via the engine's timeout option.
     const engine = new Engine({
       debug: false,
@@ -44,7 +44,7 @@ describe('DefaultProvider (auto) - Node/Web', () => {
       error = e;
     }
     expect(threw).toBe(true);
-    // The VMProvider should throw a distinctive error
+    // The NodeVMProvider should throw a distinctive error
     expect(error.message).toContain('Script execution timed out');
     engine.destroy();
   });

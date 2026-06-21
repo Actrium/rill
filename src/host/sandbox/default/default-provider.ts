@@ -4,14 +4,14 @@
  * Implements JSEngineProvider directly, resolving the underlying provider at construction time.
  *
  * Strategy:
- * - Node/Bun: VMProvider (zero overhead, full capabilities)
+ * - Node/Bun: NodeVMProvider (zero overhead, full capabilities)
  * - Web: QuickJSNativeWASMProvider (strong isolation + full capabilities)
  *
  * All providers support high-performance direct object passing (no JSON serialization).
  */
 
+import { NodeVMProvider } from '../providers/node-vm-provider';
 import { QuickJSNativeWASMProvider } from '../providers/quickjs-native-wasm-provider';
-import { VMProvider } from '../providers/vm-provider';
 import type { JSEngineProvider, JSEngineRuntime, JSEngineRuntimeOptions } from '../types/provider';
 import { SandboxType } from '../types/provider';
 
@@ -42,11 +42,31 @@ function isWASMCapable(): boolean {
   return typeof WebAssembly !== 'undefined';
 }
 
+let warnedNodeVmAutoDefault = false;
+
+/**
+ * Warn once when auto-detection silently falls back to node-vm.
+ *
+ * Only fires on the auto-detect path — an explicit `sandbox: 'node-vm'` is a
+ * deliberate choice and stays quiet. node-vm is not a security boundary, so this
+ * nudges callers who never picked an isolation level (e.g. untrusted guests).
+ */
+function warnNodeVmAutoDefault(): void {
+  if (warnedNodeVmAutoDefault) return;
+  warnedNodeVmAutoDefault = true;
+  console.warn(
+    "[rill] No sandbox specified; defaulting to 'node-vm' (Node's vm module), which is NOT a " +
+      'security boundary. This is fine for tests, SSR, and trusted guests. For untrusted code, ' +
+      "set sandbox to 'wasm-quickjs' | 'quickjs' | 'jsc' | 'tenant-manager'. Pass " +
+      "sandbox: 'node-vm' explicitly to silence this warning."
+  );
+}
+
 export type DefaultProviderOptions = {
   timeout?: number;
   /**
    * Force a specific sandbox type. If not specified, auto-detects the best provider.
-   * - VM: Node.js/Bun only (native vm module)
+   * - NodeVM: Node.js/Bun only (native vm module)
    * - JSC: Apple platforms only (requires native JSI bindings)
    * - QuickJS: Cross-platform native (requires native JSI bindings)
    * - WasmQuickJS: Web/cross-platform (WASM, no native bindings required)
@@ -66,7 +86,7 @@ export type DefaultProviderOptions = {
  * createRuntime() delegates to it.
  *
  * Selection priority (when sandbox option not specified):
- * 1. Node/Bun: VMProvider (native, zero overhead)
+ * 1. Node/Bun: NodeVMProvider (native, zero overhead)
  * 2. Web: QuickJSNativeWASMProvider (WASM, strong isolation)
  * 3. Error: No provider available
  */
@@ -98,12 +118,12 @@ export class DefaultProvider implements JSEngineProvider {
       options?.timeout !== undefined ? { timeout: options.timeout } : undefined;
 
     // Explicit provider selection
-    if (options?.sandbox === SandboxType.VM) {
+    if (options?.sandbox === SandboxType.NodeVM) {
       if (isNodeEnv() && getVm()) {
-        return new VMProvider(providerOptions);
+        return new NodeVMProvider(providerOptions);
       }
       throw new Error(
-        '[DefaultProvider] VMProvider requested but not available in this environment.'
+        '[DefaultProvider] NodeVMProvider requested but not available in this environment.'
       );
     }
 
@@ -133,9 +153,10 @@ export class DefaultProvider implements JSEngineProvider {
 
     // Auto-detect best provider
 
-    // 1. Node/Bun environment - use VMProvider (native, fast, supports timeout)
+    // 1. Node/Bun environment - use NodeVMProvider (native, fast, supports timeout)
     if (isNodeEnv() && getVm()) {
-      return new VMProvider(providerOptions);
+      warnNodeVmAutoDefault();
+      return new NodeVMProvider(providerOptions);
     }
 
     // 2. Web environment with WASM support - use QuickJS Native WASM

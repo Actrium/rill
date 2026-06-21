@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'bun:test';
 import vm from 'node:vm';
-import { VMProvider } from '../providers/vm-provider';
+import { NodeVMProvider } from '../providers/node-vm-provider';
 
-// These tests are specific to the VMProvider and should only run in a Node.js/Bun environment.
-describe.skipIf(!vm)('VMProvider', () => {
+// These tests are specific to the NodeVMProvider and should only run in a Node.js/Bun environment.
+describe.skipIf(!vm)('NodeVMProvider', () => {
   it('should create runtime and context', () => {
-    const provider = new VMProvider({ timeout: 1000 });
+    const provider = new NodeVMProvider({ timeout: 1000 });
     const runtime = provider.createRuntime();
     const context = runtime.createContext();
 
@@ -21,7 +21,7 @@ describe.skipIf(!vm)('VMProvider', () => {
   });
 
   it('should execute code in isolated context', () => {
-    const provider = new VMProvider({ timeout: 1000 });
+    const provider = new NodeVMProvider({ timeout: 1000 });
     const runtime = provider.createRuntime();
     const context = runtime.createContext();
 
@@ -38,7 +38,7 @@ describe.skipIf(!vm)('VMProvider', () => {
   });
 
   it('should interrupt a dead-loop with a timeout', () => {
-    const provider = new VMProvider({ timeout: 100 });
+    const provider = new NodeVMProvider({ timeout: 100 });
     const runtime = provider.createRuntime();
     const context = runtime.createContext();
 
@@ -61,7 +61,7 @@ describe.skipIf(!vm)('VMProvider', () => {
   });
 
   it('should handle dispose correctly', () => {
-    const provider = new VMProvider({ timeout: 1000 });
+    const provider = new NodeVMProvider({ timeout: 1000 });
     const runtime = provider.createRuntime();
     const context = runtime.createContext();
 
@@ -80,7 +80,7 @@ describe.skipIf(!vm)('VMProvider', () => {
   });
 
   it('should use default timeout when not specified', () => {
-    const provider = new VMProvider(); // No timeout specified
+    const provider = new NodeVMProvider(); // No timeout specified
     const runtime = provider.createRuntime();
     const context = runtime.createContext();
 
@@ -93,7 +93,7 @@ describe.skipIf(!vm)('VMProvider', () => {
   });
 
   it('should support global functions', () => {
-    const provider = new VMProvider({ timeout: 1000 });
+    const provider = new NodeVMProvider({ timeout: 1000 });
     const runtime = provider.createRuntime();
     const context = runtime.createContext();
 
@@ -108,7 +108,7 @@ describe.skipIf(!vm)('VMProvider', () => {
   });
 
   it('should isolate between contexts', () => {
-    const provider = new VMProvider({ timeout: 1000 });
+    const provider = new NodeVMProvider({ timeout: 1000 });
     const runtime = provider.createRuntime();
     const context1 = runtime.createContext();
     const context2 = runtime.createContext();

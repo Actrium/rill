@@ -107,7 +107,7 @@ function createEngine() {
   const calls: HostCalls = { track: [], openProfile: [], themeHandlers: [] };
 
   const engine = new Engine({
-    sandbox: 'vm',
+    sandbox: 'node-vm',
     contract,
     hostModules: implementHostModules(contract, {
       'host:analytics': {
@@ -190,7 +190,7 @@ describe('Engine host:* module runtime wiring', () => {
     });
 
     const engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       contract,
       hostModules: implementHostModules(contract, {
         'host:analytics': {
@@ -260,7 +260,7 @@ describe('Engine host:* module runtime wiring', () => {
   });
 
   it('does not define __rill.hostModules when no host modules are configured', async () => {
-    const engine = new Engine({ sandbox: 'vm' });
+    const engine = new Engine({ sandbox: 'node-vm' });
     await engine.loadBundle('globalThis.__hasHostModules = !!(globalThis.__rill && globalThis.__rill.hostModules);');
 
     expect(scope(engine).extract('__hasHostModules')).toBe(false);
@@ -272,7 +272,7 @@ describe('Engine host:* module runtime wiring', () => {
     expect(
       () =>
         new Engine({
-          sandbox: 'vm',
+          sandbox: 'node-vm',
           // biome-ignore lint/suspicious/noExplicitAny: intentionally bypassing the typed requirement
           hostModules: { 'host:analytics': { track: async () => {} } } as any,
         })

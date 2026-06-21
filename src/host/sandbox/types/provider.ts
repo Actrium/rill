@@ -23,7 +23,7 @@ import type { HostModuleDispatchTable, RillContractShape } from '../../../contra
  */
 export enum SandboxType {
   /** Node.js vm module (Node/Bun only) */
-  VM = 'vm',
+  NodeVM = 'node-vm',
   /** JavaScriptCore via JSI (Apple platforms only, zero binary overhead) */
   JSC = 'jsc',
   /** Hermes via JSI (when RILL_SANDBOX_ENGINE=hermes) */

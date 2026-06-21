@@ -16,7 +16,7 @@ describe('Engine Callback Handling', () => {
   let engine: Engine;
 
   beforeEach(() => {
-    engine = new Engine({ sandbox: 'vm', debug: false });
+    engine = new Engine({ sandbox: 'node-vm', debug: false });
   });
 
   afterEach(() => {
@@ -77,7 +77,7 @@ describe('Engine Event Listener Error Handling', () => {
       error: mock(),
     };
     engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       logger: customLogger,
       debug: false,
     });
@@ -133,7 +133,7 @@ describe('Engine Metrics', () => {
   beforeEach(() => {
     metricsCollector = [];
     engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       onMetric: (name, value, extra) => {
         metricsCollector.push({ name, value, extra });
       },
@@ -191,7 +191,7 @@ describe('Engine Metrics', () => {
 
 describe('Engine RequireWhitelist', () => {
   it('should use default whitelist when not provided', async () => {
-    const engine = new Engine({ sandbox: 'vm'});
+    const engine = new Engine({ sandbox: 'node-vm'});
 
     // Default whitelist includes react, react-native, etc.
     // Use var instead of const to avoid redeclaration error since React is already injected as global
@@ -206,7 +206,7 @@ describe('Engine RequireWhitelist', () => {
   it('should enforce custom whitelist', async () => {
     const customLogger = { log: mock(), warn: mock(), error: mock() };
     const engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       requireWhitelist: ['custom-module'],
       logger: customLogger,
     });
@@ -219,7 +219,7 @@ describe('Engine RequireWhitelist', () => {
 
   it('should allow whitelisted modules', async () => {
     const engine = new Engine({
-      sandbox: 'vm',
+      sandbox: 'node-vm',
       requireWhitelist: ['react', 'my-custom-lib'],
     });
 
@@ -233,7 +233,7 @@ describe('Engine RequireWhitelist', () => {
 
 describe('Engine getDiagnostics().health', () => {
   it('should return health snapshot', async () => {
-    const engine = new Engine({ sandbox: 'vm'});
+    const engine = new Engine({ sandbox: 'node-vm'});
 
     let health = engine.getDiagnostics().health;
     expect(health.loaded).toBe(false);
@@ -252,7 +252,7 @@ describe('Engine getDiagnostics().health', () => {
   });
 
   it('should track error count', async () => {
-    const engine = new Engine({ sandbox: 'vm'});
+    const engine = new Engine({ sandbox: 'node-vm'});
 
     try {
       await engine.loadBundle('throw new Error("test error")');
@@ -268,7 +268,7 @@ describe('Engine getDiagnostics().health', () => {
   });
 
   it('should report receiver node count', async () => {
-    const engine = new Engine({ sandbox: 'vm'});
+    const engine = new Engine({ sandbox: 'node-vm'});
     engine.createReceiver();
 
     await engine.loadBundle(`

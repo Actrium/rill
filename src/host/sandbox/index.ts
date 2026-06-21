@@ -2,7 +2,7 @@
  * src/host/sandbox - JavaScript Sandbox Providers (internal)
  *
  * Provides multiple sandbox implementations for different environments:
- * - VMProvider: Node.js vm module (Node/Bun)
+ * - NodeVMProvider: Node.js vm module (Node/Bun)
  * - QuickJSNativeWASMProvider: QuickJS compiled to WebAssembly (Browser)
  * - QuickJSProvider: QuickJS via native JSI bindings (React Native)
  * - JSCProvider: JavaScriptCore via native JSI bindings (Apple platforms)
@@ -14,12 +14,12 @@ export type { DefaultProviderOptions } from './default/default-provider';
 export { DefaultProvider } from './default/default-provider';
 export type { JSCProviderOptions } from './providers/jsc-provider';
 export { isJSCAvailable, JSCProvider } from './providers/jsc-provider';
+// Provider exports
+export { NodeVMProvider } from './providers/node-vm-provider';
 export type { QuickJSNativeWASMProviderOptions } from './providers/quickjs-native-wasm-provider';
 export { QuickJSNativeWASMProvider } from './providers/quickjs-native-wasm-provider';
 export type { QuickJSProviderOptions } from './providers/quickjs-provider';
 export { isQuickJSAvailable, QuickJSProvider } from './providers/quickjs-provider';
-// Provider exports
-export { VMProvider } from './providers/vm-provider';
 export type {
   JSEngineProvider,
   JSEngineRuntime,

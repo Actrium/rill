@@ -5,7 +5,7 @@ import { Engine } from '../../engine';
 describe('Engine diagnostics - host events', () => {
   it('records last host→guest event info', () => {
     // biome-ignore lint/suspicious/noExplicitAny: Diagnostic data has dynamic structure
-    const engine = new Engine({ sandbox: 'vm', debug: false });
+    const engine = new Engine({ sandbox: 'node-vm', debug: false });
 
     // biome-ignore lint/suspicious/noExplicitAny: Diagnostic data has dynamic structure
     engine.sendEvent('HOST_VISIBILITY', { visible: false } as any);

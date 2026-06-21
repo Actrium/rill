@@ -45,7 +45,7 @@ export function createTestContext(): TestContext {
   // Create engine with mock JS engine provider
   // Use silent logger to prevent expected error logs from cluttering test output
   const engine = new Engine({
-    sandbox: 'vm',
+    sandbox: 'node-vm',
     debug: false,
     logger: {
       log: () => {}, // Silent in tests

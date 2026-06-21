@@ -12,7 +12,7 @@ export type JSCProviderOptions = {
 export class JSCProvider implements JSEngineProvider {
   constructor(_options?: JSCProviderOptions) {
     throw new Error(
-      '[JSCProvider] Requires native JSI bindings (Apple platforms). Use VMProvider (Node/Bun) or QuickJSNativeWASMProvider (Web) for non-native environments.'
+      '[JSCProvider] Requires native JSI bindings (Apple platforms). Use NodeVMProvider (Node/Bun) or QuickJSNativeWASMProvider (Web) for non-native environments.'
     );
   }
 
