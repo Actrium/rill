@@ -103,6 +103,13 @@ export interface GuestCapabilitiesManifest {
   contractVersion: string | null;
   hostCapabilities: string[];
   guestExports: string[];
+  /**
+   * Used host capabilities whose untrusted guest->host input is NOT validated by
+   * a boundary schema (rpc without `parseInput`, subscription without
+   * `parseEvent`). Empty when no contract is supplied. A sealed-tier publish gate
+   * should reject a non-empty list.
+   */
+  unschemed: string[];
 }
 
 /**
@@ -553,10 +560,29 @@ function createGuestCapabilitiesManifest(
   boundary: Pick<CollectedHostBoundary, 'hostCapabilities' | 'guestExports'>,
   contract?: RillContractShape
 ): GuestCapabilitiesManifest {
+  // Of the capabilities actually used by the guest, flag those whose untrusted
+  // input crosses unvalidated: rpc without parseInput / subscription without
+  // parseEvent. (parseOutput is host->guest and not required.)
+  const unschemed = contract
+    ? [...boundary.hostCapabilities]
+        .filter((capability) => {
+          const sep = capability.indexOf('.');
+          const moduleId = capability.slice(0, sep);
+          const exportName = capability.slice(sep + 1);
+          const descriptor =
+            contract.hostModules[moduleId as keyof typeof contract.hostModules]?.[exportName];
+          if (!descriptor) return false; // undeclared use is already a build violation
+          return descriptor.kind === 'subscription'
+            ? !descriptor.schema?.parseEvent
+            : !descriptor.schema?.parseInput;
+        })
+        .sort()
+    : [];
   return {
     contractVersion: contract?.version ?? null,
     hostCapabilities: [...boundary.hostCapabilities].sort(),
     guestExports: [...boundary.guestExports].sort(),
+    unschemed,
   };
 }
 
