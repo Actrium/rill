@@ -264,6 +264,8 @@ export class Engine implements IEngine {
         this.provider = new DefaultProvider({
           timeout: this.options.timeout,
           sandbox: options.sandbox,
+          wasmPath: options.wasmPath,
+          wasmBinary: options.wasmBinary,
         });
         if (this.options.debug) {
           const providerName = this.provider?.constructor?.name || 'unknown';

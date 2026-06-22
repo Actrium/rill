@@ -39,6 +39,18 @@ export interface EngineOptions {
   timeout?: number;
 
   /**
+   * (Web / `wasm-quickjs`) Override the `.wasm` binary URL the loader fetches.
+   */
+  wasmPath?: string;
+
+  /**
+   * (Web / `wasm-quickjs`) Provide the QuickJS `.wasm` bytes directly. When set,
+   * the engine instantiates WASM from these bytes and performs NO network fetch —
+   * required to run under a strict CSP such as `connect-src 'none'`.
+   */
+  wasmBinary?: Uint8Array | ArrayBuffer;
+
+  /**
    * Enable debug mode
    * @default false
    */

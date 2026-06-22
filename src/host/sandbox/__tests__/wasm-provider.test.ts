@@ -150,3 +150,33 @@ describeIfWASM('QuickJSNativeWASMProvider - Multi Context', () => {
     ctx2.dispose();
   });
 });
+
+describeIfWASM('QuickJSNativeWASMProvider - wasmBinary option', () => {
+  // The factory captures the Emscripten moduleArg the provider builds, then bails
+  // out — we only assert what crosses into loadWASM, not a full WASM boot.
+  it('forwards wasmBinary to the WASM factory so the loader skips the fetch', async () => {
+    const bytes = new Uint8Array([0x00, 0x61, 0x73, 0x6d]); // '\0asm'
+    let received: unknown;
+    const provider = new QuickJSNativeWASMProvider({
+      wasmBinary: bytes,
+      wasmFactory: async (moduleArg) => {
+        received = moduleArg?.wasmBinary;
+        throw new Error('__captured__');
+      },
+    });
+    await expect(provider.createRuntime()).rejects.toThrow('__captured__');
+    expect(received).toBe(bytes);
+  });
+
+  it('passes no moduleArg when neither wasmBinary nor wasmPath is set', async () => {
+    let calledWith: unknown = 'unset';
+    const provider = new QuickJSNativeWASMProvider({
+      wasmFactory: async (moduleArg) => {
+        calledWith = moduleArg;
+        throw new Error('__captured__');
+      },
+    });
+    await expect(provider.createRuntime()).rejects.toThrow('__captured__');
+    expect(calledWith).toBeUndefined();
+  });
+});
