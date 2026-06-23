@@ -25,6 +25,7 @@
   },
   "peerDependencies": {
     "react": ">=18.0.0",
+    "react-dom": ">=18.0.0",
     "react-native": ">=0.70.0",
     "react-native-web": ">=0.19.0"
   },
@@ -33,6 +34,7 @@
     "./host": "./src/host/index.ts",
     "./guest": "./src/sdk/index.ts",
     "./host/preset": "./src/host/preset/index.ts",
+    "./host/web": "./src/host/web/index.ts",
     "./devtools": "./src/devtools/index.ts",
     "./contract": "./src/contract/index.ts",
     "./cli": "./src/cli/index.ts"
@@ -59,6 +61,9 @@
   "homepage": "https://github.com/GoAskAway/rill",
   "license": "Apache-2.0",
   "peerDependenciesMeta": {
+    "react-dom": {
+      "optional": true
+    },
     "react-native": {
       "optional": true
     },
