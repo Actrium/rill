@@ -5,6 +5,12 @@
  */
 
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import {
+  KBD_EVENT,
+  KBD_SUBSCRIBE,
+  KBD_UNSUBSCRIBE,
+  type RillKeyEvent,
+} from '../../../shared/keyboard';
 
 describe('SDK Hooks', () => {
   let React: typeof import('react');
@@ -854,6 +860,259 @@ describe('SDK Hooks', () => {
 
       // Will be rejected on unmount, which is expected
       await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+  });
+
+  describe('useKeyboard()', () => {
+    let emitted: Array<{ name: string; payload: unknown }>;
+    let listeners: Map<string, Set<(payload: unknown) => void>>;
+    let cleanup: (() => void)[];
+
+    const makeKeyEvent = (
+      type: 'keydown' | 'keyup',
+      key: string,
+      extra: Partial<RillKeyEvent> = {}
+    ): RillKeyEvent => ({
+      type,
+      key,
+      code: key,
+      ctrlKey: false,
+      shiftKey: false,
+      altKey: false,
+      metaKey: false,
+      repeat: false,
+      ...extra,
+    });
+
+    beforeEach(() => {
+      emitted = [];
+      listeners = new Map();
+      cleanup = [];
+
+      (globalThis as Record<string, unknown>).__rill_emitEvent = (
+        name: string,
+        payload?: unknown
+      ) => {
+        emitted.push({ name, payload });
+      };
+
+      (globalThis as Record<string, unknown>).__rill_onHostEvent = (
+        eventName: string,
+        callback: (payload: unknown) => void
+      ) => {
+        if (!listeners.has(eventName)) {
+          listeners.set(eventName, new Set());
+        }
+        listeners.get(eventName)?.add(callback);
+        const unsubscribe = () => {
+          listeners.get(eventName)?.delete(callback);
+        };
+        cleanup.push(unsubscribe);
+        return unsubscribe;
+      };
+    });
+
+    afterEach(() => {
+      cleanup.forEach((fn) => fn());
+      delete (globalThis as Record<string, unknown>).__rill_emitEvent;
+      delete (globalThis as Record<string, unknown>).__rill_onHostEvent;
+    });
+
+    const deliver = (event: RillKeyEvent) => {
+      listeners.get(KBD_EVENT)?.forEach((cb) => cb(event));
+    };
+
+    test('declares a subscription with keys and preventDefault on mount', () => {
+      const TestComponent = () => {
+        sdk.useKeyboard({ keys: ['Enter', 'Escape'], preventDefault: true });
+        return React.createElement('div', null, 'Test');
+      };
+
+      let renderer: ReturnType<typeof TestRenderer.create>;
+      act(() => {
+        renderer = TestRenderer.create(React.createElement(TestComponent));
+      });
+
+      const sub = emitted.find((e) => e.name === KBD_SUBSCRIBE);
+      expect(sub).toBeDefined();
+      const payload = sub?.payload as {
+        id: string;
+        keys: string[] | null;
+        preventDefault: boolean;
+      };
+      expect(payload.keys).toEqual(['Enter', 'Escape']);
+      expect(payload.preventDefault).toBe(true);
+      expect(typeof payload.id).toBe('string');
+
+      act(() => {
+        renderer.unmount();
+      });
+    });
+
+    test('dispatches keydown and keyup to the matching handlers', () => {
+      const downs: string[] = [];
+      const ups: string[] = [];
+
+      const TestComponent = () => {
+        sdk.useKeyboard({
+          keys: ['a'],
+          onKeyDown: (e) => downs.push(e.key),
+          onKeyUp: (e) => ups.push(e.key),
+        });
+        return React.createElement('div', null, 'Test');
+      };
+
+      let renderer: ReturnType<typeof TestRenderer.create>;
+      act(() => {
+        renderer = TestRenderer.create(React.createElement(TestComponent));
+      });
+
+      act(() => {
+        deliver(makeKeyEvent('keydown', 'a'));
+        deliver(makeKeyEvent('keyup', 'a'));
+      });
+
+      expect(downs).toEqual(['a']);
+      expect(ups).toEqual(['a']);
+
+      act(() => {
+        renderer.unmount();
+      });
+    });
+
+    test('ignores keys outside the subscription set', () => {
+      const seen: string[] = [];
+
+      const TestComponent = () => {
+        sdk.useKeyboard({ keys: ['Enter'], onKeyDown: (e) => seen.push(e.key) });
+        return React.createElement('div', null, 'Test');
+      };
+
+      let renderer: ReturnType<typeof TestRenderer.create>;
+      act(() => {
+        renderer = TestRenderer.create(React.createElement(TestComponent));
+      });
+
+      act(() => {
+        deliver(makeKeyEvent('keydown', 'Escape'));
+        deliver(makeKeyEvent('keydown', 'Enter'));
+      });
+
+      expect(seen).toEqual(['Enter']);
+
+      act(() => {
+        renderer.unmount();
+      });
+    });
+
+    test('keys:null receives every key', () => {
+      const seen: string[] = [];
+
+      const TestComponent = () => {
+        sdk.useKeyboard({ keys: null, onKeyDown: (e) => seen.push(e.key) });
+        return React.createElement('div', null, 'Test');
+      };
+
+      let renderer: ReturnType<typeof TestRenderer.create>;
+      act(() => {
+        renderer = TestRenderer.create(React.createElement(TestComponent));
+      });
+
+      act(() => {
+        deliver(makeKeyEvent('keydown', 'x'));
+        deliver(makeKeyEvent('keydown', 'ArrowUp'));
+      });
+
+      expect(seen).toEqual(['x', 'ArrowUp']);
+
+      act(() => {
+        renderer.unmount();
+      });
+    });
+
+    test('unsubscribes and stops dispatching on unmount', () => {
+      const seen: string[] = [];
+
+      const TestComponent = () => {
+        sdk.useKeyboard({ keys: ['a'], onKeyDown: (e) => seen.push(e.key) });
+        return React.createElement('div', null, 'Test');
+      };
+
+      let renderer: ReturnType<typeof TestRenderer.create>;
+      act(() => {
+        renderer = TestRenderer.create(React.createElement(TestComponent));
+      });
+
+      const sub = emitted.find((e) => e.name === KBD_SUBSCRIBE);
+      const id = (sub?.payload as { id: string }).id;
+
+      act(() => {
+        renderer.unmount();
+      });
+
+      const unsub = emitted.find((e) => e.name === KBD_UNSUBSCRIBE);
+      expect(unsub).toBeDefined();
+      expect((unsub?.payload as { id: string }).id).toBe(id);
+
+      // No listeners remain, so a late delivery reaches nobody.
+      deliver(makeKeyEvent('keydown', 'a'));
+      expect(seen).toHaveLength(0);
+    });
+
+    test('calls the latest callback without re-subscribing', () => {
+      const seen: string[] = [];
+      let cb = (e: RillKeyEvent) => seen.push(`v1:${e.key}`);
+
+      const TestComponent = ({ onDown }: { onDown: (e: RillKeyEvent) => void }) => {
+        sdk.useKeyboard({ keys: ['a'], onKeyDown: onDown });
+        return React.createElement('div', null, 'Test');
+      };
+
+      let renderer: ReturnType<typeof TestRenderer.create>;
+      act(() => {
+        renderer = TestRenderer.create(React.createElement(TestComponent, { onDown: cb }));
+      });
+
+      const subscribeCount = () => emitted.filter((e) => e.name === KBD_SUBSCRIBE).length;
+      expect(subscribeCount()).toBe(1);
+
+      cb = (e: RillKeyEvent) => seen.push(`v2:${e.key}`);
+      act(() => {
+        renderer.update(React.createElement(TestComponent, { onDown: cb }));
+      });
+
+      act(() => {
+        deliver(makeKeyEvent('keydown', 'a'));
+      });
+
+      // Same key set → no re-subscribe, but the newest callback runs.
+      expect(subscribeCount()).toBe(1);
+      expect(seen).toEqual(['v2:a']);
+
+      act(() => {
+        renderer.unmount();
+      });
+    });
+
+    test('is a no-op when the host keyboard bridge is absent', () => {
+      delete (globalThis as Record<string, unknown>).__rill_emitEvent;
+      delete (globalThis as Record<string, unknown>).__rill_onHostEvent;
+
+      const TestComponent = () => {
+        sdk.useKeyboard({ keys: ['a'], onKeyDown: () => {} });
+        return React.createElement('div', null, 'Test');
+      };
+
+      let renderer: ReturnType<typeof TestRenderer.create>;
+      expect(() => {
+        act(() => {
+          renderer = TestRenderer.create(React.createElement(TestComponent));
+        });
+      }).not.toThrow();
+
+      act(() => {
+        renderer.unmount();
+      });
     });
   });
 });

@@ -7,6 +7,8 @@
  * Note: Guest runtime internals (reconciler/bridge) are in src/guest/runtime/
  */
 
+// Web keyboard bridge (issue #19, L3)
+export type { RillKeyEvent } from '../shared/keyboard';
 // Component prop types and event types
 export type {
   ActivityIndicatorProps,
@@ -28,6 +30,7 @@ export type {
   TextInputProps,
   TextProps,
   TouchableOpacityProps,
+  UseKeyboardSpec,
   ViewProps,
 } from './sdk';
 // Components - Core
@@ -81,6 +84,7 @@ export {
   useColorScheme,
   useConfig,
   useHostEvent,
+  useKeyboard,
   useRemoteRef,
   useSendToHost,
   useWindowDimensions,

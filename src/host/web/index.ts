@@ -9,6 +9,8 @@
  *   props. Register with `engine.register(WebComponents)`, or override any single entry.
  * - **WebEngineView** + **mountEngineView**: render the guest tree into the DOM (mount via the
  *   integrator's react-dom).
+ * - **attachKeyboard**: bridge a DOM target's physical keyboard to the guest's `useKeyboard`
+ *   hook, with synchronous on-demand `preventDefault` for keys the guest declares.
  *
  * Policy (threat model, CSP, capability sealing) stays with the integrator. The off-main-thread
  * worker engine + async bridge (L1) is a separate, deeper change.
@@ -23,7 +25,23 @@
  * ```
  */
 
+// Web keyboard bridge protocol (issue #19, L3) — re-exported for host integrators.
+export {
+  KBD_EVENT,
+  KBD_SUBSCRIBE,
+  KBD_UNSUBSCRIBE,
+  type KeyboardSubscribePayload,
+  type KeyboardUnsubscribePayload,
+  type RillKeyEvent,
+} from '../../shared/keyboard';
 export * from './components';
 export { WebEngineView, type WebEngineViewProps } from './engine-view';
+export {
+  type AttachKeyboardOptions,
+  attachKeyboard,
+  type KeyboardAttachment,
+  type KeyboardBridgeEngine,
+  type KeyboardTarget,
+} from './keyboard';
 export { type EngineViewMount, mountEngineView } from './mount';
 export { toWebStyle, type WebStyleInput, withBaseStyle } from './style';

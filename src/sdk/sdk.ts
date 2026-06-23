@@ -6,6 +6,7 @@
  */
 
 import type { ReviewedUnknown } from '../shared';
+import { KBD_EVENT, KBD_SUBSCRIBE, KBD_UNSUBSCRIBE, type RillKeyEvent } from '../shared/keyboard';
 import type {
   ImageSource,
   LayoutEvent,
@@ -524,6 +525,110 @@ export function useSendToHost(): (eventName: string, payload?: ReviewedUnknown) 
   return () => {
     console.warn('[rill] sendToHost is not available outside sandbox');
   };
+}
+
+// ============ Keyboard (web host) ============
+
+/** Spec for {@link useKeyboard}. */
+export interface UseKeyboardSpec {
+  /**
+   * Keys to listen for, matched against `KeyboardEvent.key` (e.g. 'Enter', 'a', 'ArrowUp',
+   * ' ' for Space). `null` or omitted means every key.
+   */
+  keys?: string[] | null;
+  /**
+   * Ask the host to call `preventDefault` synchronously on the subscribed keys as they are
+   * captured. Use this for keys the browser would otherwise act on (Space scrolls, arrows
+   * scroll, Tab moves focus, '/' opens quick-find). The host must decide without awaiting
+   * the guest, which is why the intent is declared up front rather than per event.
+   */
+  preventDefault?: boolean;
+  /** Called on key press (keydown). */
+  onKeyDown?: (event: RillKeyEvent) => void;
+  /** Called on key release (keyup). */
+  onKeyUp?: (event: RillKeyEvent) => void;
+}
+
+/** Monotonic source of per-hook subscription ids (unique within a guest realm). */
+let _kbdSubscriptionSeq = 0;
+
+/**
+ * Subscribe to physical keyboard events forwarded by a web host (`rill/host/web`
+ * `attachKeyboard`). A no-op on hosts that don't bridge the keyboard (native, or web hosts
+ * that never attached it), so it is always safe to call.
+ *
+ * Events arrive asynchronously over the host-event channel, but the host has already decided
+ * synchronously — based on this subscription's `keys` + `preventDefault` — whether to call
+ * `preventDefault`. That split is deliberate: the browser cannot wait for the sandbox.
+ *
+ * @example
+ * ```tsx
+ * useKeyboard({
+ *   keys: ['ArrowLeft', 'ArrowRight', ' '],
+ *   preventDefault: true,
+ *   onKeyDown: (e) => move(e.key),
+ * });
+ * ```
+ */
+export function useKeyboard(spec: UseKeyboardSpec): void {
+  const { useEffect, useRef } = getReactHooks();
+
+  // Stable subscription id for this hook instance (assigned once, on first render).
+  const idRef = useRef<string | null>(null);
+  if (idRef.current === null) {
+    _kbdSubscriptionSeq += 1;
+    idRef.current = `kbd-${_kbdSubscriptionSeq}`;
+  }
+
+  // Track the latest spec so callbacks can change without re-subscribing.
+  const specRef = useRef(spec);
+  useEffect(() => {
+    specRef.current = spec;
+    return undefined;
+  });
+
+  // Re-subscribe only when the key set or preventDefault intent changes.
+  const specKeys = spec.keys ?? null;
+  const keysKey = specKeys === null ? '*' : [...specKeys].sort().join(' ');
+  const preventDefault = spec.preventDefault ?? false;
+
+  useEffect(() => {
+    const g = globalThis as Record<string, unknown>;
+    if (!('__rill_emitEvent' in g) || !('__rill_onHostEvent' in g)) {
+      return undefined;
+    }
+    const id = idRef.current as string;
+    // Reason: runtime-injected bridge; payload is any serializable guest->host value
+    const emit = g.__rill_emitEvent as (name: string, payload?: unknown) => void;
+    const onHostEvent = g.__rill_onHostEvent as (
+      name: string,
+      cb: (payload: RillKeyEvent) => void
+    ) => () => void;
+
+    const keys = specRef.current.keys ?? null;
+
+    // Declare the subscription so the host can preventDefault exactly these keys.
+    emit(KBD_SUBSCRIBE, { id, keys, preventDefault });
+
+    // The host broadcasts every subscribed key on one channel, so filter locally to the
+    // keys this hook cares about before dispatching.
+    const unsubscribe = onHostEvent(KBD_EVENT, (event) => {
+      if (keys !== null && !keys.includes(event.key)) {
+        return;
+      }
+      const current = specRef.current;
+      if (event.type === 'keydown') {
+        current.onKeyDown?.(event);
+      } else {
+        current.onKeyUp?.(event);
+      }
+    });
+
+    return () => {
+      unsubscribe();
+      emit(KBD_UNSUBSCRIBE, { id });
+    };
+  }, [keysKey, preventDefault]);
 }
 
 // ============ Remote Ref ============
