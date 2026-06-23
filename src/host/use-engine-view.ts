@@ -6,7 +6,7 @@
  */
 
 import type { ReactElement } from 'react';
-import type { Engine } from './engine';
+import type { Receiver } from './receiver';
 
 const React = require('react') as typeof import('react');
 
@@ -16,13 +16,34 @@ const React = require('react') as typeof import('react');
 export type LoadingState = 'idle' | 'loading' | 'loaded' | 'error';
 
 /**
+ * The minimal engine surface `useEngineView` drives. Both the in-thread {@link Engine} and the
+ * off-main-thread `WorkerEngine` (`rill/host/web`) satisfy it, so a single EngineView component
+ * works with either. Kept structural (not the concrete `Engine`) precisely so the worker proxy
+ * can stand in.
+ */
+export interface EngineViewEngine {
+  readonly isLoaded: boolean;
+  readonly isDestroyed: boolean;
+  createReceiver(): Receiver;
+  getReceiver(): Receiver | null;
+  loadBundle(
+    source: string,
+    initialProps?: Record<string, unknown>,
+    options?: { bytecodeAssetPath?: string }
+  ): Promise<void>;
+  on(event: 'update', listener: () => void): () => void;
+  on(event: 'error', listener: (error: Error) => void): () => void;
+  on(event: 'destroy', listener: () => void): () => void;
+}
+
+/**
  * Common EngineView props (platform-agnostic)
  */
 export interface UseEngineViewOptions {
   /**
-   * Engine instance
+   * Engine instance (the in-thread `Engine` or an off-main-thread `WorkerEngine`).
    */
-  engine: Engine;
+  engine: EngineViewEngine;
 
   /**
    * Bundle source (URL or code string)

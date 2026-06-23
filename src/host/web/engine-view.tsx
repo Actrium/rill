@@ -15,12 +15,14 @@
  */
 
 import type { CSSProperties, ReactElement, ReactNode } from 'react';
-import type { Engine } from '../engine';
-import { useEngineView } from '../use-engine-view';
+import { type EngineViewEngine, useEngineView } from '../use-engine-view';
 
 export interface WebEngineViewProps {
-  /** Engine instance (sandbox should be 'wasm-quickjs' on web). */
-  engine: Engine;
+  /**
+   * Engine instance. Either the in-thread `Engine` (sandbox `'wasm-quickjs'`) or an
+   * off-main-thread `WorkerEngine` from `rill/host/web` — both render identically here.
+   */
+  engine: EngineViewEngine;
   /** Bundle source (URL or code string). */
   source: string;
   /** Initial props passed to the guest. */

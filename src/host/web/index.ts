@@ -11,6 +11,9 @@
  *   integrator's react-dom).
  * - **attachKeyboard**: bridge a DOM target's physical keyboard to the guest's `useKeyboard`
  *   hook, with synchronous on-demand `preventDefault` for keys the guest declares.
+ * - **WorkerEngine**: run the QuickJS-WASM engine off the main thread in a Web Worker, with a
+ *   `terminate()`-based watchdog that hard-kills a runaway guest. Drives `WebEngineView` exactly
+ *   like the in-thread Engine.
  *
  * Policy (threat model, CSP, capability sealing) stays with the integrator. The off-main-thread
  * worker engine + async bridge (L1) is a separate, deeper change.
@@ -45,3 +48,16 @@ export {
 } from './keyboard';
 export { type EngineViewMount, mountEngineView } from './mount';
 export { toWebStyle, type WebStyleInput, withBaseStyle } from './style';
+export type {
+  MainToWorkerMessage,
+  WorkerSandbox,
+  WorkerToMainMessage,
+} from './worker/protocol';
+// Off-main-thread engine (issue #19, L1)
+export {
+  createWorkerEngine,
+  type WatchdogKillInfo,
+  WorkerEngine,
+  type WorkerEngineEventMap,
+  type WorkerEngineOptions,
+} from './worker/worker-engine';
