@@ -323,6 +323,12 @@ export default function Guest() {
         'host:theme.onThemeChanged',
       ],
       guestExports: ['refresh'],
+      // contract declares no boundary schemas → every used capability is unschemed
+      unschemed: [
+        'host:analytics.track',
+        'host:navigation.openProfile',
+        'host:theme.onThemeChanged',
+      ],
     });
   });
 
@@ -356,6 +362,8 @@ export async function refresh() {
       contractVersion: null,
       hostCapabilities: ['host:navigation.openProfile'],
       guestExports: ['refresh'],
+      // no contract supplied → schema presence is unknown, nothing flagged
+      unschemed: [],
     });
   });
 });

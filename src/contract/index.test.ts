@@ -74,7 +74,38 @@ describe('rill/contract', () => {
         'host:theme.onThemeChanged',
       ],
       guestExports: ['refresh'],
+      // none of these declare a boundary schema → all flagged as unschemed
+      unschemed: [
+        'host:navigation.openProfile',
+        'host:theme.notifyReady',
+        'host:theme.onThemeChanged',
+      ],
     });
+  });
+
+  test('unschemed flags only capabilities missing untrusted-input validation', () => {
+    const contract = defineRillContract({
+      version: '1.0.0',
+      hostModules: {
+        'host:a': {
+          validated: rpc<{ x: string }, void>({
+            schema: { parseInput: (v) => v as { x: string } },
+          }),
+          bare: rpc<{ x: string }, void>(),
+          sub: subscription<{ y: number }>({
+            schema: { parseEvent: (v) => v as { y: number } },
+          }),
+          bareSub: subscription<{ y: number }>(),
+        },
+      },
+      guestExports: {},
+    });
+    // parseOutput is host->guest and not required; only missing parseInput /
+    // parseEvent counts as unschemed.
+    expect(createCapabilitiesManifest(contract).unschemed).toEqual([
+      'host:a.bare',
+      'host:a.bareSub',
+    ]);
   });
 
   test('validates host module implementations', async () => {

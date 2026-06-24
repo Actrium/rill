@@ -1,14 +1,13 @@
 /**
  * @rill/shared - Protocol Layer
  *
- * Host ↔ Guest
- * - Bridge（）
- * -
- * -
- * - CallbackRegistry（）
+ * Host <-> Guest shared protocol surface:
+ * - Bridge
+ * - serialization / type rules
+ * - CallbackRegistry
  */
 
-// Bridge（Host ↔ Guest ）
+// Bridge (Host <-> Guest transport)
 export {
   Bridge,
   type BridgeOptions,
@@ -17,11 +16,20 @@ export {
   type PromiseManagerOptions,
   type PromiseSettleResult,
 } from './bridge';
-// CallbackRegistry （）
+// CallbackRegistry
 export {
   CallbackRegistry as CallbackRegistryImpl,
   globalCallbackRegistry,
 } from './callback-registry';
+// Web keyboard bridge protocol (issue #19, L3)
+export {
+  KBD_EVENT,
+  KBD_SUBSCRIBE,
+  KBD_UNSUBSCRIBE,
+  type KeyboardSubscribePayload,
+  type KeyboardUnsubscribePayload,
+  type RillKeyEvent,
+} from './keyboard';
 // Serialization utilities ()
 export {
   createDecoder,

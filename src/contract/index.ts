@@ -109,6 +109,13 @@ export interface RillCapabilitiesManifest {
   contractVersion: string;
   hostCapabilities: string[];
   guestExports: string[];
+  /**
+   * Declared host capabilities whose untrusted guest->host input is NOT validated:
+   * rpc capabilities missing `parseInput`, or subscription capabilities missing
+   * `parseEvent`. (`parseOutput` is host->guest and not required.) A sealed-tier
+   * publish gate should reject a non-empty list.
+   */
+  unschemed: string[];
 }
 
 /**
@@ -260,10 +267,25 @@ export function createCapabilitiesManifest(contract: RillContractShape): RillCap
 
   const guestExports = Object.keys(contract.guestExports).sort();
 
+  // A capability's untrusted input is validated when rpc has parseInput or
+  // subscription has parseEvent. (parseOutput is host->guest and not required.)
+  const unschemed = Object.entries(contract.hostModules)
+    .flatMap(([moduleId, moduleSpec]) =>
+      Object.entries(moduleSpec)
+        .filter(([, descriptor]) =>
+          descriptor.kind === 'subscription'
+            ? !descriptor.schema?.parseEvent
+            : !descriptor.schema?.parseInput
+        )
+        .map(([exportName]) => `${moduleId}.${exportName}`)
+    )
+    .sort();
+
   return {
     contractVersion: contract.version,
     hostCapabilities,
     guestExports,
+    unschemed,
   };
 }
 

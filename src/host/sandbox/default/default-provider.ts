@@ -77,6 +77,12 @@ export type DefaultProviderOptions = {
    * @default '/quickjs-sandbox.wasm'
    */
   wasmPath?: string;
+  /**
+   * Provide the QuickJS `.wasm` bytes directly (Web). When set, the loader
+   * instantiates from memory and never fetches — required under a strict CSP
+   * like `connect-src 'none'`.
+   */
+  wasmBinary?: Uint8Array | ArrayBuffer;
 };
 
 /**
@@ -146,6 +152,7 @@ export class DefaultProvider implements JSEngineProvider {
         return new QuickJSNativeWASMProvider({
           timeout: options?.timeout,
           wasmPath: options?.wasmPath,
+          wasmBinary: options?.wasmBinary,
         });
       }
       throw new Error('[DefaultProvider] WasmQuickJS requested but WebAssembly is not available.');
@@ -164,6 +171,7 @@ export class DefaultProvider implements JSEngineProvider {
       return new QuickJSNativeWASMProvider({
         timeout: options?.timeout,
         wasmPath: options?.wasmPath,
+        wasmBinary: options?.wasmBinary,
       });
     }
 

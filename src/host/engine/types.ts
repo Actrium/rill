@@ -7,7 +7,7 @@ import type { RuntimeCollectorConfig } from '../../devtools/runtime';
 import type { Receiver, ReceiverStats } from '../receiver';
 import type { ComponentMap, ComponentRegistry } from '../registry';
 import type { TenantConfig } from '../tenant-manager/types';
-import type { BridgeValueObject, OperationBatch } from '../types';
+import type { BridgeValueObject, OperationBatch, SerializedOperationBatch } from '../types';
 
 /**
  * Engine configuration options
@@ -37,6 +37,18 @@ export interface EngineOptions {
    * @default 5000
    */
   timeout?: number;
+
+  /**
+   * (Web / `wasm-quickjs`) Override the `.wasm` binary URL the loader fetches.
+   */
+  wasmPath?: string;
+
+  /**
+   * (Web / `wasm-quickjs`) Provide the QuickJS `.wasm` bytes directly. When set,
+   * the engine instantiates WASM from these bytes and performs NO network fetch —
+   * required to run under a strict CSP such as `connect-src 'none'`.
+   */
+  wasmBinary?: Uint8Array | ArrayBuffer;
 
   /**
    * Enable debug mode
@@ -121,6 +133,17 @@ export interface EngineOptions {
    * {@link EngineOptions.contract}.
    */
   hostModules?: HostModuleImplementationMap;
+
+  /**
+   * Advanced / internal: receive each guest render batch in its SERIALIZED form (callbacks as
+   * `{__fnId}` markers) instead of having the Engine decode and apply it locally. When set, the
+   * Engine does NOT build a host-side operation batch — it forwards the serialized batch here.
+   *
+   * Used by the off-main-thread worker host (`rill/host/web` WorkerEngine): the worker runs the
+   * sandbox but has no renderer, so it ships serialized batches to the main thread for decode +
+   * render. Most integrators never set this.
+   */
+  onSerializedBatch?: (batch: SerializedOperationBatch) => void;
 }
 
 /**

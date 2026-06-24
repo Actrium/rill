@@ -40,7 +40,12 @@ import { ComponentRegistry } from '../registry';
 import type { JSEngineProvider, JSEngineRuntime, SandboxScope } from '../sandbox';
 import type { RillReconcilerGlobal } from '../sandbox/globals';
 import { TenantManagerProvider } from '../tenant-manager/tenant-manager-provider';
-import type { HostMessage, OperationBatch, ReviewedUnknown } from '../types';
+import type {
+  HostMessage,
+  OperationBatch,
+  ReviewedUnknown,
+  SerializedOperationBatch,
+} from '../types';
 import { DiagnosticsCollector } from './diagnostics-collector';
 import { createCommonJSGlobals, createReactNativeShim, formatConsoleArgs } from './sandbox-helpers';
 import { DEVTOOLS_SHIM } from './shims';
@@ -111,6 +116,7 @@ export class Engine implements IEngine {
     requireWhitelist: ReadonlySet<string>;
     onMetric?: (name: string, value: number, extra?: Record<string, unknown>) => void;
     receiverMaxBatchSize: number;
+    onSerializedBatch?: (batch: SerializedOperationBatch) => void;
   };
   private provider: JSEngineProvider | null = null;
   private destroyed = false;
@@ -201,6 +207,7 @@ export class Engine implements IEngine {
       requireWhitelist: new Set(options.requireWhitelist ?? Array.from(defaultWhitelist)),
       onMetric: options.onMetric,
       receiverMaxBatchSize: options.receiverMaxBatchSize ?? 5000,
+      onSerializedBatch: options.onSerializedBatch,
     };
 
     // Generate unique engine ID early (needed by TenantManagerProvider default appId)
@@ -264,6 +271,8 @@ export class Engine implements IEngine {
         this.provider = new DefaultProvider({
           timeout: this.options.timeout,
           sandbox: options.sandbox,
+          wasmPath: options.wasmPath,
+          wasmBinary: options.wasmBinary,
         });
         if (this.options.debug) {
           const providerName = this.provider?.constructor?.name || 'unknown';
@@ -658,43 +667,8 @@ export class Engine implements IEngine {
       logger: this.options.logger,
       callbackRegistry: this.callbackRegistry,
       // Guest callback invoker - routes Guest callbacks to sandbox
-      guestInvoker: (fnId, args) => {
-        // Fast path: node-vm / native JSI providers return live function references from
-        // extract(), so the guest's invokeCallback can be called directly.
-        if (/^fn_\d+$/.test(fnId)) {
-          const rillNs = this.context?.extract('__rill') as Record<string, unknown> | undefined;
-          const invokeCallback = rillNs?.invokeCallback as
-            | ((fnId: string, args: ReviewedUnknown[]) => ReviewedUnknown)
-            | undefined;
-          if (typeof invokeCallback === 'function') {
-            return invokeCallback(fnId, args);
-          }
-        }
-        const reconciler = this.context?.extract('RillReconciler') as
-          | { invokeCallback?: (fnId: string, args: ReviewedUnknown[]) => ReviewedUnknown }
-          | undefined;
-        if (typeof reconciler?.invokeCallback === 'function') {
-          return reconciler.invokeCallback(fnId, args);
-        }
-        // Fallback: the WASM provider's extract() goes through a JSON bridge that drops
-        // function references, so invokeCallback can't be pulled across — invoke the guest
-        // callback in-realm via eval instead (the same mechanism the CALL_FUNCTION host
-        // message uses). This is what makes function-prop callbacks (e.g. onPress -> setState)
-        // work on web/WASM. Works on every provider.
-        if (this.context) {
-          this.context.inject('__rill_guest_invoke_args', (args ?? []) as ReviewedUnknown);
-          const fnIdLit = JSON.stringify(fnId);
-          const result = this.context.eval(
-            `(function(){var a=globalThis.__rill_guest_invoke_args;delete globalThis.__rill_guest_invoke_args;` +
-              `var R=globalThis.__rill;if(R&&typeof R.invokeCallback==='function')return R.invokeCallback(${fnIdLit},a);` +
-              `var RC=globalThis.RillReconciler;if(RC&&typeof RC.invokeCallback==='function')return RC.invokeCallback(${fnIdLit},a);` +
-              `return undefined;})()`
-          );
-          return result as ReviewedUnknown;
-        }
-        logger.warn(`[rill:${this.id}] No invoker found for ${fnId}`);
-        return undefined;
-      },
+      guestInvoker: (fnId, args) => this._invokeGuestCallback(fnId, args),
+      onSerializedBatch: this.options.onSerializedBatch,
       // Guest callback releaser
       guestReleaseCallback: (fnId) => {
         const reconciler = this.context?.extract('RillReconciler') as
@@ -737,6 +711,63 @@ export class Engine implements IEngine {
         }
       },
     });
+  }
+
+  /**
+   * Invoke a guest callback by its function id, returning the guest's result.
+   *
+   * This is the mechanism behind function-prop callbacks (e.g. `onPress` → `setState`): when a
+   * host-side proxy for a guest callback fires, the Bridge routes here. Three strategies, in
+   * order of preference, all synchronous against the live context:
+   *  - node-vm / native JSI: `extract('__rill')` returns a live `invokeCallback` reference.
+   *  - reconciler: `extract('RillReconciler').invokeCallback`.
+   *  - fallback (WASM): `extract()` drops function refs through its JSON bridge, so invoke the
+   *    callback in-realm via `eval` (the same path the CALL_FUNCTION host message uses). Works
+   *    on every provider.
+   *
+   * Exposed publicly so the off-main-thread worker host can fire guest callbacks by id when a
+   * decoded main-thread proxy is invoked.
+   */
+  invokeGuestCallback(fnId: string, args: ReviewedUnknown[]): ReviewedUnknown {
+    return this._invokeGuestCallback(fnId, args);
+  }
+
+  private _invokeGuestCallback(fnId: string, args: ReviewedUnknown[]): ReviewedUnknown {
+    // Fast path: node-vm / native JSI providers return live function references from
+    // extract(), so the guest's invokeCallback can be called directly.
+    if (/^fn_\d+$/.test(fnId)) {
+      const rillNs = this.context?.extract('__rill') as Record<string, unknown> | undefined;
+      const invokeCallback = rillNs?.invokeCallback as
+        | ((fnId: string, args: ReviewedUnknown[]) => ReviewedUnknown)
+        | undefined;
+      if (typeof invokeCallback === 'function') {
+        return invokeCallback(fnId, args);
+      }
+    }
+    const reconciler = this.context?.extract('RillReconciler') as
+      | { invokeCallback?: (fnId: string, args: ReviewedUnknown[]) => ReviewedUnknown }
+      | undefined;
+    if (typeof reconciler?.invokeCallback === 'function') {
+      return reconciler.invokeCallback(fnId, args);
+    }
+    // Fallback: the WASM provider's extract() goes through a JSON bridge that drops
+    // function references, so invokeCallback can't be pulled across — invoke the guest
+    // callback in-realm via eval instead (the same mechanism the CALL_FUNCTION host
+    // message uses). This is what makes function-prop callbacks (e.g. onPress -> setState)
+    // work on web/WASM. Works on every provider.
+    if (this.context) {
+      this.context.inject('__rill_guest_invoke_args', (args ?? []) as ReviewedUnknown);
+      const fnIdLit = JSON.stringify(fnId);
+      const result = this.context.eval(
+        `(function(){var a=globalThis.__rill_guest_invoke_args;delete globalThis.__rill_guest_invoke_args;` +
+          `var R=globalThis.__rill;if(R&&typeof R.invokeCallback==='function')return R.invokeCallback(${fnIdLit},a);` +
+          `var RC=globalThis.RillReconciler;if(RC&&typeof RC.invokeCallback==='function')return RC.invokeCallback(${fnIdLit},a);` +
+          `return undefined;})()`
+      );
+      return result as ReviewedUnknown;
+    }
+    this.options.logger.warn(`[rill:${this.id}] No invoker found for ${fnId}`);
+    return undefined;
   }
 
   /**

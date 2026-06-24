@@ -88,6 +88,8 @@ const expectedManifest = {
     'host:theme.onThemeChanged',
   ],
   guestExports: ['refresh'],
+  // every capability declares parseInput/parseEvent → nothing unschemed
+  unschemed: [],
 };
 
 if (JSON.stringify(manifest) !== JSON.stringify(expectedManifest)) {

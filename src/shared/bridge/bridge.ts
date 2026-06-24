@@ -48,6 +48,18 @@ export interface BridgeOptions {
   onGuestOperations: (batch: OperationBatch) => void;
 
   /**
+   * Called with the SERIALIZED batch (callbacks as `{__fnId}` markers, not live functions)
+   * before it is decoded. When set, the Bridge forwards the serialized batch here and SKIPS
+   * local decode + {@link onGuestOperations} entirely.
+   *
+   * This is the seam the off-main-thread worker host uses: the worker holds the sandbox but
+   * has no renderer, so it ships the structured-clone-safe serialized batch across the worker
+   * boundary; the main thread decodes it (turning `{__fnId}` back into proxies that invoke the
+   * guest callback over postMessage). Leave unset for in-thread engines.
+   */
+  onSerializedBatch?: (batch: SerializedOperationBatch) => void;
+
+  /**
    * Called when Host sends a message to Guest (already decoded)
    */
   onHostMessage: (message: HostMessage) => void | Promise<void>;
@@ -116,6 +128,7 @@ export interface EncodeBatchResult {
  */
 export class Bridge {
   private onGuestOperations: (batch: OperationBatch) => void;
+  private onSerializedBatch?: (batch: SerializedOperationBatch) => void;
   private onHostMessage: (message: HostMessage) => void | Promise<void>;
   private registry: CallbackRegistry;
   private guestInvoker?: (fnId: string, args: ReviewedUnknown[]) => ReviewedUnknown;
@@ -141,6 +154,7 @@ export class Bridge {
 
   constructor(options: BridgeOptions) {
     this.onGuestOperations = options.onGuestOperations;
+    this.onSerializedBatch = options.onSerializedBatch;
     this.onHostMessage = options.onHostMessage;
     this.registry = options.callbackRegistry;
     this.guestInvoker = options.guestInvoker;
@@ -275,6 +289,14 @@ export class Bridge {
    * Common dispatch path: decode serialized batch, extract fnIds, and deliver.
    */
   private dispatchSerializedBatch(serializedBatch: SerializedOperationBatch): void {
+    // Off-main-thread worker host: forward the structured-clone-safe serialized batch and skip
+    // local decode. The worker has no renderer, and its callback proxies could not cross the
+    // worker boundary anyway — the main thread decodes and wires callbacks back over postMessage.
+    if (this.onSerializedBatch) {
+      this.onSerializedBatch(serializedBatch);
+      return;
+    }
+
     // Extract fnIds from each operation's props for cleanup tracking
     const operationFnIds = new Map<number, Set<string>>();
     for (const op of serializedBatch.operations) {

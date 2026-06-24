@@ -64,6 +64,9 @@ interface QuickJSWASMModule {
  */
 type QuickJSWASMFactoryModuleArg = {
   locateFile?: (path: string, scriptDirectory?: string) => string;
+  // Provide the .wasm bytes directly so the loader instantiates from memory and
+  // never fetches — required under a strict CSP (connect-src 'none').
+  wasmBinary?: Uint8Array | ArrayBuffer;
 };
 
 type QuickJSWASMFactory = (moduleArg?: QuickJSWASMFactoryModuleArg) => Promise<QuickJSWASMModule>;
@@ -86,6 +89,13 @@ export interface QuickJSNativeWASMProviderOptions {
    * If not set, the loader resolves `quickjs-sandbox.wasm` relative to itself.
    */
   wasmPath?: string;
+
+  /**
+   * Provide the `.wasm` bytes directly. When set, the loader instantiates from
+   * these bytes and performs NO network fetch — required to run under a strict
+   * CSP such as `connect-src 'none'`. Takes precedence over `wasmPath`.
+   */
+  wasmBinary?: Uint8Array | ArrayBuffer;
 
   /**
    * Custom WASM module factory
@@ -231,6 +241,7 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
   private options: {
     loaderPath: string;
     wasmPath?: string;
+    wasmBinary?: Uint8Array | ArrayBuffer;
     wasmFactory: QuickJSWASMFactory;
     timeout: number;
     debug: boolean;
@@ -242,6 +253,7 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
     this.options = {
       loaderPath: options.loaderPath ?? '../wasm/quickjs-sandbox.js',
       wasmPath: options.wasmPath,
+      wasmBinary: options.wasmBinary,
       wasmFactory: options.wasmFactory ?? this.defaultWASMFactory.bind(this),
       timeout: options.timeout ?? 5000,
       debug: options.debug ?? false,
@@ -706,13 +718,14 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
     }
 
     if (!this.loadPromise) {
-      const wasmPath = this.options.wasmPath;
+      const { wasmPath, wasmBinary } = this.options;
+      const moduleArg: QuickJSWASMFactoryModuleArg = {};
+      if (wasmBinary) moduleArg.wasmBinary = wasmBinary;
+      if (wasmPath) {
+        moduleArg.locateFile = (path: string) => (path.endsWith('.wasm') ? wasmPath : path);
+      }
       this.loadPromise = this.options.wasmFactory(
-        wasmPath
-          ? {
-              locateFile: (path: string) => (path.endsWith('.wasm') ? wasmPath : path),
-            }
-          : undefined
+        Object.keys(moduleArg).length > 0 ? moduleArg : undefined
       );
     }
 
