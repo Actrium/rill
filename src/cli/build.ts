@@ -305,13 +305,20 @@ const HOST_MODULE_EXTERNAL = 'host:*';
 /**
  * Create Bun plugin for pre-bundle Babel transforms (dev mode source location injection)
  */
-async function createBabelPlugin(): Promise<BunPlugin> {
+async function createBabelPlugin(options: { dev: boolean }): Promise<BunPlugin> {
   const babel = await import('@babel/core');
-  const functionSourceLocationPlugin = (await import('./babel-plugin-function-source-location'))
-    .default;
+  // Always transform arrow functions → function expressions. rill's Hermes
+  // sandbox compiler rejects async arrow functions ("async functions are
+  // unsupported") while accepting `async function`. Babel's official
+  // arrow-functions transform preserves `this`-binding semantics, so the
+  // conversion is semantically safe across all engines (QuickJS/JSC/WASM).
+  const transformPlugins: any[] = ['@babel/plugin-transform-arrow-functions'];
+  if (options.dev) {
+    transformPlugins.push((await import('./babel-plugin-function-source-location')).default);
+  }
 
   return {
-    name: 'babel-source-location',
+    name: 'babel-hermes-compat',
     setup(build) {
       // Only process source files (tsx, ts, jsx, js)
       build.onLoad({ filter: /\.(tsx?|jsx?)$/ }, async (args) => {
@@ -320,7 +327,7 @@ async function createBabelPlugin(): Promise<BunPlugin> {
         try {
           const result = await babel.transformAsync(contents, {
             filename: args.path, // Use original file path!
-            plugins: [functionSourceLocationPlugin],
+            plugins: transformPlugins,
             parserOpts: {
               sourceType: 'module',
               plugins: ['typescript', 'jsx'],
@@ -637,11 +644,11 @@ export async function build(options: BuildOptions): Promise<void> {
   const hostBoundaryCollector = createHostBoundaryCollector(entryPath);
   plugins.push(hostBoundaryCollector.plugin);
 
-  // In dev mode, add Babel plugin for source location injection
+  // Always-on Babel: arrow→function for Hermes sandbox compat; +source-location in dev.
   if (options.dev) {
     console.log('Dev mode: enabling source location injection...');
-    plugins.push(await createBabelPlugin());
   }
+  plugins.push(await createBabelPlugin({ dev: options.dev ?? false }));
 
   // Build with Bun
   const result = await Bun.build({
