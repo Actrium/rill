@@ -303,16 +303,50 @@ const EXTERNALS: Record<string, string> = {
 const HOST_MODULE_EXTERNAL = 'host:*';
 
 /**
- * Create Bun plugin for pre-bundle Babel transforms (dev mode source location injection)
+ * Map a source file path to the Bun loader that should process the
+ * Babel-transformed output.
+ */
+function loaderForPath(filePath: string): 'tsx' | 'ts' | 'jsx' | 'js' {
+  if (filePath.endsWith('.tsx')) return 'tsx';
+  if (/\.[cm]?ts$/.test(filePath)) return 'ts';
+  if (filePath.endsWith('.jsx')) return 'jsx';
+  return 'js';
+}
+
+/**
+ * Babel parser plugins per file kind: `typescript` and `jsx` together force
+ * TSX parsing, which misreads `<T>() => ...` generic arrows in plain .ts, so
+ * only .tsx gets both.
+ */
+function parserPluginsForPath(
+  filePath: string
+): NonNullable<import('@babel/core').ParserOptions['plugins']> {
+  if (filePath.endsWith('.tsx')) return ['typescript', 'jsx', 'decorators-legacy'];
+  if (/\.[cm]?ts$/.test(filePath)) return ['typescript', 'decorators-legacy'];
+  return ['jsx', 'decorators-legacy'];
+}
+
+/**
+ * Create Bun plugin for pre-bundle Babel transforms.
+ *
+ * Always transforms arrow functions → function expressions: Hermes' compiler
+ * (verified on hermes-engine 0.11.0 and the hermesc bundled with RN 0.81.5)
+ * rejects async arrow functions with "async functions are unsupported" while
+ * accepting `async function`. Babel's arrow-functions transform aliases
+ * `this`/`arguments`/`new.target`, so the conversion is semantically safe
+ * across all engines (QuickJS/JSC/WASM/Hermes).
+ *
+ * A failed per-file transform is only a warning here — the post-build Hermes
+ * compat guard fails the build if an async arrow reaches the final bundle.
+ * In dev mode the source-location injection plugin is added on top.
  */
 async function createBabelPlugin(options: { dev: boolean }): Promise<BunPlugin> {
   const babel = await import('@babel/core');
-  // Always transform arrow functions → function expressions. rill's Hermes
-  // sandbox compiler rejects async arrow functions ("async functions are
-  // unsupported") while accepting `async function`. Babel's official
-  // arrow-functions transform preserves `this`-binding semantics, so the
-  // conversion is semantically safe across all engines (QuickJS/JSC/WASM).
-  const transformPlugins: any[] = ['@babel/plugin-transform-arrow-functions'];
+  // Pass the plugin as a module object, not a string: Babel resolves string
+  // plugin names against the build cwd, which silently fails when `rill build`
+  // runs outside a tree where the package is hoisted.
+  const arrowFunctionsTransform = (await import('@babel/plugin-transform-arrow-functions')).default;
+  const transformPlugins: import('@babel/core').PluginItem[] = [arrowFunctionsTransform];
   if (options.dev) {
     transformPlugins.push((await import('./babel-plugin-function-source-location')).default);
   }
@@ -320,8 +354,8 @@ async function createBabelPlugin(options: { dev: boolean }): Promise<BunPlugin> 
   return {
     name: 'babel-hermes-compat',
     setup(build) {
-      // Only process source files (tsx, ts, jsx, js)
-      build.onLoad({ filter: /\.(tsx?|jsx?)$/ }, async (args) => {
+      // Cover every JS/TS flavor Bun may bundle, including .mjs/.cjs/.mts/.cts
+      build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async (args) => {
         const contents = await Bun.file(args.path).text();
 
         try {
@@ -329,8 +363,10 @@ async function createBabelPlugin(options: { dev: boolean }): Promise<BunPlugin> 
             filename: args.path, // Use original file path!
             plugins: transformPlugins,
             parserOpts: {
-              sourceType: 'module',
-              plugins: ['typescript', 'jsx'],
+              // CJS deps are scripts, not modules; top-level `return` is legal there
+              sourceType: 'unambiguous',
+              allowReturnOutsideFunction: true,
+              plugins: parserPluginsForPath(args.path),
             },
             generatorOpts: {
               retainLines: true, // Preserve line numbers
@@ -340,17 +376,12 @@ async function createBabelPlugin(options: { dev: boolean }): Promise<BunPlugin> 
           if (result?.code) {
             return {
               contents: result.code,
-              loader: args.path.endsWith('.tsx')
-                ? 'tsx'
-                : args.path.endsWith('.ts')
-                  ? 'ts'
-                  : args.path.endsWith('.jsx')
-                    ? 'jsx'
-                    : 'js',
+              loader: loaderForPath(args.path),
             };
           }
         } catch (err) {
-          // If Babel fails, return original content
+          // Pass the original file through; the post-build guard catches any
+          // async arrow this file would have contributed to the bundle
           console.warn(`[babel] Transform failed for ${args.path}:`, (err as Error).message);
         }
 
@@ -358,6 +389,37 @@ async function createBabelPlugin(options: { dev: boolean }): Promise<BunPlugin> 
       });
     },
   };
+}
+
+/**
+ * Scan an oxc-parser program (JSON string) for async arrow functions.
+ * String literals in the bundle (e.g. React warnings quoting "async () =>")
+ * are AST values, not nodes, so they cannot false-positive.
+ */
+function findAsyncArrows(programJson: string): { count: number; firstOffset: number } {
+  let count = 0;
+  let firstOffset = -1;
+  // Reason: walking raw oxc AST JSON; nodes are heterogeneous and only
+  // type/async/start fields are inspected after narrowing
+  const stack: unknown[] = [JSON.parse(programJson)];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (node === null || typeof node !== 'object') continue;
+    if (Array.isArray(node)) {
+      for (const child of node) stack.push(child);
+      continue;
+    }
+    const record = node as Record<string, unknown>;
+    if (record.type === 'ArrowFunctionExpression' && record.async === true) {
+      count++;
+      const start = typeof record.start === 'number' ? record.start : -1;
+      if (firstOffset === -1 || (start !== -1 && start < firstOffset)) firstOffset = start;
+    }
+    for (const value of Object.values(record)) {
+      if (value !== null && typeof value === 'object') stack.push(value);
+    }
+  }
+  return { count, firstOffset };
 }
 
 /**
@@ -645,6 +707,7 @@ export async function build(options: BuildOptions): Promise<void> {
   plugins.push(hostBoundaryCollector.plugin);
 
   // Always-on Babel: arrow→function for Hermes sandbox compat; +source-location in dev.
+  console.log('Hermes compat: transforming arrow functions to function expressions...');
   if (options.dev) {
     console.log('Dev mode: enabling source location injection...');
   }
@@ -813,6 +876,20 @@ ${footerCode}
       throw new Error(`Syntax errors:\n  ${msgs}`);
     }
     console.log('   Syntax validation: PASS');
+
+    // Hermes compat guard: async arrows crash Hermes hosts at compile time
+    // ("async functions are unsupported"). The pre-bundle Babel pass eliminates
+    // them; this catches anything that slipped through (a dep the transform
+    // failed on, a custom footer, future loader gaps).
+    const asyncArrows = findAsyncArrows(result.program);
+    if (asyncArrows.count > 0) {
+      throw new Error(
+        `Hermes compat guard: ${asyncArrows.count} async arrow function(s) reached the final bundle ` +
+          `(first at offset ${asyncArrows.firstOffset}). The bundle would fail to compile on Hermes hosts; ` +
+          'ensure the offending source is covered by the Babel arrow transform.'
+      );
+    }
+    console.log('   Hermes compat guard: PASS (no async arrows)');
   } catch (validationErr) {
     console.error('\n❌ Bundle validation failed:');
     if (validationErr instanceof Error) {
