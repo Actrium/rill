@@ -412,7 +412,11 @@ macro_rules! rill_guest_main {
 
         #[panic_handler]
         fn __rill_guest_panic(_: &core::panic::PanicInfo) -> ! {
-            loop {}
+            // Trap, don't spin: a panicking / aborting guest (incl. allocation
+            // failure) surfaces to the host as a catchable WASM error instead of
+            // an infinite loop that would hang the host's main thread. (A guest
+            // that spins on its own is a separate concern — see the Worker path.)
+            core::arch::wasm32::unreachable()
         }
 
         #[no_mangle]

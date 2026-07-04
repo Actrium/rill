@@ -111,7 +111,10 @@ export class WasmGuestHost {
   /** Allocate guest memory via rill_alloc and copy `bytes` in; returns the ptr. */
   private allocWrite(bytes: Uint8Array): number {
     const ptr = (this.instance.exports.rill_alloc as (n: number) => number)(bytes.length) >>> 0;
-    // Re-read the buffer after alloc in case the guest grew its memory.
+    // rill_alloc is guest code: a broken/exhausted allocator can hand back a
+    // pointer that doesn't fit. Validate before writing (re-reads the buffer,
+    // which may have grown during alloc). Fails closed instead of writing OOB.
+    this.assertInBounds(ptr, bytes.length);
     new Uint8Array(this.memory.buffer, ptr, bytes.length).set(bytes);
     return ptr;
   }

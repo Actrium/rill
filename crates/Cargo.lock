@@ -10,6 +10,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "heap-exhaust-guest"
+version = "0.0.0"
+dependencies = [
+ "rill-guest",
+]
+
+[[package]]
 name = "kv-guest"
 version = "0.0.0"
 dependencies = [

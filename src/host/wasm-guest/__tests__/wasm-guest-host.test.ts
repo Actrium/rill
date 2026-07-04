@@ -58,6 +58,53 @@ const BAD_BATCH = readFileSync(join(import.meta.dir, 'fixtures/bad-batch.wasm'))
 const EVENT_GUEST = readFileSync(join(import.meta.dir, 'fixtures/event-guest.wasm'));
 // Guest authored in C via the C SDK (sdk/c) — proves the ABI is language-neutral.
 const C_GUEST = readFileSync(join(import.meta.dir, 'fixtures/c-guest.wasm'));
+// Adversarial guest that over-allocates past its bump heap (allocation trap).
+const HEAP_EXHAUST = readFileSync(join(import.meta.dir, 'fixtures/heap-exhaust-guest.wasm'));
+
+// --- tiny seeded PRNG + JSON generator for fuzzing (reproducible, no deps) ---
+type Json = string | number | boolean | null | Json[] | { [k: string]: Json };
+function makePrng(seed: number): () => number {
+  let s = seed >>> 0 || 1;
+  return () => {
+    s ^= s << 13;
+    s >>>= 0;
+    s ^= s >> 17;
+    s ^= s << 5;
+    s >>>= 0;
+    return s >>> 0;
+  };
+}
+// Adversarial chars incl. JSON metachars + multi-byte UTF-8 (u00e9 = 2 bytes,
+// u{1F600} = 4 bytes / surrogate pair). Escapes keep the source ASCII-only.
+const FUZZ_CHARS = ['a', 'Z', '0', ' ', '"', '\\', '\n', '\t', 'é', '\u{1F600}', ':', '{', '}', '[', ']'];
+function randomString(rng: () => number): string {
+  const n = rng() % 10;
+  let out = '';
+  for (let i = 0; i < n; i++) out += FUZZ_CHARS[rng() % FUZZ_CHARS.length];
+  return out;
+}
+function randomJson(rng: () => number, depth: number): Json {
+  switch (rng() % (depth > 2 ? 4 : 6)) {
+    case 0:
+      return randomString(rng);
+    case 1:
+      return (rng() % 2000) - 1000; // JSON-safe integer
+    case 2:
+      return rng() % 2 === 0;
+    case 3:
+      return null;
+    case 4: {
+      const arr: Json[] = [];
+      for (let i = rng() % 4; i > 0; i--) arr.push(randomJson(rng, depth + 1));
+      return arr;
+    }
+    default: {
+      const obj: { [k: string]: Json } = {};
+      for (let i = rng() % 4; i > 0; i--) obj[`k${i}`] = randomJson(rng, depth + 1);
+      return obj;
+    }
+  }
+}
 const readResolve = (host: WasmGuestHost) => {
   const ok = (host.exports.resolve_ok as () => number)();
   const ptr = (host.exports.resolve_ptr as () => number)();
@@ -289,4 +336,58 @@ describe('WasmGuestHost — the seal is an import allowlist (automated)', () => 
       }
     });
   }
+});
+
+describe('WasmGuestHost — fuzz + resilience (trust boundary)', () => {
+  it('readBytes fuzz: OOB pointers always throw, in-bounds always return exactly len', async () => {
+    const host = new WasmGuestHost({ dispatch: {} });
+    await host.load(WASM);
+    const size = (host.exports.memory as WebAssembly.Memory).buffer.byteLength;
+    const rng = makePrng(0xc0ffee);
+    for (let i = 0; i < 400; i++) {
+      const ptr = (rng() % (size + 100_000)) - 1000;
+      const len = (rng() % (size + 100_000)) - 1000;
+      if (ptr >= 0 && len >= 0 && ptr + len <= size) {
+        expect(host.readBytes(ptr, len).length).toBe(len);
+      } else {
+        expect(() => host.readBytes(ptr, len)).toThrow();
+      }
+    }
+  });
+
+  it('emitEvent fuzz: arbitrary JSON payloads round-trip and never crash the guest', async () => {
+    const host = new WasmGuestHost({ dispatch: {} });
+    await host.load(EVENT_GUEST);
+    const lastPayload = () => {
+      const ptr = (host.exports.last_ptr as () => number)();
+      const len = (host.exports.last_len as () => number)();
+      return JSON.parse(new TextDecoder().decode(host.readBytes(ptr, len)));
+    };
+    const rng = makePrng(0xd00d);
+    for (let i = 1; i <= 150; i++) {
+      const payload = randomJson(rng, 0);
+      expect(() => host.emitEvent('ping', payload)).not.toThrow();
+      expect((host.exports.count as () => number)()).toBe(i);
+      expect(lastPayload()).toEqual(payload);
+    }
+  });
+
+  it('a heap-exhausted guest fails to load with a catchable error; the host survives', async () => {
+    const bad = new WasmGuestHost({ dispatch: {} });
+    let threw = false;
+    try {
+      await bad.load(HEAP_EXHAUST);
+    } catch {
+      threw = true; // guest trapped -> catchable JS error, not a process crash
+    }
+    expect(threw).toBe(true);
+
+    // The host process survived: a normal guest still loads and works.
+    const { table, store } = kvDispatch();
+    const ok = new WasmGuestHost({ dispatch: table });
+    await ok.load(RUST_GUEST);
+    await ok.drain();
+    expect((ok.exports.last_ok as () => number)()).toBe(1);
+    expect(store.get('a')).toBe('b');
+  });
 });
