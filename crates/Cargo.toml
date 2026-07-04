@@ -1,0 +1,11 @@
+# Rust guest SDK workspace for rill's native (non-JS) WASM guests.
+# See docs/native-guest.zh.md. Build with crates/build.sh (needs the
+# wasm32-unknown-unknown target).
+[workspace]
+resolver = "2"
+members = ["rill-guest", "kv-guest", "ui-guest", "seq-guest", "event-guest", "heap-exhaust-guest"]
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true

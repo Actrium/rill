@@ -1,0 +1,28 @@
+;; Adversarial guest: valid pointers, but the input bytes are NOT valid JSON.
+;; The host must fail closed (rill_resolve ok=0), never crash.
+(module
+  (import "env" "rill_host_call"
+    (func $host_call (param i32 i32 i32 i32 i32 i32 i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0)  "host:kv")   ;; module @0  len 7
+  (data (i32.const 16) "put")       ;; method @16 len 3
+  (data (i32.const 32) "notjson")   ;; input  @32 len 7 — invalid JSON
+
+  (global $bump (mut i32) (i32.const 1024))
+  (global $r_ok (mut i32) (i32.const -1))
+
+  (func (export "rill_alloc") (param $size i32) (result i32)
+    (local $p i32)
+    (local.set $p (global.get $bump))
+    (global.set $bump (i32.add (global.get $bump) (local.get $size)))
+    (local.get $p))
+  (func (export "rill_resolve") (param $cb i32) (param $ok i32) (param $ptr i32) (param $len i32)
+    (global.set $r_ok (local.get $ok)))
+  (func (export "rill_init")
+    (call $host_call
+      (i32.const 0) (i32.const 7)
+      (i32.const 16) (i32.const 3)
+      (i32.const 32) (i32.const 7)
+      (i32.const 1)))
+  (func (export "resolve_ok") (result i32) (global.get $r_ok))
+)

@@ -88,3 +88,6 @@ packages/*/benchmark-*.txt
 
 # Engine-in-browser e2e: WASM copied for /wasm/ serving (build artifact)
 tests/wasm-sandbox/wasm/
+
+# Rust guest SDK build output
+crates/target/

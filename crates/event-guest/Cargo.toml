@@ -1,0 +1,12 @@
+[package]
+name = "event-guest"
+version = "0.0.0"
+edition = "2021"
+description = "Demo native rill guest that receives host->guest events via rill_on_event."
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rill-guest = { path = "../rill-guest" }

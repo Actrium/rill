@@ -1,0 +1,9 @@
+[package]
+name = "rill-guest"
+version = "0.0.0"
+edition = "2021"
+description = "Ergonomic Rust SDK for writing rill native (non-JS) WASM guests — wraps the linear-memory host:* ABI so guests write store::put(k, v).await."
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["rlib"]
