@@ -223,6 +223,19 @@ pub mod store {
         }
     }
 
+    /// `host:kv.get(k)` -> the response body on success (`{"v":"…"}`).
+    pub async fn get(k: &str) -> Result<Vec<u8>, Vec<u8>> {
+        let mut body = String::from("{\"k\":");
+        push_json_string(&mut body, k);
+        body.push('}');
+        let (ok, bytes) = super::host_call("host:kv", "get", body.into_bytes()).await;
+        if ok == 1 {
+            Ok(bytes)
+        } else {
+            Err(bytes)
+        }
+    }
+
     fn push_json_string(out: &mut String, raw: &str) {
         out.push('"');
         for ch in raw.chars() {

@@ -14,6 +14,13 @@ name = "rill-guest"
 version = "0.0.0"
 
 [[package]]
+name = "seq-guest"
+version = "0.0.0"
+dependencies = [
+ "rill-guest",
+]
+
+[[package]]
 name = "ui-guest"
 version = "0.0.0"
 dependencies = [

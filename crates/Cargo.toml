@@ -3,7 +3,7 @@
 # wasm32-unknown-unknown target).
 [workspace]
 resolver = "2"
-members = ["rill-guest", "kv-guest", "ui-guest"]
+members = ["rill-guest", "kv-guest", "ui-guest", "seq-guest"]
 
 [profile.release]
 panic = "abort"

@@ -8,7 +8,7 @@ import { WasmGuestHost } from '../wasm-guest-host';
 
 // A tiny host module defined IN the test: rill knows nothing about specific
 // capabilities, so this proves the native-guest ABI generically.
-function kvDispatch() {
+function kvDispatch(options: { throwOnPut?: boolean } = {}) {
   const store = new Map<string, string>();
   const contract = defineRillContract({
     version: '1',
@@ -20,6 +20,12 @@ function kvDispatch() {
             parseOutput: (x) => ({ version: Number((x as { version?: unknown })?.version) || 0 }),
           },
         }),
+        get: rpc<{ k: string }, { v: string }>({
+          schema: {
+            parseInput: (x) => ({ k: String((x as { k?: unknown })?.k ?? '') }),
+            parseOutput: (x) => ({ v: String((x as { v?: unknown })?.v ?? '') }),
+          },
+        }),
       },
     },
     guestExports: {},
@@ -27,9 +33,11 @@ function kvDispatch() {
   const impl = implementHostModules(contract, {
     'host:kv': {
       put: async (i: { k: string; v: string }) => {
+        if (options.throwOnPut) throw new Error('put exploded');
         store.set(i.k, i.v);
         return { version: store.size };
       },
+      get: async (i: { k: string }) => ({ v: store.get(i.k) ?? '' }),
     },
   });
   return { table: createHostModuleDispatch(contract, impl), store };
@@ -40,6 +48,12 @@ const WASM = readFileSync(join(import.meta.dir, 'fixtures/roundtrip.wasm'));
 const RUST_GUEST = readFileSync(join(import.meta.dir, 'fixtures/kv-guest.wasm'));
 // Rust guest that renders UI via the SDK's declarative builder.
 const UI_GUEST = readFileSync(join(import.meta.dir, 'fixtures/ui-guest.wasm'));
+// Rust guest making two sequential awaits (put then get) with escaped chars.
+const SEQ_GUEST = readFileSync(join(import.meta.dir, 'fixtures/seq-guest.wasm'));
+// Adversarial guests (hand-written .wat): malformed JSON, OOB pointer, bad batch.
+const BAD_JSON = readFileSync(join(import.meta.dir, 'fixtures/bad-json.wasm'));
+const OOB = readFileSync(join(import.meta.dir, 'fixtures/oob.wasm'));
+const BAD_BATCH = readFileSync(join(import.meta.dir, 'fixtures/bad-batch.wasm'));
 const readResolve = (host: WasmGuestHost) => {
   const ok = (host.exports.resolve_ok as () => number)();
   const ptr = (host.exports.resolve_ptr as () => number)();
@@ -118,4 +132,97 @@ describe('WasmGuestHost — native guest renders UI via the receiver', () => {
     expect(tree?.children[1].type).toBe('View');
     expect(tree?.children[1].children[0].props.text).toBe('nested');
   });
+});
+
+describe('WasmGuestHost — adversarial / boundary (the trust boundary)', () => {
+  it('fails closed (ok=0) on malformed JSON input, does not crash', async () => {
+    const { table } = kvDispatch();
+    const host = new WasmGuestHost({ dispatch: table });
+    await host.load(BAD_JSON);
+    await host.drain();
+    expect((host.exports.resolve_ok as () => number)()).toBe(0);
+  });
+
+  it('fails closed (ok=0) on an out-of-bounds guest pointer, never reads OOB', async () => {
+    const { table } = kvDispatch();
+    const host = new WasmGuestHost({ dispatch: table });
+    await host.load(OOB);
+    await host.drain();
+    expect((host.exports.resolve_ok as () => number)()).toBe(0);
+  });
+
+  it('drops a malformed render batch without crashing the host', async () => {
+    let batchCount = 0;
+    const host = new WasmGuestHost({
+      dispatch: {},
+      onRenderBatch: () => {
+        batchCount++;
+      },
+    });
+    await host.load(BAD_BATCH); // must not throw
+    expect(batchCount).toBe(0); // the bad batch was dropped, not forwarded
+  });
+
+  it('fails closed (ok=0) when a host handler throws', async () => {
+    const { table } = kvDispatch({ throwOnPut: true });
+    const host = new WasmGuestHost({ dispatch: table });
+    await host.load(WASM);
+    await host.drain();
+    const { ok, result } = readResolve(host);
+    expect(ok).toBe(0);
+    expect(String(result.error)).toContain('exploded');
+  });
+
+  it('fails closed (ok=0) when the module exists but the method does not', async () => {
+    const host = new WasmGuestHost({ dispatch: { 'host:kv': {} } }); // put missing
+    await host.load(WASM);
+    await host.drain();
+    const { ok, result } = readResolve(host);
+    expect(ok).toBe(0);
+    expect(String(result.error)).toContain('not registered');
+  });
+});
+
+describe('WasmGuestHost — SDK executor: sequential awaits + escaping', () => {
+  it('drives two sequential host awaits (put then get) and round-trips escaped chars', async () => {
+    const { table, store } = kvDispatch();
+    const host = new WasmGuestHost({ dispatch: table });
+    await host.load(SEQ_GUEST);
+    await host.drain();
+
+    // Both awaits completed, in order (STEP advances 0 -> 1 -> 2).
+    expect((host.exports.step as () => number)()).toBe(2);
+    // put escaped the value guest->host correctly: b " \ c
+    expect(store.get('a')).toBe('b"\\c');
+    // get round-tripped it host->guest.
+    const ptr = (host.exports.got_ptr as () => number)();
+    const len = (host.exports.got_len as () => number)();
+    expect(JSON.parse(new TextDecoder().decode(host.readBytes(ptr, len)))).toEqual({ v: 'b"\\c' });
+  });
+
+  it('takes the guest Err branch (ok=0) when the capability is unavailable', async () => {
+    const host = new WasmGuestHost({ dispatch: {} }); // host:kv not registered
+    await host.load(RUST_GUEST);
+    await host.drain();
+    expect((host.exports.last_ok as () => number)()).toBe(0); // Rust matched Err(_)
+  });
+});
+
+describe('WasmGuestHost — the seal is an import allowlist (automated)', () => {
+  const ALLOWED = new Set(['rill_host_call', 'rill_send_batch', 'rill_log']);
+  const guests: Array<[string, Uint8Array]> = [
+    ['roundtrip', WASM],
+    ['kv-guest', RUST_GUEST],
+    ['ui-guest', UI_GUEST],
+    ['seq-guest', SEQ_GUEST],
+  ];
+  for (const [name, bytes] of guests) {
+    it(`${name}.wasm imports only host-provided functions (no fetch/socket/…)`, () => {
+      const imports = WebAssembly.Module.imports(new WebAssembly.Module(bytes));
+      for (const imp of imports) {
+        expect(imp.module).toBe('env');
+        expect(ALLOWED.has(imp.name)).toBe(true);
+      }
+    });
+  }
 });

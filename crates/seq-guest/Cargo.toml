@@ -1,0 +1,12 @@
+[package]
+name = "seq-guest"
+version = "0.0.0"
+edition = "2021"
+description = "Demo native rill guest exercising two sequential host awaits (put then get) and JSON escaping."
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rill-guest = { path = "../rill-guest" }

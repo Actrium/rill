@@ -90,20 +90,44 @@ export class WasmGuestHost {
     return this.instance.exports;
   }
 
-  /** Copy `len` bytes at `ptr` out of the guest's linear memory. */
+  /** Copy `len` bytes at `ptr` out of the guest's linear memory (bounds-checked). */
   readBytes(ptr: number, len: number): Uint8Array {
+    this.assertInBounds(ptr, len);
     return new Uint8Array(this.memory.buffer.slice(ptr, ptr + len));
   }
 
   private readString(ptr: number, len: number): string {
+    this.assertInBounds(ptr, len);
     return new TextDecoder().decode(new Uint8Array(this.memory.buffer, ptr, len));
+  }
+
+  /**
+   * Reject guest-supplied (ptr, len) that fall outside linear memory. The guest
+   * is untrusted, so a bad pointer must fail here (caught by the call site and
+   * turned into a fail-closed result), not read OOB or crash the host.
+   */
+  private assertInBounds(ptr: number, len: number): void {
+    if (
+      !Number.isInteger(ptr) ||
+      !Number.isInteger(len) ||
+      ptr < 0 ||
+      len < 0 ||
+      ptr + len > this.memory.buffer.byteLength
+    ) {
+      throw new Error(`guest pointer out of bounds: ptr=${ptr} len=${len}`);
+    }
   }
 
   // --- render channel: guest rill_send_batch -> host onRenderBatch (-> receiver) ---
   private onSendBatch(ptr: number, len: number): void {
     if (!this.onRenderBatch) return;
-    const batch = JSON.parse(this.readString(ptr, len)) as OperationBatch;
-    this.onRenderBatch(batch);
+    try {
+      const batch = JSON.parse(this.readString(ptr, len)) as OperationBatch;
+      this.onRenderBatch(batch);
+    } catch {
+      // A hostile/malformed batch (bad pointer, non-JSON, wrong shape) must not
+      // crash the host — drop it.
+    }
   }
 
   // --- ABI bridge: guest rill_host_call -> host dispatch -> guest rill_resolve ---
@@ -116,14 +140,21 @@ export class WasmGuestHost {
     il: number,
     cb: number
   ): void {
-    const moduleId = this.readString(mp, ml);
-    const method = this.readString(xp, xl);
-    // Copy the input synchronously — the async dispatch must not read a buffer
-    // that a later rill_alloc could have detached by growing memory.
-    const inputBytes = this.readBytes(ip, il);
+    // Everything guest-controlled (pointers, bytes, JSON) is read inside the try
+    // so a hostile or malformed call fails closed (resolve ok=0) instead of
+    // crashing the host.
     const task = (async () => {
       try {
-        const input = il > 0 ? JSON.parse(new TextDecoder().decode(inputBytes)) : undefined;
+        // Yield once before touching the guest. rill_resolve re-enters the guest
+        // executor, so resolving synchronously here (e.g. on the error path,
+        // which throws before any await) would re-poll a guest future that is
+        // still mid-poll. The yield defers all reads + resolve to a microtask
+        // after the guest has parked; the guest is suspended until then, so the
+        // buffer is stable.
+        await Promise.resolve();
+        const moduleId = this.readString(mp, ml);
+        const method = this.readString(xp, xl);
+        const input = il > 0 ? JSON.parse(this.readString(ip, il)) : undefined;
         const handler = this.dispatch[moduleId]?.[method];
         if (typeof handler !== 'function') {
           throw new Error(`host module not registered: ${moduleId}.${method}`);
