@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "event-guest"
+version = "0.0.0"
+dependencies = [
+ "rill-guest",
+]
+
+[[package]]
 name = "kv-guest"
 version = "0.0.0"
 dependencies = [

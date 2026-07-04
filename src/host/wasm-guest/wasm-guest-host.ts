@@ -90,6 +90,32 @@ export class WasmGuestHost {
     return this.instance.exports;
   }
 
+  /**
+   * Deliver an event (name + JSON payload) to the guest's `rill_on_event`
+   * export. No-op if the guest doesn't export it. One-way, like the render
+   * channel — this is how input / lifecycle events reach a native guest.
+   */
+  // Reason: an event payload is any JSON-serializable value, only stringified here.
+  emitEvent(name: string, payload?: unknown): void {
+    const onEvent = this.instance.exports.rill_on_event as
+      | ((np: number, nl: number, pp: number, pl: number) => void)
+      | undefined;
+    if (typeof onEvent !== 'function') return;
+    const nameBytes = new TextEncoder().encode(name);
+    const payloadBytes = new TextEncoder().encode(JSON.stringify(payload ?? null));
+    const np = this.allocWrite(nameBytes);
+    const pp = this.allocWrite(payloadBytes);
+    onEvent(np, nameBytes.length, pp, payloadBytes.length);
+  }
+
+  /** Allocate guest memory via rill_alloc and copy `bytes` in; returns the ptr. */
+  private allocWrite(bytes: Uint8Array): number {
+    const ptr = (this.instance.exports.rill_alloc as (n: number) => number)(bytes.length) >>> 0;
+    // Re-read the buffer after alloc in case the guest grew its memory.
+    new Uint8Array(this.memory.buffer, ptr, bytes.length).set(bytes);
+    return ptr;
+  }
+
   /** Copy `len` bytes at `ptr` out of the guest's linear memory (bounds-checked). */
   readBytes(ptr: number, len: number): Uint8Array {
     this.assertInBounds(ptr, len);
@@ -173,9 +199,7 @@ export class WasmGuestHost {
   // Reason: a host module result is any JSON-serializable value, only stringified here.
   private resolve(cb: number, ok: number, result: unknown): void {
     const bytes = new TextEncoder().encode(JSON.stringify(result));
-    const ptr = (this.instance.exports.rill_alloc as (n: number) => number)(bytes.length) >>> 0;
-    // Re-read the buffer after alloc in case the guest grew its memory.
-    new Uint8Array(this.memory.buffer, ptr, bytes.length).set(bytes);
+    const ptr = this.allocWrite(bytes);
     (
       this.instance.exports.rill_resolve as (
         cb: number,

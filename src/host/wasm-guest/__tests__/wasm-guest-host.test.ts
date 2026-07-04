@@ -54,6 +54,8 @@ const SEQ_GUEST = readFileSync(join(import.meta.dir, 'fixtures/seq-guest.wasm'))
 const BAD_JSON = readFileSync(join(import.meta.dir, 'fixtures/bad-json.wasm'));
 const OOB = readFileSync(join(import.meta.dir, 'fixtures/oob.wasm'));
 const BAD_BATCH = readFileSync(join(import.meta.dir, 'fixtures/bad-batch.wasm'));
+// Rust guest that receives host->guest events via rill_on_event.
+const EVENT_GUEST = readFileSync(join(import.meta.dir, 'fixtures/event-guest.wasm'));
 const readResolve = (host: WasmGuestHost) => {
   const ok = (host.exports.resolve_ok as () => number)();
   const ptr = (host.exports.resolve_ptr as () => number)();
@@ -208,13 +210,48 @@ describe('WasmGuestHost — SDK executor: sequential awaits + escaping', () => {
   });
 });
 
+describe('WasmGuestHost — host->guest events (rill_on_event)', () => {
+  it('delivers an event to a native guest handler with its payload', async () => {
+    const host = new WasmGuestHost({ dispatch: {} });
+    await host.load(EVENT_GUEST);
+    const count = () => (host.exports.count as () => number)();
+    const lastPayload = () => {
+      const ptr = (host.exports.last_ptr as () => number)();
+      const len = (host.exports.last_len as () => number)();
+      return len > 0 ? JSON.parse(new TextDecoder().decode(host.readBytes(ptr, len))) : null;
+    };
+
+    expect(count()).toBe(0);
+    host.emitEvent('ping', { n: 42 });
+    expect(count()).toBe(1);
+    expect(lastPayload()).toEqual({ n: 42 });
+
+    // Name filter: an unrelated event does not fire the "ping" handler.
+    host.emitEvent('other', { x: 1 });
+    expect(count()).toBe(1);
+
+    // Repeat delivery works.
+    host.emitEvent('ping', { n: 7 });
+    expect(count()).toBe(2);
+    expect(lastPayload()).toEqual({ n: 7 });
+  });
+
+  it('emitEvent is a no-op for a guest that does not export rill_on_event', async () => {
+    // A .wat guest with no rill_on_event export — must not throw.
+    const host = new WasmGuestHost({ dispatch: {} });
+    await host.load(BAD_BATCH);
+    expect(() => host.emitEvent('ping', { n: 1 })).not.toThrow();
+  });
+});
+
 describe('WasmGuestHost — the seal is an import allowlist (automated)', () => {
-  const ALLOWED = new Set(['rill_host_call', 'rill_send_batch', 'rill_log']);
+  const ALLOWED = new Set(['rill_host_call', 'rill_send_batch', 'rill_log', 'rill_on_event']);
   const guests: Array<[string, Uint8Array]> = [
     ['roundtrip', WASM],
     ['kv-guest', RUST_GUEST],
     ['ui-guest', UI_GUEST],
     ['seq-guest', SEQ_GUEST],
+    ['event-guest', EVENT_GUEST],
   ];
   for (const [name, bytes] of guests) {
     it(`${name}.wasm imports only host-provided functions (no fetch/socket/…)`, () => {

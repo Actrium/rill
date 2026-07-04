@@ -349,6 +349,58 @@ fn json_escape(out: &mut alloc::string::String, raw: &str) {
     out.push('"');
 }
 
+/// Host -> guest events (input, lifecycle). Register handlers with `events::on`;
+/// the host delivers them via the generated `rill_on_event` export. Handlers are
+/// synchronous — they should update guest state, not `.await` host calls (a
+/// dropped future would fire the call but never receive its result).
+pub mod events {
+    use alloc::boxed::Box;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    type Handler = Box<dyn Fn(&[u8])>;
+    static mut HANDLERS: Vec<(u32, String, Handler)> = Vec::new();
+    static mut NEXT_ID: u32 = 1;
+
+    /// Register `handler` for events named `name`; returns a subscription id.
+    /// The handler receives the raw payload bytes (UTF-8 JSON) to parse as needed.
+    pub fn on(name: &str, handler: impl Fn(&[u8]) + 'static) -> u32 {
+        unsafe {
+            let id = NEXT_ID;
+            NEXT_ID += 1;
+            HANDLERS.push((id, String::from(name), Box::new(handler)));
+            id
+        }
+    }
+
+    /// Remove a previously registered handler by its subscription id.
+    pub fn off(id: u32) {
+        unsafe { HANDLERS.retain(|h| h.0 != id) };
+    }
+
+    /// Deliver an event to matching handlers. Called by the generated
+    /// `rill_on_event` export.
+    ///
+    /// # Safety
+    /// The pointer/length pairs must describe valid guest memory — upheld by the
+    /// host, which wrote them via `rill_alloc` before calling `rill_on_event`.
+    pub unsafe fn dispatch(
+        name_ptr: *const u8,
+        name_len: usize,
+        payload_ptr: *const u8,
+        payload_len: usize,
+    ) {
+        let name =
+            core::str::from_utf8(core::slice::from_raw_parts(name_ptr, name_len)).unwrap_or("");
+        let payload = core::slice::from_raw_parts(payload_ptr, payload_len);
+        for (_, registered, handler) in HANDLERS.iter() {
+            if registered == name {
+                handler(payload);
+            }
+        }
+    }
+}
+
 /// Generate the ABI exports (`rill_init` / `rill_alloc` / `rill_resolve`), the
 /// global allocator, and a panic handler in the guest cdylib. `$main` is an
 /// `async fn () -> ()`.
@@ -379,6 +431,19 @@ macro_rules! rill_guest_main {
         pub extern "C" fn rill_resolve(cb: u32, ok: u32, ptr: *const u8, len: usize) {
             // Safety: the host wrote `len` bytes at `ptr` via rill_alloc before calling.
             unsafe { $crate::rt::resolve(cb, ok, ptr, len) };
+        }
+
+        // FFI export: the host delivers an event (name + payload) into the guest.
+        #[allow(clippy::not_unsafe_ptr_arg_deref)]
+        #[no_mangle]
+        pub extern "C" fn rill_on_event(
+            name_ptr: *const u8,
+            name_len: usize,
+            payload_ptr: *const u8,
+            payload_len: usize,
+        ) {
+            // Safety: the host wrote both ranges via rill_alloc before calling.
+            unsafe { $crate::events::dispatch(name_ptr, name_len, payload_ptr, payload_len) };
         }
     };
 }
