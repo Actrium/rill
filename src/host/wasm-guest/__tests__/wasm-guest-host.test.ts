@@ -56,6 +56,8 @@ const OOB = readFileSync(join(import.meta.dir, 'fixtures/oob.wasm'));
 const BAD_BATCH = readFileSync(join(import.meta.dir, 'fixtures/bad-batch.wasm'));
 // Rust guest that receives host->guest events via rill_on_event.
 const EVENT_GUEST = readFileSync(join(import.meta.dir, 'fixtures/event-guest.wasm'));
+// Guest authored in C via the C SDK (sdk/c) — proves the ABI is language-neutral.
+const C_GUEST = readFileSync(join(import.meta.dir, 'fixtures/c-guest.wasm'));
 const readResolve = (host: WasmGuestHost) => {
   const ok = (host.exports.resolve_ok as () => number)();
   const ptr = (host.exports.resolve_ptr as () => number)();
@@ -210,6 +212,30 @@ describe('WasmGuestHost — SDK executor: sequential awaits + escaping', () => {
   });
 });
 
+describe('WasmGuestHost — C guest via the C SDK (language-neutral ABI)', () => {
+  it('loads a C-authored guest and materializes its render batch', async () => {
+    const registry = new ComponentRegistry();
+    // biome-ignore lint/suspicious/noExplicitAny: opaque materializer, irrelevant here.
+    registry.register('View', 'View' as any);
+    // biome-ignore lint/suspicious/noExplicitAny: opaque materializer, irrelevant here.
+    registry.register('Text', 'Text' as any);
+    const receiver = new Receiver(
+      registry,
+      () => {},
+      () => {}
+    );
+    const host = new WasmGuestHost({
+      dispatch: {},
+      onRenderBatch: (b) => receiver.applyBatch(b),
+    });
+    await host.load(C_GUEST);
+
+    const tree = receiver.getComponentTree();
+    expect(tree?.type).toBe('View');
+    expect(tree?.children[0].props.text).toBe('hello from c');
+  });
+});
+
 describe('WasmGuestHost — host->guest events (rill_on_event)', () => {
   it('delivers an event to a native guest handler with its payload', async () => {
     const host = new WasmGuestHost({ dispatch: {} });
@@ -252,6 +278,7 @@ describe('WasmGuestHost — the seal is an import allowlist (automated)', () => 
     ['ui-guest', UI_GUEST],
     ['seq-guest', SEQ_GUEST],
     ['event-guest', EVENT_GUEST],
+    ['c-guest', C_GUEST],
   ];
   for (const [name, bytes] of guests) {
     it(`${name}.wasm imports only host-provided functions (no fetch/socket/…)`, () => {
