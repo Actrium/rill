@@ -169,7 +169,7 @@
 
 ---
 
-## 6. 测试策略（一等公民）
+## 6. 测试策略与规格（一等公民）
 
 **现状（回源核实，务必先认清）**：rill **并非缺乏测试**——`src/` 下有 **96 个 `.test.ts`**；engine 核心有 `src/host/__tests__/{unit,integration,e2e}`（约 30 个 `engine.*.test.ts`）；receiver 有 `receiver.test.ts` + `receiver.delete-performance.test.ts` + `performance.*.test.ts`；`binary-encoder.test.ts` 含 binary-vs-JSON 对比；`provider-contract.test.ts` 跨 5 个 provider 参数化；git 有专门加固批次（`close high-severity sandbox coverage gaps` 等）。CI 有 `ci.yml`（preflight/bundle/native/e2e:wasm）+ `benchmarks.yml`。**「核心模块缺测试」是失实前提**。
 
@@ -178,17 +178,49 @@
 2. `provider-contract` 缺**安全负向**用例（`__proto__`/原型污染、seal 后访问 `__rill`、host fn 参数逃逸）。**须在文档标注：JS 层断言 ≠ 透明边界，承重墙仍是 CSP + deny-list**（承重原则 2），防止制造「已强制」假象。
 3. 压测规模偏小（perf 约 100 ops）：缺 1000+ ops / 内存泄漏 / 长跑 timer。
 
-**纪律：每个 Phase 1/2 增强落地必带测试**。各条目的具体测试设计见 §1–§2 的「测试」行。汇总新增用例（含 receiver-web 复核建议）：
-- **坏批次隔离**：坏批次注入 → 管线存活 + diagnostics；**失败后树一致性**（orphan/`parentByChildId` 同步）单独一组。
-- **暂停队列上限**：超限截断 + `dropped` 计数 + `resume` warn。
-- **JSON 边界**：循环引用/`NaN`/`Infinity`/超深对象 → 告警/上限；**`host:store` 活桥端到端回归**（承重原则 8）。
-- **prop diff**：仅变更 prop 上桥 + 与全量序列化逐字段等价（golden 对拍）。
-- **校验组合子**：与手写校验逐用例对拍 + 各 host 模块原有测试不变通过。
-- **destroy 对账**：正常残留为零 + 故意泄漏被捕获。
-- **createReceiver 重复**（receiver-web）：多次 loadBundle 不泄漏旧 receiver。
-- **render 错误边界**（receiver-web）：坏节点隔离、其余树正常。
-- **onLoad 异常 / renderError 异常**（receiver-web）：integrator 回调抛出不使引擎/视图崩溃（防御式包裹）。
-- **集成**：receiver + keyboard + worker 端到端交互（补并发/边界）。
+### 6.1 每条增强的测试规格
+
+> 格式：**落点**（现有/新 `*.test.ts`）· **用例**（happy / edge / 对抗-negative）· **断言** · **门禁/回归**。框架用 `bun test`；跨 provider 的走 `provider-contract` 参数化。
+
+**1.1 坏批次隔离** — 落点 `src/host/__tests__/unit/receiver.batch-isolation.test.ts`（新）+ 复用 `receiver.test.ts` fixtures。
+- happy：正常批次全应用。edge：批次内单 op 失败、后续 op 仍应用；空批次；`maxBatchSize` 边界批次。
+- 对抗：让 `applyBatch` 在 per-op try/catch **之外**抛（批次装配/背压路径）；未知 op 类型；op 引用不存在的 nodeId；op 顺序颠倒（DELETE 先于 CREATE）。
+- 断言：管线存活、diagnostics 含批次标识、后续批次正常；**`getDebugInfo()` 无残留 orphan**（`parentByChildId`/`nodeChildrenSet` 一致）。门禁：现有 receiver 全套通过。
+
+**1.2 暂停队列上限** — 落点 `src/host/__tests__/unit/engine.paused-queue.test.ts`（新）。
+- happy：pause→feed<上限→resume→全投递。edge：feed 恰好=上限；上限边界。
+- 对抗：feed ≫ 上限(10×)→ drop-oldest、`dropped` 计数精确、resume warn；pause 中大量 feed 后 `destroy`（不泄漏）。
+- 断言：队列封顶、`dropped` 精确、resume warn、**N 次 feed 后堆内存有界**（无 OOM）。门禁：pause/resume 现有测试通过。
+
+**1.3 JSON 边界** — 落点 `type-rules.*.test.ts` + `serialization.test.ts`（扩）**+ application.ist 侧 `host:store` 活桥 e2e**。
+- happy：普通对象往返。edge：`NaN`/`Infinity`/`-0`/超大数；深度=上限的嵌套；size=上限的数组。
+- 对抗：自环 / 互环 / 深层环 → warn+可预测降级；超深→硬上限；超大→硬上限。
+- 断言：warn 触发、降级值确定、**无静默丢失**；**`host:store` 活桥端到端回归通过**（承重原则 8，序列化改动的闸门）。门禁：`shared/serialization` 现有测试 + 活桥 e2e。
+
+**1.4 timeoutMs** — 落地→慢 RPC 在 `timeoutMs` 超时且资源清理、不与 watchdog 硬 kill 冲突；删除→类型断言字段已移除 + watchdog 硬超时测试仍在。
+
+**1.5 CLI 诊断** — 落点 `src/cli/__tests__/build.diagnostics.test.ts`（新）：构造构建/转换错误 → 断言输出含结构化 `{file,line,phase,rule}`。
+
+**2.1 prop diff** — 落点 host-config/reconciler 测试（扩）。
+- happy：改一个 prop→仅该 prop 上桥。edge：多改+删同时；嵌套 prop；prop→`undefined`；prop 顺序变；无变更 update（应零上桥）。对抗：某 prop 序列化失败→优雅回退不掀翻。
+- 断言：**仅变更 prop 上桥**，且合并后最终 props **与全量序列化逐字段等价**（在 update 形状矩阵上 golden 对拍）。门禁：现有 reconciler/host-config 全套不变通过。
+
+**2.4 校验组合子** — 对每个 host 模块把 valid+invalid 输入矩阵**同时**过旧手写与新组合子 → **结果与失败消息逐一致**；重构后各 host 模块原测试不变通过。
+
+**2.5 / 2.6 / 2.7** — destroy 残留为零 + 故意泄漏被捕获；多次 `loadBundle` 不泄漏旧 receiver；坏节点隔离、其余树正常渲染；integrator `onLoad`/`renderError` 抛出不使引擎/视图崩溃。
+
+### 6.2 横切维度（比逐条更重要的两块）
+
+- **对抗 / fuzz —— sealed-guest 运行时的核心**：guest 不受信，边界**绝不能因畸形/敌意输入崩溃或泄漏**。对**批次操作流**与**序列化输入**做 property-based/fuzz：随机 op 序列（非法父子、悬挂 ref、超界 index）、畸形 props（`__proto__`、超深、含函数/Symbol、超大字符串）。**不变量**：不向边界外 throw、不产生 orphan、无界不增长、guest 可见行为符合刻意契约（如 `guest-sees-null`）。落点 `src/host/__tests__/fuzz/`（固定种子、可复现）。
+- **交互测试**：Phase 1 几项**叠加**——暂停态里来一个坏批次；坏批次里含循环引用 prop；`destroy` 时仍有 in-flight 批次。
+- **安全负向**（→ Phase 3.6）：`provider-contract` 补 `__proto__`/原型污染、seal 后访问 `__rill`、host fn 参数逃逸；**每条须注「JS 断言 ≠ 硬边界」**（承重原则 2）。
+- **性能回归门禁**（→ Phase 3.6）：committed `__benchmarks__` + **相对回归%**（非绝对阈值）+ 方差感知，shared runner 无 flaky。
+
+### 6.3 纪律 · 覆盖 · CI
+
+- **每个 Phase 1/2 PR 落地必带其测试**（单元 + 回归；序列化改动须过 `host:store` 活桥 e2e）；跨 provider 的走 `provider-contract` 参数化，**5 provider 全绿**。
+- **覆盖不盲追 %**：门禁锁在**改动行 + 边界/错误路径**（风险所在），新代码要求**分支覆盖**；对已有高覆盖模块不设硬 % 以免噪声。
+- **CI**：Phase 1/2 用例进 `ci.yml` 的 unit/integration；fuzz 固定种子单独 job（可复现）；benchmark 门禁自 Phase 3.6 起进 `benchmarks.yml`。
 
 ---
 
