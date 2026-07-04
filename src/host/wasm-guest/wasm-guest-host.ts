@@ -139,6 +139,7 @@ export class WasmGuestHost {
   }
 
   /** Write a JSON result into guest memory (via rill_alloc) and hand it back. */
+  // Reason: a host module result is any JSON-serializable value, only stringified here.
   private resolve(cb: number, ok: number, result: unknown): void {
     const bytes = new TextEncoder().encode(JSON.stringify(result));
     const ptr = (this.instance.exports.rill_alloc as (n: number) => number)(bytes.length) >>> 0;
