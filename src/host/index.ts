@@ -14,3 +14,9 @@ export { Engine } from './engine';
 // EngineView hook for custom EngineView implementations
 export type { LoadingState, UseEngineViewOptions, UseEngineViewResult } from './use-engine-view';
 export { useEngineView } from './use-engine-view';
+export type { WasmGuestHostOptions } from './wasm-guest/wasm-guest-host';
+// Native (non-JS) WASM guest: the low-level host + an EngineViewEngine adapter so
+// the platform mounts a native guest through the same useEngineView pipeline.
+export { WasmGuestHost } from './wasm-guest/wasm-guest-host';
+export type { WasmGuestViewOptions } from './wasm-guest/wasm-guest-view';
+export { createWasmGuestEngine, WasmGuestView } from './wasm-guest/wasm-guest-view';
