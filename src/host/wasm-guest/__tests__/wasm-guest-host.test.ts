@@ -34,6 +34,8 @@ function kvDispatch() {
 }
 
 const WASM = readFileSync(join(import.meta.dir, 'fixtures/roundtrip.wasm'));
+// Real Rust guest built via the rill-guest SDK (crates/build.sh).
+const RUST_GUEST = readFileSync(join(import.meta.dir, 'fixtures/kv-guest.wasm'));
 const readResolve = (host: WasmGuestHost) => {
   const ok = (host.exports.resolve_ok as () => number)();
   const ptr = (host.exports.resolve_ptr as () => number)();
@@ -63,5 +65,21 @@ describe('WasmGuestHost — native (non-JS) guest host:* ABI', () => {
     const { ok, result } = readResolve(host);
     expect(ok).toBe(0);
     expect(String(result.error)).toContain('not registered');
+  });
+});
+
+describe('WasmGuestHost — real Rust guest via the rill-guest SDK', () => {
+  it('drives an async Rust guest (store::put("a","b").await) end to end', async () => {
+    const { table, store } = kvDispatch();
+    const host = new WasmGuestHost({ dispatch: table });
+    await host.load(RUST_GUEST);
+    await host.drain();
+
+    // The guest's async continuation ran after rill_resolve and stashed the outcome.
+    expect((host.exports.last_ok as () => number)()).toBe(1);
+    const ptr = (host.exports.result_ptr as () => number)();
+    const len = (host.exports.result_len as () => number)();
+    expect(JSON.parse(new TextDecoder().decode(host.readBytes(ptr, len)))).toEqual({ version: 1 });
+    expect(store.get('a')).toBe('b');
   });
 });

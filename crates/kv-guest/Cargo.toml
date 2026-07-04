@@ -1,0 +1,12 @@
+[package]
+name = "kv-guest"
+version = "0.0.0"
+edition = "2021"
+description = "Demo native rill guest: calls host:kv.put through the rill-guest SDK."
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rill-guest = { path = "../rill-guest" }
