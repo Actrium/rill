@@ -12,3 +12,10 @@ dependencies = [
 [[package]]
 name = "rill-guest"
 version = "0.0.0"
+
+[[package]]
+name = "ui-guest"
+version = "0.0.0"
+dependencies = [
+ "rill-guest",
+]

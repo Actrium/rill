@@ -9,7 +9,11 @@ cd "$(dirname "$0")"
 TARGET=wasm32-unknown-unknown
 FIXTURES=../src/host/wasm-guest/__tests__/fixtures
 
-RUSTFLAGS=" " cargo build -p kv-guest --target "$TARGET" --release
+RUSTFLAGS=" " cargo build -p kv-guest -p ui-guest --target "$TARGET" --release
 
-cp "target/$TARGET/release/kv_guest.wasm" "$FIXTURES/kv-guest.wasm"
-echo "staged: $FIXTURES/kv-guest.wasm ($(wc -c < "$FIXTURES/kv-guest.wasm") bytes)"
+stage() { # <crate-lib-name> <fixture-name>
+  cp "target/$TARGET/release/$1.wasm" "$FIXTURES/$2"
+  echo "staged: $FIXTURES/$2 ($(wc -c < "$FIXTURES/$2") bytes)"
+}
+stage kv_guest kv-guest.wasm
+stage ui_guest ui-guest.wasm

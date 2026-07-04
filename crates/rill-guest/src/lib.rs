@@ -29,7 +29,7 @@ use core::pin::Pin;
 use core::ptr::addr_of_mut;
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
-// ---- ABI: the one import the host provides ----
+// ---- ABI: the imports the host provides ----
 extern "C" {
     fn rill_host_call(
         mod_ptr: *const u8,
@@ -40,6 +40,8 @@ extern "C" {
         in_len: usize,
         cb_id: u32,
     );
+    // One-way render channel: hand the host an operation batch (UTF-8 JSON).
+    fn rill_send_batch(batch_ptr: *const u8, batch_len: usize);
 }
 
 // ---- Bump allocator (leaks; fine for short-lived guests) ----
@@ -232,6 +234,106 @@ pub mod store {
         }
         out.push('"');
     }
+}
+
+/// Declarative UI: build a small element tree and `render` it. The guest sends a
+/// render batch (CREATE / TEXT / APPEND ops) the host `receiver` materializes —
+/// the same rendering path JS guests use, only the batch is authored in Rust.
+pub mod ui {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    /// A sealed UI node. `View` is a container; `Text` carries a string.
+    pub enum Node {
+        View(Vec<Node>),
+        Text(String),
+    }
+
+    /// A container node.
+    pub fn view(children: Vec<Node>) -> Node {
+        Node::View(children)
+    }
+
+    /// A text node.
+    pub fn text(content: &str) -> Node {
+        Node::Text(String::from(content))
+    }
+}
+
+/// Materialize `root` on the host: walk the tree into an operation batch
+/// (`{version,batchId,operations:[…]}`, UTF-8 JSON) and hand it to the host's
+/// render channel. One-way; no host round-trip.
+pub fn render(root: ui::Node) {
+    use alloc::format;
+    use alloc::string::String;
+
+    let mut ops = String::new();
+    let mut next_id: u32 = 0;
+    let root_id = emit_node(&mut ops, &root, &mut next_id);
+    // Attach the root to the receiver root (parentId 0).
+    push_op(
+        &mut ops,
+        format!("{{\"op\":\"APPEND\",\"id\":0,\"parentId\":0,\"childId\":{root_id}}}"),
+    );
+
+    let batch = format!("{{\"version\":1,\"batchId\":1,\"operations\":[{ops}]}}");
+    let bytes = batch.into_bytes();
+    unsafe { rill_send_batch(bytes.as_ptr(), bytes.len()) };
+}
+
+fn emit_node(ops: &mut alloc::string::String, node: &ui::Node, next_id: &mut u32) -> u32 {
+    use alloc::format;
+    *next_id += 1;
+    let id = *next_id;
+    match node {
+        ui::Node::View(children) => {
+            push_op(
+                ops,
+                format!("{{\"op\":\"CREATE\",\"id\":{id},\"type\":\"View\",\"props\":{{}}}}"),
+            );
+            for child in children {
+                let child_id = emit_node(ops, child, next_id);
+                push_op(
+                    ops,
+                    format!(
+                        "{{\"op\":\"APPEND\",\"id\":0,\"parentId\":{id},\"childId\":{child_id}}}"
+                    ),
+                );
+            }
+        }
+        ui::Node::Text(content) => {
+            push_op(
+                ops,
+                format!("{{\"op\":\"CREATE\",\"id\":{id},\"type\":\"Text\",\"props\":{{}}}}"),
+            );
+            let mut escaped = alloc::string::String::new();
+            json_escape(&mut escaped, content);
+            push_op(
+                ops,
+                format!("{{\"op\":\"TEXT\",\"id\":{id},\"text\":{escaped}}}"),
+            );
+        }
+    }
+    id
+}
+
+fn push_op(ops: &mut alloc::string::String, op: alloc::string::String) {
+    if !ops.is_empty() {
+        ops.push(',');
+    }
+    ops.push_str(&op);
+}
+
+fn json_escape(out: &mut alloc::string::String, raw: &str) {
+    out.push('"');
+    for ch in raw.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
 }
 
 /// Generate the ABI exports (`rill_init` / `rill_alloc` / `rill_resolve`), the

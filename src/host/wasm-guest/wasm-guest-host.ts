@@ -26,12 +26,20 @@
  *         addressed by (ptr,len); the host reads guest memory zero-copy.
  */
 import type { HostModuleDispatchTable } from '../../contract';
+import type { OperationBatch } from '../../shared/types';
 
 export interface WasmGuestHostOptions {
   /** Capability dispatch table from `createHostModuleDispatch(contract, impl)`. */
   dispatch: HostModuleDispatchTable;
   /** Sink for guest `rill_log` calls. */
   onLog?: (message: string) => void;
+  /**
+   * Sink for guest render batches (`rill_send_batch`). The batch wire is UTF-8
+   * JSON in guest memory; the host decodes it to an `OperationBatch` and hands
+   * it off — typically to `receiver.applyBatch`. Keeping this a callback leaves
+   * `WasmGuestHost` decoupled from the receiver.
+   */
+  onRenderBatch?: (batch: OperationBatch) => void;
 }
 
 export class WasmGuestHost {
@@ -39,11 +47,13 @@ export class WasmGuestHost {
   private memory!: WebAssembly.Memory;
   private readonly dispatch: HostModuleDispatchTable;
   private readonly onLog?: (message: string) => void;
+  private readonly onRenderBatch?: (batch: OperationBatch) => void;
   private readonly inflight = new Set<Promise<void>>();
 
   constructor(options: WasmGuestHostOptions) {
     this.dispatch = options.dispatch;
     this.onLog = options.onLog;
+    this.onRenderBatch = options.onRenderBatch;
   }
 
   /** Instantiate the guest `.wasm`, wire host imports, and run its entry. */
@@ -60,6 +70,7 @@ export class WasmGuestHost {
           cb: number
         ) => this.onHostCall(mp >>> 0, ml >>> 0, xp >>> 0, xl >>> 0, ip >>> 0, il >>> 0, cb >>> 0),
         rill_log: (ptr: number, len: number) => this.onLog?.(this.readString(ptr >>> 0, len >>> 0)),
+        rill_send_batch: (ptr: number, len: number) => this.onSendBatch(ptr >>> 0, len >>> 0),
       },
     };
     const { instance } = await WebAssembly.instantiate(wasmBytes, importObject);
@@ -86,6 +97,13 @@ export class WasmGuestHost {
 
   private readString(ptr: number, len: number): string {
     return new TextDecoder().decode(new Uint8Array(this.memory.buffer, ptr, len));
+  }
+
+  // --- render channel: guest rill_send_batch -> host onRenderBatch (-> receiver) ---
+  private onSendBatch(ptr: number, len: number): void {
+    if (!this.onRenderBatch) return;
+    const batch = JSON.parse(this.readString(ptr, len)) as OperationBatch;
+    this.onRenderBatch(batch);
   }
 
   // --- ABI bridge: guest rill_host_call -> host dispatch -> guest rill_resolve ---
