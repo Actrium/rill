@@ -60,6 +60,10 @@ const EVENT_GUEST = readFileSync(join(import.meta.dir, 'fixtures/event-guest.was
 const C_GUEST = readFileSync(join(import.meta.dir, 'fixtures/c-guest.wasm'));
 // Adversarial guest that over-allocates past its bump heap (allocation trap).
 const HEAP_EXHAUST = readFileSync(join(import.meta.dir, 'fixtures/heap-exhaust-guest.wasm'));
+// Adversarial guest that imports an undeclared function (must be rejected).
+const BAD_IMPORT = readFileSync(join(import.meta.dir, 'fixtures/bad-import.wasm'));
+// Adversarial guest whose rill_on_event traps.
+const EVENT_TRAP = readFileSync(join(import.meta.dir, 'fixtures/event-trap.wasm'));
 
 // --- tiny seeded PRNG + JSON generator for fuzzing (reproducible, no deps) ---
 type Json = string | number | boolean | null | Json[] | { [k: string]: Json };
@@ -315,6 +319,27 @@ describe('WasmGuestHost — host->guest events (rill_on_event)', () => {
     await host.load(BAD_BATCH);
     expect(() => host.emitEvent('ping', { n: 1 })).not.toThrow();
   });
+
+  it('is fail-closed when the guest rill_on_event traps (emitEvent never throws)', async () => {
+    // event-trap.wasm exports a rill_on_event that traps. A hostile/broken guest
+    // must not make host-side event delivery throw.
+    const host = new WasmGuestHost({ dispatch: {} });
+    await host.load(EVENT_TRAP);
+    expect(() => host.emitEvent('anything', { n: 1 })).not.toThrow();
+  });
+
+  it('a one-shot handler that removes itself during dispatch is sound', async () => {
+    // event-guest registers an "once" handler that calls events::off(self) while
+    // it runs. The SDK snapshots handlers before dispatch, so this must not
+    // corrupt the registry (no UAF) and must fire exactly once.
+    const host = new WasmGuestHost({ dispatch: {} });
+    await host.load(EVENT_GUEST);
+    const onceCount = () => (host.exports.once_count as () => number)();
+    expect(onceCount()).toBe(0);
+    host.emitEvent('once', {});
+    host.emitEvent('once', {}); // handler already removed itself
+    expect(onceCount()).toBe(1);
+  });
 });
 
 describe('WasmGuestHost — the seal is an import allowlist (automated)', () => {
@@ -336,6 +361,20 @@ describe('WasmGuestHost — the seal is an import allowlist (automated)', () => 
       }
     });
   }
+
+  it('enforces the seal: a guest importing an undeclared function is rejected', async () => {
+    // bad-import.wasm imports env.evil, which the host does NOT provide. This is
+    // the actual enforcement (WebAssembly.instantiate -> LinkError), not just the
+    // tautology above that our own guests happen to import only allowed names.
+    const host = new WasmGuestHost({ dispatch: {} });
+    let threw = false;
+    try {
+      await host.load(BAD_IMPORT);
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
+  });
 });
 
 describe('WasmGuestHost — fuzz + resilience (trust boundary)', () => {

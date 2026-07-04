@@ -86,6 +86,11 @@ pub mod rt {
     static mut TASK: Option<Pin<alloc::boxed::Box<dyn Future<Output = ()>>>> = None;
     static mut RESULTS: Vec<(u32, u32, Vec<u8>)> = Vec::new();
     static mut NEXT_CB: u32 = 1;
+    // poll() runs right after each resolve, so a live future consumes its result
+    // immediately; only results for *dropped* futures (a HostCall awaited then
+    // dropped — see the note on events handlers) linger here. Cap the backlog so
+    // that leak is bounded rather than unbounded.
+    const MAX_ORPHAN_RESULTS: usize = 64;
 
     /// `rill_init` body: box the guest's async entry and drive it once.
     pub fn init(future: impl Future<Output = ()> + 'static) {
@@ -113,6 +118,11 @@ pub mod rt {
         };
         RESULTS.push((cb, ok, bytes));
         poll();
+        // Drop the oldest orphaned result(s) if the backlog grew past the cap
+        // (results whose future was dropped and will never take_result them).
+        while RESULTS.len() > MAX_ORPHAN_RESULTS {
+            RESULTS.remove(0);
+        }
     }
 
     pub(crate) fn next_cb() -> u32 {
@@ -354,11 +364,15 @@ fn json_escape(out: &mut alloc::string::String, raw: &str) {
 /// synchronous — they should update guest state, not `.await` host calls (a
 /// dropped future would fire the call but never receive its result).
 pub mod events {
-    use alloc::boxed::Box;
+    use alloc::rc::Rc;
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    type Handler = Box<dyn Fn(&[u8])>;
+    // Rc, not Box: dispatch snapshots the matching handlers' Rc before calling
+    // them, so a handler that mutates HANDLERS mid-dispatch (e.g. `off(self)` for
+    // a one-shot subscription, or `on(...)`) can't invalidate the iteration or
+    // free a handler being called. Single-threaded wasm, so Rc is fine.
+    type Handler = Rc<dyn Fn(&[u8])>;
     static mut HANDLERS: Vec<(u32, String, Handler)> = Vec::new();
     static mut NEXT_ID: u32 = 1;
 
@@ -368,7 +382,7 @@ pub mod events {
         unsafe {
             let id = NEXT_ID;
             NEXT_ID += 1;
-            HANDLERS.push((id, String::from(name), Box::new(handler)));
+            HANDLERS.push((id, String::from(name), Rc::new(handler)));
             id
         }
     }
@@ -393,10 +407,15 @@ pub mod events {
         let name =
             core::str::from_utf8(core::slice::from_raw_parts(name_ptr, name_len)).unwrap_or("");
         let payload = core::slice::from_raw_parts(payload_ptr, payload_len);
-        for (_, registered, handler) in HANDLERS.iter() {
-            if registered == name {
-                handler(payload);
-            }
+        // Snapshot matching handlers first: cloning the Rc keeps each alive for
+        // the call even if a handler removes it from HANDLERS mid-dispatch.
+        let matched: Vec<Handler> = HANDLERS
+            .iter()
+            .filter(|h| h.1 == name)
+            .map(|h| h.2.clone())
+            .collect();
+        for handler in &matched {
+            handler(payload);
         }
     }
 }

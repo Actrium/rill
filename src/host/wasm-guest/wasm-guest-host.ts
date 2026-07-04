@@ -101,11 +101,18 @@ export class WasmGuestHost {
       | ((np: number, nl: number, pp: number, pl: number) => void)
       | undefined;
     if (typeof onEvent !== 'function') return;
-    const nameBytes = new TextEncoder().encode(name);
-    const payloadBytes = new TextEncoder().encode(JSON.stringify(payload ?? null));
-    const np = this.allocWrite(nameBytes);
-    const pp = this.allocWrite(payloadBytes);
-    onEvent(np, nameBytes.length, pp, payloadBytes.length);
+    try {
+      const nameBytes = new TextEncoder().encode(name);
+      const payloadBytes = new TextEncoder().encode(JSON.stringify(payload ?? null));
+      const np = this.allocWrite(nameBytes);
+      const pp = this.allocWrite(payloadBytes);
+      onEvent(np, nameBytes.length, pp, payloadBytes.length);
+    } catch {
+      // Delivery is guest-mediated (rill_alloc can hand back a bad pointer,
+      // rill_on_event can trap). A hostile/broken guest must not make event
+      // delivery throw into the host — drop the event. Same fail-closed
+      // contract as onHostCall / onSendBatch.
+    }
   }
 
   /** Allocate guest memory via rill_alloc and copy `bytes` in; returns the ptr. */
@@ -174,12 +181,14 @@ export class WasmGuestHost {
     // crashing the host.
     const task = (async () => {
       try {
-        // Yield once before touching the guest. rill_resolve re-enters the guest
-        // executor, so resolving synchronously here (e.g. on the error path,
-        // which throws before any await) would re-poll a guest future that is
-        // still mid-poll. The yield defers all reads + resolve to a microtask
-        // after the guest has parked; the guest is suspended until then, so the
-        // buffer is stable.
+        // MEMORY-SAFETY CRITICAL (cross-crate invariant): the host must never
+        // resolve synchronously inside a guest-initiated call. rill_resolve
+        // re-enters the guest's single-task executor, and re-polling a future
+        // that is still mid-poll is not merely a stack overflow — it aliases
+        // `&mut` on the guest's `static mut TASK`, i.e. undefined behavior in the
+        // guest. Yielding here defers all reads + resolve to a microtask after
+        // the guest has parked (it is suspended until then, so its buffer is
+        // stable and no future is mid-poll). Do not remove this await.
         await Promise.resolve();
         const moduleId = this.readString(mp, ml);
         const method = this.readString(xp, xl);
@@ -201,15 +210,24 @@ export class WasmGuestHost {
   /** Write a JSON result into guest memory (via rill_alloc) and hand it back. */
   // Reason: a host module result is any JSON-serializable value, only stringified here.
   private resolve(cb: number, ok: number, result: unknown): void {
-    const bytes = new TextEncoder().encode(JSON.stringify(result));
-    const ptr = this.allocWrite(bytes);
-    (
-      this.instance.exports.rill_resolve as (
-        cb: number,
-        ok: number,
-        ptr: number,
-        len: number
-      ) => void
-    )(cb, ok, ptr, bytes.length);
+    // Writing the result back is guest-mediated (rill_alloc can return a bad
+    // pointer, the rill_resolve export can trap). Absorb any failure here so it
+    // never escapes the async task — otherwise the catch in onHostCall would
+    // call resolve() again, throw again, and reject drain(). On failure the cb
+    // is simply abandoned (the guest never sees a resolution), staying fail-closed.
+    try {
+      const bytes = new TextEncoder().encode(JSON.stringify(result));
+      const ptr = this.allocWrite(bytes);
+      (
+        this.instance.exports.rill_resolve as (
+          cb: number,
+          ok: number,
+          ptr: number,
+          len: number
+        ) => void
+      )(cb, ok, ptr, bytes.length);
+    } catch {
+      // guest-mediated write failed; abandon this cb.
+    }
   }
 }
