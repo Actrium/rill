@@ -58,7 +58,8 @@ export class WasmGuestView {
    * throws inside readBytes (assertInBounds) — the caller turns that into a
    * fail-closed result; it never reads out of bounds.
    */
-  readonly readGuestMemory = (ptr: number, len: number): Uint8Array => this.host.readBytes(ptr, len);
+  readonly readGuestMemory = (ptr: number, len: number): Uint8Array =>
+    this.host.readBytes(ptr, len);
 
   /**
    * Bounds-checked WRITE into the native guest's linear memory — the counterpart
@@ -72,7 +73,8 @@ export class WasmGuestView {
    *
    * Arrow field (bound to `this`) so it survives being passed by reference.
    */
-  readonly writeGuestMemory = (ptr: number, bytes: Uint8Array): void => this.host.writeBytes(ptr, bytes);
+  readonly writeGuestMemory = (ptr: number, bytes: Uint8Array): void =>
+    this.host.writeBytes(ptr, bytes);
 
   constructor(options: WasmGuestViewOptions) {
     this.wasmBytes = options.wasmBytes;
