@@ -1,9 +1,10 @@
 /**
- * @workaround - bust cache
  * Rill Engine
  *
- * Sandbox engine core, responsible for managing QuickJS execution environment and lifecycle.
- * Uses react-native-quickjs for sandboxed JavaScript execution.
+ * Sandbox engine core, responsible for managing the guest JS execution
+ * environment and its lifecycle. The actual backend is pluggable via
+ * `EngineOptions.sandbox` (node-vm, JSC, Hermes, QuickJS via JSI or WASM,
+ * tenant-manager) or a custom `provider`; see sandbox/providers for details.
  */
 
 // Augment globalThis for DevTools integration and Guest runtime
@@ -95,6 +96,9 @@ export { ExecutionError, RequireError, TimeoutError } from './types';
 // Global engine counter for debugging
 let engineIdCounter = 0;
 
+// Max entries kept in the globalThis.__rill_drain_diag debug buffer (oldest dropped first).
+const DIAG_BUFFER_LIMIT = 200;
+
 export class Engine implements IEngine {
   private runtime: JSEngineRuntime | null = null;
   private context: SandboxScope | null = null;
@@ -163,11 +167,25 @@ export class Engine implements IEngine {
   private diagnostics!: DiagnosticsCollector;
 
   /**
+   * Debug-gated diagnostic log. No-op unless `options.debug` is enabled.
+   * All `[DIAG]` timing/state traces in this file funnel through here so the
+   * production hot path stays silent.
+   */
+  private diag(msg: string): void {
+    if (!this.options.debug) return;
+    this.options.logger.log(`[rill:${this.id}] [DIAG] ${msg}`);
+  }
+
+  /**
    * Diagnostic accumulator: write timestamped messages to globalThis.__rill_drain_diag
-   * so HOST-side code (AskcTabView) can read them after loadBundle returns.
-   * nativeLoggingHook is NOT available in XPC ViewBridge context.
+   * so host-side integration code can inspect them after loadBundle returns.
+   * Exists for environments where console output is unavailable (e.g. XPC
+   * ViewBridge contexts without nativeLoggingHook).
+   * Only active when `options.debug` is enabled; the buffer is capped at
+   * DIAG_BUFFER_LIMIT entries and drops the oldest entries when full.
    */
   private diagAccum(msg: string): void {
+    if (!this.options.debug) return;
     try {
       let diag = (globalThis as Record<string, unknown>).__rill_drain_diag as string[] | undefined;
       if (!diag) {
@@ -175,6 +193,9 @@ export class Engine implements IEngine {
         (globalThis as Record<string, unknown>).__rill_drain_diag = diag;
       }
       diag.push(`${Date.now()}:${msg}`);
+      if (diag.length > DIAG_BUFFER_LIMIT) {
+        diag.splice(0, diag.length - DIAG_BUFFER_LIMIT);
+      }
     } catch {
       /* ignore */
     }
@@ -399,7 +420,7 @@ export class Engine implements IEngine {
     try {
       const t0 = Date.now();
       const code = source;
-      this.options.logger.log(`[rill:${this.id}] [DIAG] resolveSource: 0ms (sync inline)`);
+      this.diag(`resolveSource: 0ms (sync inline)`);
 
       if (this.options.debug) {
         this.options.logger.log(`[rill:${this.id}] Bundle loaded, length:`, code.length);
@@ -418,7 +439,7 @@ export class Engine implements IEngine {
         return initResult.then(() => this._loadBundleSyncContinuation(code, t0, bytecodeAssetPath));
       }
       const t1 = Date.now();
-      this.options.logger.log(`[rill:${this.id}] [DIAG] initializeRuntime: ${t1 - t0}ms`);
+      this.diag(`initializeRuntime: ${t1 - t0}ms`);
 
       this._devtools?.updateSandboxStatus({ state: 'running' });
 
@@ -426,10 +447,10 @@ export class Engine implements IEngine {
       const t2 = Date.now();
       this.executeBundleSync(code, bytecodeAssetPath);
       const t3 = Date.now();
-      this.options.logger.log(`[rill:${this.id}] [DIAG] executeBundle: ${t3 - t2}ms`);
+      this.diag(`executeBundle: ${t3 - t2}ms`);
 
       this._finishBundleLoad();
-      this.options.logger.log(`[rill:${this.id}] [DIAG] loadBundle: SYNC path complete`);
+      this.diag(`loadBundle: SYNC path complete`);
     } catch (error) {
       this._handleBundleError(error);
     }
@@ -445,7 +466,7 @@ export class Engine implements IEngine {
       const t0 = Date.now();
       const code = await this.resolveSource(source);
       const t1 = Date.now();
-      this.options.logger.log(`[rill:${this.id}] [DIAG] resolveSource: ${t1 - t0}ms`);
+      this.diag(`resolveSource: ${t1 - t0}ms`);
 
       if (this.options.debug) {
         this.options.logger.log(`[rill:${this.id}] Bundle loaded, length:`, code.length);
@@ -459,7 +480,7 @@ export class Engine implements IEngine {
 
       await this.initializeRuntime();
       const t2 = Date.now();
-      this.options.logger.log(`[rill:${this.id}] [DIAG] initializeRuntime: ${t2 - t1}ms`);
+      this.diag(`initializeRuntime: ${t2 - t1}ms`);
 
       this._devtools?.updateSandboxStatus({ state: 'running' });
 
@@ -500,10 +521,10 @@ export class Engine implements IEngine {
         this.executeBundleSync(code, bytecodeAssetPath);
       }
       const t4 = Date.now();
-      this.options.logger.log(`[rill:${this.id}] [DIAG] executeBundle: ${t4 - t3}ms`);
+      this.diag(`executeBundle: ${t4 - t3}ms`);
 
       this._finishBundleLoad();
-      this.options.logger.log(`[rill:${this.id}] [DIAG] loadBundle: ASYNC path complete`);
+      this.diag(`loadBundle: ASYNC path complete`);
     } catch (error) {
       this._handleBundleError(error);
     }
@@ -516,15 +537,14 @@ export class Engine implements IEngine {
   private _loadBundleSyncContinuation(code: string, t0: number, bytecodeAssetPath?: string): void {
     try {
       const t1 = Date.now();
-      this.options.logger.log(
-        `[rill:${this.id}] [DIAG] initializeRuntime: ${t1 - t0}ms (fallback async)`
+      this.diag(`initializeRuntime: ${t1 - t0}ms (fallback async)`
       );
       this._devtools?.updateSandboxStatus({ state: 'running' });
 
       const t2 = Date.now();
       this.executeBundleSync(code, bytecodeAssetPath);
       const t3 = Date.now();
-      this.options.logger.log(`[rill:${this.id}] [DIAG] executeBundle: ${t3 - t2}ms`);
+      this.diag(`executeBundle: ${t3 - t2}ms`);
 
       this._finishBundleLoad();
     } catch (error) {
@@ -536,10 +556,10 @@ export class Engine implements IEngine {
   private _finishBundleLoad(): void {
     this.loaded = true;
     this.diagnostics.setLoaded(true);
-    this.options.logger.log(`[rill:${this.id}] [DIAG] loadBundle: loaded=true set`);
+    this.diag(`loadBundle: loaded=true set`);
     this._devtools?.updateSandboxStatus({ state: 'running' });
     this.emit('load');
-    this.options.logger.log(`[rill:${this.id}] [DIAG] loadBundle: emit('load') done`);
+    this.diag(`loadBundle: emit('load') done`);
 
     if (this.options.debug) {
       this.options.logger.log(`[rill:${this.id}] Bundle executed successfully`);
@@ -684,7 +704,7 @@ export class Engine implements IEngine {
         this.diagAccum(
           `[rill:${this.id}] onGuestOperations ops=${batchOps} hasReceiver=${!!this.receiver}`
         );
-        logger.log(`[rill:${this.id}] [DIAG] onGuestOperations START ops=${batchOps}`);
+        this.diag(`onGuestOperations START ops=${batchOps}`);
         if (this.receiver) {
           const stats = this.receiver.applyBatch(batch as OperationBatch);
           this.diagnostics.recordBatch(stats);
@@ -692,7 +712,7 @@ export class Engine implements IEngine {
         } else {
           logger.warn(`[rill:${this.id}] No receiver to apply batch!`);
         }
-        logger.log(`[rill:${this.id}] [DIAG] onGuestOperations END took=${Date.now() - t0}ms`);
+        this.diag(`onGuestOperations END took=${Date.now() - t0}ms`);
       },
       onHostMessage: async (message: BridgeHostMessage) => {
         if (this.context) {
@@ -855,9 +875,7 @@ export class Engine implements IEngine {
     // console - Register each method separately for JSC sandbox compatibility
     // JSC sandbox can't handle objects with function properties via RN bridge
     injectWithLog('__console_log', (...args: unknown[]) => {
-      // Always forward [DIAG] messages even when debug=false
-      const msg = args.length > 0 ? String(args[0]) : '';
-      if (debug || msg.includes('[DIAG]')) {
+      if (debug) {
         logger.log(`[rill:${engineId}][Guest]`, ...formatConsoleArgs(args));
       }
     });
@@ -924,8 +942,7 @@ export class Engine implements IEngine {
             }
             immediateCallCount++;
             if (immediateCallCount <= 10 || immediateCallCount % 100 === 0) {
-              logger.log(
-                `[rill:${engineId}] [DIAG] setImmediate FIRED id=${entry.id} delay=${Date.now() - entry.queuedAt}ms total=${immediateCallCount}`
+              this.diag(`setImmediate FIRED id=${entry.id} delay=${Date.now() - entry.queuedAt}ms total=${immediateCallCount}`
               );
               this.diagAccum(`[rill:${engineId}] FIRED id=${entry.id} total=${immediateCallCount}`);
             }
@@ -934,8 +951,7 @@ export class Engine implements IEngine {
               entry.fn();
               const fnDur = Date.now() - fnStart;
               if (immediateCallCount <= 10) {
-                logger.log(
-                  `[rill:${engineId}] [DIAG] setImmediate fn() DONE id=${entry.id} took=${fnDur}ms`
+                this.diag(`setImmediate fn() DONE id=${entry.id} took=${fnDur}ms`
                 );
               }
               this.diagAccum(
@@ -969,7 +985,7 @@ export class Engine implements IEngine {
         const id = ++immediateIdCounter;
         const queuedAt = Date.now();
         if (immediateCallCount < 5) {
-          logger.log(`[rill:${engineId}] [DIAG] setImmediate called id=${id} fnType=${typeof fn}`);
+          this.diag(`setImmediate called id=${id} fnType=${typeof fn}`);
         }
         pendingQueue.push({ id, fn, queuedAt });
 
@@ -1493,13 +1509,12 @@ ${assignments.join('\n')}
       evalAsync?: (code: string) => Promise<unknown>;
     };
     if (ctx.evalAsync) {
-      this.options.logger.log(`[rill:${this.id}] [DIAG] evalCode: using evalAsync`);
+      this.diag(`evalCode: using evalAsync`);
       return ctx.evalAsync(code).then(() => {});
     }
     const es = Date.now();
     this.context.eval(code);
-    this.options.logger.log(
-      `[rill:${this.id}] [DIAG] evalCode: sync eval done in ${Date.now() - es}ms, codeLen=${code.length}`
+    this.diag(`evalCode: sync eval done in ${Date.now() - es}ms, codeLen=${code.length}`
     );
   }
 
@@ -1589,8 +1604,7 @@ ${assignments.join('\n')}
     const hasRillGuest = rillNsDiag?.guest;
     const hasReact = this.context.extract('React');
     const hasReconciler = this.context.extract('RillReconciler');
-    this.options.logger.log(
-      `[rill:${this.id}] [DIAG] pre-eval sandbox state: ` +
+    this.diag(`pre-eval sandbox state: ` +
         `__rill_sendBatch=${typeof hasSendToHost}, ` +
         `__rill.guest=${typeof hasRillGuest}, ` +
         `React=${typeof hasReact}, ` +
@@ -1617,8 +1631,7 @@ ${assignments.join('\n')}
             this.context.eval(code);
             usedBytecodeAsset = false;
           }
-          this.options.logger.log(
-            `[rill:${this.id}] [DIAG] evalBytecodeAsset: sync eval done in ${Date.now() - es}ms, path=${bytecodeAssetPath}`
+          this.diag(`evalBytecodeAsset: sync eval done in ${Date.now() - es}ms, path=${bytecodeAssetPath}`
           );
         } catch (error) {
           this.options.logger.warn(
@@ -1626,14 +1639,12 @@ ${assignments.join('\n')}
             error
           );
           this.context.eval(code);
-          this.options.logger.log(
-            `[rill:${this.id}] [DIAG] evalCode(fallback): sync eval done in ${Date.now() - es}ms, codeLen=${code.length}`
+          this.diag(`evalCode(fallback): sync eval done in ${Date.now() - es}ms, codeLen=${code.length}`
           );
         }
       } else {
         this.context.eval(code);
-        this.options.logger.log(
-          `[rill:${this.id}] [DIAG] evalCode: sync eval done in ${Date.now() - es}ms, codeLen=${code.length}`
+        this.diag(`evalCode: sync eval done in ${Date.now() - es}ms, codeLen=${code.length}`
         );
       }
 
@@ -1648,8 +1659,7 @@ ${assignments.join('\n')}
         this._drainPendingImmediates();
         const drainDur = Date.now() - drainStart;
         this.diagAccum(`[rill:${this.id}] executeBundleSync: drain done took=${drainDur}ms`);
-        this.options.logger.log(
-          `[rill:${this.id}] [DIAG] drainPendingImmediates: took=${drainDur}ms`
+        this.diag(`drainPendingImmediates: took=${drainDur}ms`
         );
       }
 
@@ -1658,8 +1668,7 @@ ${assignments.join('\n')}
       const postRillGuest = postRillNs?.guest;
       const postKeys =
         postRillGuest && typeof postRillGuest === 'object' ? Object.keys(postRillGuest) : [];
-      this.options.logger.log(
-        `[rill:${this.id}] [DIAG] post-eval: __rill.guest=${typeof postRillGuest}, keys=[${postKeys.join(',')}]`
+      this.diag(`post-eval: __rill.guest=${typeof postRillGuest}, keys=[${postKeys.join(',')}]`
       );
 
       const dur = Date.now() - start;

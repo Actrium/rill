@@ -6,6 +6,9 @@
 import type { SendToHost, SerializedOperation, SerializedOperationBatch } from '../../../sdk/types';
 import { BinaryEncoder } from './binary-encoder';
 
+// Max entries kept in the globalThis.__rill_drain_diag debug buffer (oldest dropped first).
+const DIAG_BUFFER_LIMIT = 200;
+
 export interface OperationCollectorConfig {
   /**
    * Enable binary encoding for batches (default: false)
@@ -65,18 +68,24 @@ export class OperationCollector {
     this._flushing = true;
 
     try {
-      // Diagnostic accumulator: write to globalThis.__rill_drain_diag for HOST readout
-      try {
-        let diag = (globalThis as Record<string, unknown>).__rill_drain_diag as
-          | string[]
-          | undefined;
-        if (!diag) {
-          diag = [];
-          (globalThis as Record<string, unknown>).__rill_drain_diag = diag;
+      // Diagnostic accumulator: write to globalThis.__rill_drain_diag for HOST readout.
+      // Debug-only; buffer is capped at DIAG_BUFFER_LIMIT entries (oldest dropped first).
+      if (this.isDebugEnabled()) {
+        try {
+          let diag = (globalThis as Record<string, unknown>).__rill_drain_diag as
+            | string[]
+            | undefined;
+          if (!diag) {
+            diag = [];
+            (globalThis as Record<string, unknown>).__rill_drain_diag = diag;
+          }
+          diag.push(`${Date.now()}:[rill:reconciler] flush ops=${this.operations.length}`);
+          if (diag.length > DIAG_BUFFER_LIMIT) {
+            diag.splice(0, diag.length - DIAG_BUFFER_LIMIT);
+          }
+        } catch {
+          /* ignore */
         }
-        diag.push(`${Date.now()}:[rill:reconciler] flush ops=${this.operations.length}`);
-      } catch {
-        /* ignore */
       }
 
       if (this.operations.length === 0) {
