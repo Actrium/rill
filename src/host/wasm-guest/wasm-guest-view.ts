@@ -45,6 +45,21 @@ export class WasmGuestView {
   private readonly errorListeners = new Set<ErrorListener>();
   private readonly destroyListeners = new Set<Listener>();
 
+  /**
+   * Bounds-checked SLICE-COPY of the native guest's linear memory, exposed so the
+   * platform can late-bind it onto host:canvas handles for the stage-② `present`
+   * framebuffer path (canvasRegistry.bindGuestMemory). Delegates to
+   * WasmGuestHost.readBytes — a copy, NEVER a live view over `memory.buffer`
+   * (which would detach on `memory.grow`). Only a native guest exposes this; a JS
+   * (QuickJS) guest has no such reader, so `present` stays fail-closed for it.
+   *
+   * Arrow field (bound to `this`) so it survives being passed by reference, i.e.
+   * `canvasRegistry.bindGuestMemory(engine.readGuestMemory)`. A hostile ptr/len
+   * throws inside readBytes (assertInBounds) — the caller turns that into a
+   * fail-closed result; it never reads out of bounds.
+   */
+  readonly readGuestMemory = (ptr: number, len: number): Uint8Array => this.host.readBytes(ptr, len);
+
   constructor(options: WasmGuestViewOptions) {
     this.wasmBytes = options.wasmBytes;
     this.registry = new ComponentRegistry();

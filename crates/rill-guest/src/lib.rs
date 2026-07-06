@@ -125,6 +125,22 @@ pub mod rt {
         }
     }
 
+    /// Re-drive the guest task from OUTSIDE a host-call resolution.
+    ///
+    /// The executor is normally re-polled only by [`resolve`] (a host call
+    /// completing). An event handler ([`crate::events`]) is synchronous and does
+    /// NOT re-poll the task, so a future that parks waiting on an event (e.g. a
+    /// canvas frame tick) would never advance. A handler calls `wake()` after
+    /// updating guest state to poll the task once and let such a future proceed.
+    ///
+    /// Safe re-entrancy: `wake()` is only ever called from `rill_on_event`, which
+    /// the host invokes while the guest is PARKED (never mid-poll, never nested in
+    /// a `resolve`) — same precondition `resolve`'s own `poll()` relies on. So it
+    /// cannot alias `&mut TASK`. Do NOT call it from inside a running poll.
+    pub fn wake() {
+        poll();
+    }
+
     pub(crate) fn next_cb() -> u32 {
         unsafe {
             let c = NEXT_CB;
@@ -501,6 +517,15 @@ pub mod canvas {
     /// `putImageData` contract the host blit expects. Backed by the guest's
     /// `BumpAlloc`, which only grows: allocate a Surface ONCE and reuse it across
     /// frames (a `Surface::new` per frame leaks its buffer for the guest's life).
+    ///
+    /// Double-buffering: `present(id, &surface).await` resolves only AFTER the host
+    /// has finished reading these bytes, so with a single Surface it is already
+    /// safe to overwrite for the next frame once the await returns (at most one
+    /// frame in flight — the ack is the backpressure). A guest that wants to render
+    /// frame N+1 while the host still blits frame N can instead allocate TWO
+    /// Surfaces once and alternate them (write A / present B, then swap); the same
+    /// "allocate once, BumpAlloc only grows" rule means the two buffers are made a
+    /// single time and reused forever.
     pub struct Surface {
         width: u32,
         height: u32,
@@ -549,9 +574,11 @@ pub mod canvas {
     /// is done reading, so the buffer is then safe to overwrite for the next frame
     /// (this return is the backpressure signal — at most one frame in flight).
     ///
-    /// NOTE: the HOST side of `present` lands in stage ②; until then this call
-    /// fails closed (the `host:canvas` contract has no `present` method yet). The
-    /// SDK shape is defined now so native guests compile against the final API.
+    /// The await-per-frame above is the COOPERATIVE guest's own backpressure (one
+    /// present in flight). It is not host-enforced: the host additionally BYTE-
+    /// BUDGETS present per canvas (a ~64MB blit is costly), so a non-cooperative
+    /// guest that skips the discipline is still rate-bounded host-side — it cannot
+    /// flood the main thread, its excess presents just fail closed.
     pub async fn present(canvas_id: &str, surface: &Surface) -> Result<Vec<u8>, Vec<u8>> {
         let mut body = String::from("{\"canvasId\":");
         json_string(&mut body, canvas_id);
@@ -577,10 +604,16 @@ pub mod ui {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    /// A sealed UI node. `View` is a container; `Text` carries a string.
+    /// A sealed UI node. `View` is a container; `Text` carries a string; `Canvas`
+    /// mounts a viewport painted via host:canvas (draw / present).
     pub enum Node {
         View(Vec<Node>),
         Text(String),
+        Canvas {
+            canvas_id: String,
+            width: u32,
+            height: u32,
+        },
     }
 
     /// A container node.
@@ -591,6 +624,18 @@ pub mod ui {
     /// A text node.
     pub fn text(content: &str) -> Node {
         Node::Text(String::from(content))
+    }
+
+    /// A canvas viewport node. The host mounts a real `<canvas>` of `width`×`height`
+    /// logical pixels, keyed by `canvas_id`; the guest paints it ONLY through
+    /// host:canvas (draw for a display list, present for a framebuffer) — it never
+    /// gets a handle to the element. That is the seal.
+    pub fn canvas(canvas_id: &str, width: u32, height: u32) -> Node {
+        Node::Canvas {
+            canvas_id: String::from(canvas_id),
+            width,
+            height,
+        }
     }
 }
 
@@ -645,6 +690,20 @@ fn emit_node(ops: &mut alloc::string::String, node: &ui::Node, next_id: &mut u32
             push_op(
                 ops,
                 format!("{{\"op\":\"TEXT\",\"id\":{id},\"text\":{escaped}}}"),
+            );
+        }
+        ui::Node::Canvas {
+            canvas_id,
+            width,
+            height,
+        } => {
+            let mut cid = alloc::string::String::new();
+            json_escape(&mut cid, canvas_id);
+            push_op(
+                ops,
+                format!(
+                    "{{\"op\":\"CREATE\",\"id\":{id},\"type\":\"Canvas\",\"props\":{{\"canvasId\":{cid},\"style\":{{\"width\":{width},\"height\":{height}}}}}}}"
+                ),
             );
         }
     }
