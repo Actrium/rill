@@ -110,7 +110,6 @@ export type {
 export {
   HostMsg,
   isJSIPrimitive,
-  OPERATION_TYPES,
   isSerializedDate,
   isSerializedError,
   isSerializedFunction,
@@ -119,5 +118,6 @@ export {
   isSerializedRegExp,
   isSerializedSet,
   isSerializedSpecialType,
+  OPERATION_TYPES,
   operationHasProps,
 } from './types';

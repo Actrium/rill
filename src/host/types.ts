@@ -161,4 +161,3 @@ export type {
   StyleObject,
   StyleProp,
 } from '../shared/style-types';
-

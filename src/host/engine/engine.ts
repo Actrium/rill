@@ -552,8 +552,7 @@ export class Engine implements IEngine {
   private _loadBundleSyncContinuation(code: string, t0: number, bytecodeAssetPath?: string): void {
     try {
       const t1 = Date.now();
-      this.diag(`initializeRuntime: ${t1 - t0}ms (fallback async)`
-      );
+      this.diag(`initializeRuntime: ${t1 - t0}ms (fallback async)`);
       this._devtools?.updateSandboxStatus({ state: 'running' });
 
       const t2 = Date.now();
@@ -957,7 +956,8 @@ export class Engine implements IEngine {
             }
             immediateCallCount++;
             if (immediateCallCount <= 10 || immediateCallCount % 100 === 0) {
-              this.diag(`setImmediate FIRED id=${entry.id} delay=${Date.now() - entry.queuedAt}ms total=${immediateCallCount}`
+              this.diag(
+                `setImmediate FIRED id=${entry.id} delay=${Date.now() - entry.queuedAt}ms total=${immediateCallCount}`
               );
               this.diagAccum(`[rill:${engineId}] FIRED id=${entry.id} total=${immediateCallCount}`);
             }
@@ -966,8 +966,7 @@ export class Engine implements IEngine {
               entry.fn();
               const fnDur = Date.now() - fnStart;
               if (immediateCallCount <= 10) {
-                this.diag(`setImmediate fn() DONE id=${entry.id} took=${fnDur}ms`
-                );
+                this.diag(`setImmediate fn() DONE id=${entry.id} took=${fnDur}ms`);
               }
               this.diagAccum(
                 `[rill:${engineId}] fn() DONE id=${entry.id} took=${fnDur}ms queueAfter=${pendingQueue.length}`
@@ -1529,8 +1528,7 @@ ${assignments.join('\n')}
     }
     const es = Date.now();
     this.context.eval(code);
-    this.diag(`evalCode: sync eval done in ${Date.now() - es}ms, codeLen=${code.length}`
-    );
+    this.diag(`evalCode: sync eval done in ${Date.now() - es}ms, codeLen=${code.length}`);
   }
 
   /**
@@ -1619,7 +1617,8 @@ ${assignments.join('\n')}
     const hasRillGuest = rillNsDiag?.guest;
     const hasReact = this.context.extract('React');
     const hasReconciler = this.context.extract('RillReconciler');
-    this.diag(`pre-eval sandbox state: ` +
+    this.diag(
+      `pre-eval sandbox state: ` +
         `__rill_sendBatch=${typeof hasSendToHost}, ` +
         `__rill.guest=${typeof hasRillGuest}, ` +
         `React=${typeof hasReact}, ` +
@@ -1646,7 +1645,8 @@ ${assignments.join('\n')}
             this.context.eval(code);
             usedBytecodeAsset = false;
           }
-          this.diag(`evalBytecodeAsset: sync eval done in ${Date.now() - es}ms, path=${bytecodeAssetPath}`
+          this.diag(
+            `evalBytecodeAsset: sync eval done in ${Date.now() - es}ms, path=${bytecodeAssetPath}`
           );
         } catch (error) {
           this.options.logger.warn(
@@ -1654,13 +1654,13 @@ ${assignments.join('\n')}
             error
           );
           this.context.eval(code);
-          this.diag(`evalCode(fallback): sync eval done in ${Date.now() - es}ms, codeLen=${code.length}`
+          this.diag(
+            `evalCode(fallback): sync eval done in ${Date.now() - es}ms, codeLen=${code.length}`
           );
         }
       } else {
         this.context.eval(code);
-        this.diag(`evalCode: sync eval done in ${Date.now() - es}ms, codeLen=${code.length}`
-        );
+        this.diag(`evalCode: sync eval done in ${Date.now() - es}ms, codeLen=${code.length}`);
       }
 
       // Drain pending setImmediate callbacks synchronously.
@@ -1674,8 +1674,7 @@ ${assignments.join('\n')}
         this._drainPendingImmediates();
         const drainDur = Date.now() - drainStart;
         this.diagAccum(`[rill:${this.id}] executeBundleSync: drain done took=${drainDur}ms`);
-        this.diag(`drainPendingImmediates: took=${drainDur}ms`
-        );
+        this.diag(`drainPendingImmediates: took=${drainDur}ms`);
       }
 
       // DIAG: Check sandbox state after eval (verify user script set __rill.guest)
@@ -1683,8 +1682,7 @@ ${assignments.join('\n')}
       const postRillGuest = postRillNs?.guest;
       const postKeys =
         postRillGuest && typeof postRillGuest === 'object' ? Object.keys(postRillGuest) : [];
-      this.diag(`post-eval: __rill.guest=${typeof postRillGuest}, keys=[${postKeys.join(',')}]`
-      );
+      this.diag(`post-eval: __rill.guest=${typeof postRillGuest}, keys=[${postKeys.join(',')}]`);
 
       const dur = Date.now() - start;
       this.diagAccum(`[rill:${this.id}] executeBundleSync COMPLETE dur=${dur}ms`);

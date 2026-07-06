@@ -299,12 +299,14 @@ export class Bridge {
    * `op` discriminant). Anything else throws with enough context to trace
    * the offending guest payload.
    */
+  // Reason: JSON.parse output from the guest is untrusted until this check runs
   private static assertSerializedBatchShape(value: unknown): SerializedOperationBatch {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
       throw new Error(
         `[Bridge] sendJsonBatch: expected a batch object, got ${value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value}`
       );
     }
+    // Reason: probing an untrusted object's field before it is proven to be an array
     const operations = (value as { operations?: unknown }).operations;
     if (!Array.isArray(operations)) {
       throw new Error(
@@ -318,6 +320,7 @@ export class Bridge {
           `[Bridge] sendJsonBatch: operations[${i}] must be an object, got ${op === null ? 'null' : typeof op}`
         );
       }
+      // Reason: probing an untrusted operation's discriminant before validation
       const opType = (op as { op?: unknown }).op;
       if (typeof opType !== 'string' || !VALID_OPERATION_TYPES.has(opType)) {
         throw new Error(
