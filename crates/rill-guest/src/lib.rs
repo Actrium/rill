@@ -297,20 +297,30 @@ pub fn host_call(module: &'static str, method: &'static str, input: Vec<u8>) -> 
     }
 }
 
-/// Typed wrapper over the `host:kv` capability (demo).
+/// Typed wrapper over the `host:store` capability — the platform's per-user,
+/// per-app E2EE key/value store. The wire mirrors the platform's `host-store.ts`
+/// contract EXACTLY (method names + payload field names), so a native guest
+/// built on this SDK talks to the module the platform actually registers.
+///
+/// A native guest works with UTF-8 strings, so this wraps the contract's text
+/// convenience methods (`putText` / `getText` — the HOST does the byte
+/// encoding) plus `delete`. The raw-byte `put` / `get` (`value` rides as a
+/// JSON number array) and `update` / `list` remain reachable via
+/// [`crate::host_call`] until typed wrappers land.
 pub mod store {
     use crate::json_escape;
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    /// `host:kv.put(k, v)` -> the response body on success (`{"version":n}`).
-    pub async fn put(k: &str, v: &str) -> Result<Vec<u8>, Vec<u8>> {
-        let mut body = String::from("{\"k\":");
-        json_escape(&mut body, k);
-        body.push_str(",\"v\":");
-        json_escape(&mut body, v);
+    /// `host:store.putText(key, text)` -> the response body on success
+    /// (`{"version":n}`).
+    pub async fn put(key: &str, text: &str) -> Result<Vec<u8>, Vec<u8>> {
+        let mut body = String::from("{\"key\":");
+        json_escape(&mut body, key);
+        body.push_str(",\"text\":");
+        json_escape(&mut body, text);
         body.push('}');
-        let (ok, bytes) = super::host_call("host:kv", "put", body.into_bytes()).await;
+        let (ok, bytes) = super::host_call("host:store", "putText", body.into_bytes()).await;
         if ok == 1 {
             Ok(bytes)
         } else {
@@ -318,12 +328,27 @@ pub mod store {
         }
     }
 
-    /// `host:kv.get(k)` -> the response body on success (`{"v":"…"}`).
-    pub async fn get(k: &str) -> Result<Vec<u8>, Vec<u8>> {
-        let mut body = String::from("{\"k\":");
-        json_escape(&mut body, k);
+    /// `host:store.getText(key)` -> the response body on success
+    /// (`{"text":"…","version":n}`, or `null` for an absent key).
+    pub async fn get(key: &str) -> Result<Vec<u8>, Vec<u8>> {
+        let mut body = String::from("{\"key\":");
+        json_escape(&mut body, key);
         body.push('}');
-        let (ok, bytes) = super::host_call("host:kv", "get", body.into_bytes()).await;
+        let (ok, bytes) = super::host_call("host:store", "getText", body.into_bytes()).await;
+        if ok == 1 {
+            Ok(bytes)
+        } else {
+            Err(bytes)
+        }
+    }
+
+    /// `host:store.delete(key)` -> the response body on success
+    /// (`{"deleted":bool}`).
+    pub async fn del(key: &str) -> Result<Vec<u8>, Vec<u8>> {
+        let mut body = String::from("{\"key\":");
+        json_escape(&mut body, key);
+        body.push('}');
+        let (ok, bytes) = super::host_call("host:store", "delete", body.into_bytes()).await;
         if ok == 1 {
             Ok(bytes)
         } else {

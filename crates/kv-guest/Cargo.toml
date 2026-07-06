@@ -2,7 +2,7 @@
 name = "kv-guest"
 version.workspace = true
 edition.workspace = true
-description = "Demo native rill guest: calls host:kv.put through the rill-guest SDK."
+description = "Demo native rill guest: calls host:store.putText through the rill-guest SDK."
 license.workspace = true
 publish = false
 
