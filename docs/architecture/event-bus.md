@@ -54,9 +54,13 @@ struct ChannelPolicy {
 };
 ```
 
+> **Note:** `requirePermission` is declared in `ChannelPolicy` but is **not currently enforced** — `subscribe()` only checks that the channel exists and that `maxSubscribers` is not exceeded. No permission check is performed anywhere in `EventBus.cpp`.
+
 ### Built-in Channels
 
-| Channel | systemOnly | persistent | Description |
+> **Status: planned — not implemented.** The table below is a design sketch only. The Event Bus currently starts with **zero** pre-registered channels (`EventBus::EventBus() = default;`), and nothing in `native/core` creates these channels. Every channel must be created explicitly — via `createChannel()` in C++ or `busCreateChannel(policy)` over JSI — before anything can publish to or subscribe on it.
+
+| Channel (planned) | systemOnly | persistent | Description |
 |---|---|---|---|
 | `system` | yes | yes | System lifecycle events (startup, shutdown, OOM) |
 | `lifecycle` | yes | yes | App state transitions (foreground, background, memory warning) |
@@ -191,11 +195,11 @@ struct Stats {
   uint64_t totalDelivered;        // Individual handler invocations
   uint64_t totalDropped;          // Events dropped (rate limit, policy)
   size_t activeSubscriptions;     // Currently active subscriptions
-  size_t activeChannels;          // Channels with at least one subscriber
+  size_t activeChannels;          // Channels created (all created channels, with or without subscribers)
 };
 ```
 
-Statistics use `std::atomic` counters for lock-free read access.
+The publish/deliver/drop counters are `std::atomic`, so they can be updated without blocking; `getStats()` itself takes a shared lock to snapshot the channel and subscription counts.
 
 ## JSI Integration
 
