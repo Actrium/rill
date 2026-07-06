@@ -139,11 +139,12 @@ engine.getDiagnostics(): EngineDiagnostics;
 
 The returned `EngineDiagnostics` snapshot aggregates everything in one call:
 
+- `id: string` -- the engine instance id
 - `health: EngineHealth` -- loaded/destroyed flags, error count, last error timestamp, receiver node count, batching state
 - `resources: ResourceStats` -- `{ timers, nodes, callbacks }`
 - `activity: EngineActivityStats` -- ops/s, batches/s, totals, optional timeline
 - `receiver: ReceiverStats | null` -- receiver-side stats and backpressure info
-- `host` / `guest` -- last event name, timestamp, and payload size on each side
+- `host` / `guest` -- last event name, timestamp, and payload size on each side; `guest` additionally reports `sleeping` / `sleepingAt`
 
 There are no separate `engine.getHealth()` or `engine.getResourceStats()` methods; read the `health` and `resources` fields of the diagnostics snapshot instead.
 

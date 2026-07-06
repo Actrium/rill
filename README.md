@@ -110,7 +110,7 @@ export default function MyGuest() {
 bunx rill build src/guest.tsx -o dist/bundle.js
 
 # Development mode
-bunx rill build src/guest.tsx --watch --no-minify --sourcemap
+bunx rill build src/guest.tsx --no-minify --sourcemap
 
 # Analyze bundle
 bunx rill analyze dist/bundle.js
@@ -176,7 +176,7 @@ engine.sendEvent('EVENT_NAME', payload);
 engine.on('message', (msg) => console.log(msg.event, msg.payload));
 
 // Health check
-const health = engine.getHealth();
+const { health } = engine.getDiagnostics();
 
 // Destroy
 engine.destroy();

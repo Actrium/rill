@@ -139,11 +139,12 @@ engine.getDiagnostics(): EngineDiagnostics;
 
 返回的 `EngineDiagnostics` 快照一次调用聚合所有信息：
 
+- `id: string` -- 引擎实例 id
 - `health: EngineHealth` -- 加载/销毁标志、错误计数、最近错误时间戳、receiver 节点数、批处理状态
 - `resources: ResourceStats` -- `{ timers, nodes, callbacks }`
 - `activity: EngineActivityStats` -- ops/s、batch/s、累计值、可选时间线
 - `receiver: ReceiverStats | null` -- receiver 侧统计与背压信息
-- `host` / `guest` -- 双方最近一次事件的名称、时间戳与负载大小
+- `host` / `guest` -- 双方最近一次事件的名称、时间戳与负载大小；`guest` 额外报告 `sleeping` / `sleepingAt`
 
 Engine 上没有单独的 `engine.getHealth()` 或 `engine.getResourceStats()` 方法；请改为读取诊断快照的 `health` 与 `resources` 字段。
 

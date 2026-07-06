@@ -47,7 +47,7 @@
 
 **目标**：给 guest 作者一套人体工学的 typed host:* 包装，别只有裸 `host_call` + 手拼 JSON。
 
-**现状（grounded）**：`crates/rill-guest/src/lib.rs` 有通用 `host_call` + 一个 `host:kv` demo（`store::put/get`，手拼 JSON）。**ABI 无需改**。
+**现状（grounded）**：`crates/rill-guest/src/lib.rs` 有通用 `host_call` + 一个 `host:store` demo（`store::put/get`，手拼 JSON，wire 对齐平台 host-store.ts 的 putText/getText）。**ABI 无需改**。
 
 **关键定性（核实后）**：app 专属能力（`host:net`/`identity`/`billing`）住在 **application.ist**，不在 rill 框架——**框架 SDK 不该硬编码它们**。所以本项是「选抽象」，不是「加能力」：
 - **推荐 · Tier 2 代码生成**：从 `src/contract/index.ts` 的契约定义**生成** typed Rust 包装（TS→Rust codegen），app 作者按自己的契约生成自己的 SDK。
