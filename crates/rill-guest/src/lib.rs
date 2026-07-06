@@ -1502,3 +1502,162 @@ macro_rules! rill_guest_main {
         }
     };
 }
+
+// ---- unit tests (run on the HOST target: `cargo test -p rill-guest`) ----
+//
+// The crate is `no_std`, but libtest brings std, so pure-logic tests (JSON
+// escaping, gpu budget accounting) run natively. The wasm host imports get
+// stub definitions below so the test binary links without a wasm host.
+#[cfg(test)]
+mod test_shims {
+    #[no_mangle]
+    extern "C" fn rill_host_call(
+        _mod_ptr: *const u8,
+        _mod_len: usize,
+        _method_ptr: *const u8,
+        _method_len: usize,
+        _in_ptr: *const u8,
+        _in_len: usize,
+        _cb_id: u32,
+    ) {
+    }
+    #[no_mangle]
+    extern "C" fn rill_send_batch(_batch_ptr: *const u8, _batch_len: usize) {}
+    #[no_mangle]
+    extern "C" fn rill_log(_msg_ptr: *const u8, _msg_len: usize) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::String;
+
+    fn esc(raw: &str) -> String {
+        let mut out = String::new();
+        super::json_escape(&mut out, raw);
+        out
+    }
+
+    #[test]
+    fn json_escape_plain_passthrough() {
+        assert_eq!(esc("hello"), "\"hello\"");
+        assert_eq!(esc(""), "\"\"");
+    }
+
+    #[test]
+    fn json_escape_quotes_and_backslash() {
+        assert_eq!(esc(r#"a"b\c"#), r#""a\"b\\c""#);
+    }
+
+    #[test]
+    fn json_escape_common_controls_short_form() {
+        assert_eq!(esc("a\nb\rc\td"), r#""a\nb\rc\td""#);
+    }
+
+    #[test]
+    fn json_escape_other_controls_as_u00xx() {
+        assert_eq!(
+            esc("\u{0}\u{1}\u{b}\u{1f}"),
+            "\"\\u0000\\u0001\\u000b\\u001f\""
+        );
+    }
+
+    #[test]
+    fn json_escape_multibyte_utf8_passthrough() {
+        // CJK + emoji + latin-1: multi-byte sequences must pass through intact.
+        let raw = "\u{4e2d}\u{6587} \u{1f389} \u{fc}";
+        let mut expected = String::from("\"");
+        expected.push_str(raw);
+        expected.push('"');
+        assert_eq!(esc(raw), expected);
+    }
+
+    #[test]
+    fn json_escape_no_control_char_survives_raw() {
+        for c in (0u32..0x20).filter_map(char::from_u32) {
+            let mut s = String::new();
+            s.push(c);
+            let escaped = esc(&s);
+            assert!(
+                !escaped[1..escaped.len() - 1].contains(c),
+                "control char {:#x} leaked through unescaped",
+                c as u32
+            );
+        }
+    }
+
+    mod gpu_budget {
+        use crate::gpu;
+
+        #[test]
+        fn small_buffer_is_within_budget() {
+            let mut cb = gpu::CommandBuffer::new();
+            cb.begin_pass(0.0, 0.0, 0.0, 1.0)
+                .draw(3)
+                .end_pass()
+                .finish();
+            assert!(cb.within_budget());
+            assert_eq!(cb.cost().draw_calls, 1);
+            assert_eq!(cb.cost().primitives, 1);
+        }
+
+        #[test]
+        fn oversized_elements_in_one_draw_violate() {
+            let mut cb = gpu::CommandBuffer::new();
+            // Totals stay under MAX_PRIMITIVES; only the per-draw cap trips.
+            cb.draw(gpu::MAX_ELEMENTS_PER_DRAW + 1);
+            assert!(!cb.within_budget());
+        }
+
+        #[test]
+        fn oversized_instances_in_one_draw_violate() {
+            let mut cb = gpu::CommandBuffer::new();
+            // Totals stay under MAX_INSTANCES_TOTAL; only the per-draw cap trips.
+            cb.draw_instanced(3, gpu::MAX_INSTANCES_PER_DRAW + 1);
+            assert!(!cb.within_budget());
+        }
+
+        #[test]
+        fn per_draw_violation_latches() {
+            let mut cb = gpu::CommandBuffer::new();
+            cb.draw(gpu::MAX_ELEMENTS_PER_DRAW + 1);
+            cb.draw(3); // a later fine draw must not clear the violation
+            assert!(!cb.within_budget());
+        }
+
+        #[test]
+        fn at_cap_draw_is_still_within_budget() {
+            let mut cb = gpu::CommandBuffer::new();
+            cb.draw_instanced(3, gpu::MAX_INSTANCES_PER_DRAW);
+            assert!(cb.within_budget());
+        }
+
+        #[test]
+        fn too_many_draw_calls_exceed_budget() {
+            let mut cb = gpu::CommandBuffer::new();
+            for _ in 0..=gpu::MAX_DRAW_CALLS {
+                cb.draw(3);
+            }
+            assert!(!cb.within_budget());
+        }
+
+        #[test]
+        fn instance_totals_accumulate_across_draws() {
+            let mut cb = gpu::CommandBuffer::new();
+            let per_draw = gpu::MAX_INSTANCES_PER_DRAW as u64; // within per-draw cap
+            let draws = gpu::MAX_INSTANCES_TOTAL / per_draw + 1;
+            for _ in 0..draws {
+                cb.draw_instanced(3, per_draw as u32);
+            }
+            assert!(cb.cost().instances > gpu::MAX_INSTANCES_TOTAL);
+            assert!(!cb.within_budget());
+        }
+
+        #[test]
+        fn fill_rate_pixels_use_viewport_area_times_primitives() {
+            let mut cb = gpu::CommandBuffer::new();
+            cb.set_viewport(0.0, 0.0, 100.0, 100.0);
+            cb.draw_instanced(6, 2); // 2 tris x 2 instances = 4 primitives
+            assert_eq!(cb.cost().pixels, 100 * 100 * 4);
+        }
+    }
+}
