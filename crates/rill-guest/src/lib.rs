@@ -1209,6 +1209,10 @@ pub mod ui {
             canvas_id: String,
             width: u32,
             height: u32,
+            /// Context family: "2d" (host:canvas draw/present) | "webgl2" | "webgpu"
+            /// (host:gpu). A browser LOCKS a <canvas> to one family on first
+            /// getContext, so this is fixed at mount and drives mode-exclusion.
+            mode: String,
         },
     }
 
@@ -1222,15 +1226,24 @@ pub mod ui {
         Node::Text(String::from(content))
     }
 
-    /// A canvas viewport node. The host mounts a real `<canvas>` of `width`×`height`
-    /// logical pixels, keyed by `canvas_id`; the guest paints it ONLY through
-    /// host:canvas (draw for a display list, present for a framebuffer) — it never
-    /// gets a handle to the element. That is the seal.
+    /// A 2D canvas viewport node (host:canvas draw / present). The host mounts a
+    /// real `<canvas>` of `width`×`height` logical pixels, keyed by `canvas_id`;
+    /// the guest paints it ONLY through host:canvas — it never gets a handle to the
+    /// element. That is the seal.
     pub fn canvas(canvas_id: &str, width: u32, height: u32) -> Node {
+        canvas_mode(canvas_id, width, height, "2d")
+    }
+
+    /// A canvas viewport bound to a specific context family — "2d" (host:canvas),
+    /// "webgl2" or "webgpu" (host:gpu). The family is fixed at mount; a host:gpu
+    /// canvas must be created with the matching mode or host:gpu.configure fails
+    /// closed. See [`crate::gpu`].
+    pub fn canvas_mode(canvas_id: &str, width: u32, height: u32, mode: &str) -> Node {
         Node::Canvas {
             canvas_id: String::from(canvas_id),
             width,
             height,
+            mode: String::from(mode),
         }
     }
 }
@@ -1292,13 +1305,16 @@ fn emit_node(ops: &mut alloc::string::String, node: &ui::Node, next_id: &mut u32
             canvas_id,
             width,
             height,
+            mode,
         } => {
             let mut cid = alloc::string::String::new();
             json_escape(&mut cid, canvas_id);
+            let mut m = alloc::string::String::new();
+            json_escape(&mut m, mode);
             push_op(
                 ops,
                 format!(
-                    "{{\"op\":\"CREATE\",\"id\":{id},\"type\":\"Canvas\",\"props\":{{\"canvasId\":{cid},\"style\":{{\"width\":{width},\"height\":{height}}}}}}}"
+                    "{{\"op\":\"CREATE\",\"id\":{id},\"type\":\"Canvas\",\"props\":{{\"canvasId\":{cid},\"mode\":{m},\"style\":{{\"width\":{width},\"height\":{height}}}}}}}"
                 ),
             );
         }

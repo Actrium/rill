@@ -95,27 +95,34 @@ async fn guest_main() {
         rill_guest::rt::wake();
     });
 
-    // Mount the viewport so the host creates + registers the real <canvas>.
-    let kids = alloc::vec![rill_guest::ui::canvas(CANVAS_ID, W as u32, H as u32)];
+    // Mount the viewport in WEBGPU mode so the host locks the <canvas> to a webgpu
+    // context (mode is fixed at mount; host:gpu.configure(Webgpu) then matches it).
+    let kids = alloc::vec![rill_guest::ui::canvas_mode(CANVAS_ID, W as u32, H as u32, "webgpu")];
     rill_guest::render(rill_guest::ui::view(kids));
 
     // Build the vertex bytes ONCE (BumpAlloc only grows). Kept alive for the
     // guest's life so the handle's backing upload is stable.
     let verts = triangle_bytes();
 
-    // (re)initialize the gpu resources; retried after a device-lost.
-    let mut vbuf: Option<Handle> = configure_and_upload(&verts).await;
+    // Configure + upload LAZILY on the first frame. The <Canvas> host component
+    // registers its handle in a mount effect that runs AFTER this guest's initial
+    // render batch is delivered — configuring here (pre-frame) would race ahead of
+    // the handle and fail closed. onFrame only fires once the canvas is mounted, so
+    // the handle is guaranteed to exist by the time we configure below.
+    let mut vbuf: Option<Handle> = None;
 
     loop {
         NextFrame.await;
 
-        // Recover from a lost device (TDR/context-loss) before rendering.
+        // (Re)initialize on the first frame, and again after a lost device (TDR/loss).
         if unsafe { core::mem::replace(&mut DEVICE_LOST, false) } {
+            vbuf = None;
+        }
+        if vbuf.is_none() {
             vbuf = configure_and_upload(&verts).await;
         }
         let Some(handle) = vbuf else {
-            // No gpu context (unsupported / lost + re-init failed): skip the frame
-            // rather than busy-loop; the next tick retries via the loop.
+            // gpu unavailable / re-init failed: skip this frame, retry next tick.
             continue;
         };
 
