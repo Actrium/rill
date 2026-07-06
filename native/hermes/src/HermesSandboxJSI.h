@@ -13,6 +13,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace hermes_sandbox {
 
@@ -66,6 +67,18 @@ private:
   // Convert value from sandbox runtime to host runtime
   jsi::Value sandboxToHost(jsi::Runtime &sandboxRt, jsi::Runtime &hostRt,
                            const jsi::Value &value);
+  // Recursive implementations with depth limit + ancestor-path cycle
+  // detection. `path` holds the objects currently being converted on this
+  // branch (ancestors only — entries are popped after each subtree), so
+  // sibling-shared references are not falsely flagged as circular.
+  // Convention matches QuickJSSandboxJSI: on depth/cycle violation the
+  // offending subtree is replaced by a descriptive string, no throw.
+  jsi::Value hostToSandboxImpl(jsi::Runtime &hostRt, jsi::Runtime &sandboxRt,
+                               const jsi::Value &value, int depth,
+                               std::vector<jsi::Object> &path);
+  jsi::Value sandboxToHostImpl(jsi::Runtime &sandboxRt, jsi::Runtime &hostRt,
+                               const jsi::Value &value, int depth,
+                               std::vector<jsi::Object> &path);
   // Wrap a host function for use in sandbox
   jsi::Value wrapHostFunctionForSandbox(jsi::Runtime &hostRt,
                                         jsi::Runtime &sandboxRt,
