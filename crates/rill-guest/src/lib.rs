@@ -46,7 +46,15 @@ extern "C" {
 
 // ---- Bump allocator (leaks; fine for short-lived guests) ----
 const HEAP_SIZE: usize = 1 << 20; // 1 MiB
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
+
+/// Backing storage for the bump heap. The newtype exists for its `align(16)`:
+/// a bare `[u8; N]` static is only guaranteed 1-byte alignment, so aligning
+/// OFFSETS into it would not make the resulting ADDRESSES aligned. 16 covers
+/// every layout the SDK itself allocates; `alloc` below additionally aligns
+/// the actual address, so even rarer over-aligned requests stay correct.
+#[repr(C, align(16))]
+struct Heap([u8; HEAP_SIZE]);
+static mut HEAP: Heap = Heap([0; HEAP_SIZE]);
 
 pub struct BumpAlloc {
     offset: UnsafeCell<usize>,
@@ -68,13 +76,29 @@ impl Default for BumpAlloc {
 unsafe impl GlobalAlloc for BumpAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let off = &mut *self.offset.get();
-        let aligned = (*off + layout.align() - 1) & !(layout.align() - 1);
-        let end = aligned + layout.size();
+        let base = addr_of_mut!(HEAP) as usize;
+        // Align the ADDRESS handed out, not merely the offset: the offset math
+        // only yields an aligned pointer if the heap base itself is at least as
+        // aligned as the request, which `Heap`'s align(16) does not promise for
+        // exotic (>16) alignments.
+        let cur = match base.checked_add(*off) {
+            Some(v) => v,
+            None => return core::ptr::null_mut(),
+        };
+        let aligned_addr = match cur.checked_add(layout.align() - 1) {
+            Some(v) => v & !(layout.align() - 1),
+            None => return core::ptr::null_mut(),
+        };
+        let aligned = aligned_addr - base;
+        let end = match aligned.checked_add(layout.size()) {
+            Some(v) => v,
+            None => return core::ptr::null_mut(),
+        };
         if end > HEAP_SIZE {
             return core::ptr::null_mut();
         }
         *off = end;
-        (addr_of_mut!(HEAP) as *mut u8).add(aligned)
+        aligned_addr as *mut u8
     }
     unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
 }
