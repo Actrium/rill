@@ -259,6 +259,317 @@ pub mod store {
     }
 }
 
+/// Typed wrapper over the `host:canvas` capability — a host-mediated 2D drawing
+/// surface for native guests.
+///
+/// Two paths, both landing on the same `<Canvas>` sealed component:
+///  - `DrawList` + `draw(id, &list).await`: build a Canvas2D display list the
+///    host validates op-by-op and REPLAYS onto a real 2D context (stage ①).
+///  - `Surface` + `present(id, &surface).await`: software-render RGBA8 into the
+///    guest's own linear memory; the host reads it back (bounds-checked) and
+///    blits (stage ②; the host wiring for `present` may not exist yet).
+///
+/// The wire shape mirrors `host-canvas.ts` `OP_SPECS` EXACTLY (op names + arg
+/// field names). Styles are color STRINGS only (no gradient/pattern object → no
+/// image/URL reference), and there is deliberately NO readback — the seal's
+/// isolation lives in the ABSENCE of those, not in a runtime check.
+pub mod canvas {
+    use alloc::format;
+    use alloc::string::String;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    /// A 2D display list. Chain draw ops, then `canvas::draw(id, &list).await`.
+    /// Serializes to exactly the `host:canvas.draw` op-list the host accepts;
+    /// unknown/invalid ops would be dropped host-side, so build valid ops here.
+    #[derive(Default)]
+    pub struct DrawList {
+        ops: String,
+        count: usize,
+    }
+
+    impl DrawList {
+        /// A fresh, empty display list.
+        pub fn new() -> Self {
+            Self {
+                ops: String::new(),
+                count: 0,
+            }
+        }
+
+        fn push(&mut self, op: String) {
+            if !self.ops.is_empty() {
+                self.ops.push(',');
+            }
+            self.ops.push_str(&op);
+            self.count += 1;
+        }
+
+        /// Number of ops queued.
+        pub fn len(&self) -> usize {
+            self.count
+        }
+        /// Whether the list has no ops.
+        pub fn is_empty(&self) -> bool {
+            self.count == 0
+        }
+
+        // ---- path construction ----
+        /// `beginPath()`.
+        pub fn begin_path(&mut self) -> &mut Self {
+            self.push(String::from("{\"op\":\"beginPath\"}"));
+            self
+        }
+        /// `closePath()`.
+        pub fn close_path(&mut self) -> &mut Self {
+            self.push(String::from("{\"op\":\"closePath\"}"));
+            self
+        }
+        /// `moveTo(x, y)`.
+        pub fn move_to(&mut self, x: f64, y: f64) -> &mut Self {
+            self.push(format!("{{\"op\":\"moveTo\",\"x\":{x},\"y\":{y}}}"));
+            self
+        }
+        /// `lineTo(x, y)`.
+        pub fn line_to(&mut self, x: f64, y: f64) -> &mut Self {
+            self.push(format!("{{\"op\":\"lineTo\",\"x\":{x},\"y\":{y}}}"));
+            self
+        }
+        /// `rect(x, y, w, h)` (adds a rectangle sub-path).
+        pub fn rect(&mut self, x: f64, y: f64, w: f64, h: f64) -> &mut Self {
+            self.push(format!(
+                "{{\"op\":\"rect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}}}"
+            ));
+            self
+        }
+        /// `arc(x, y, r, start, end)` counter-clockwise=false.
+        pub fn arc(&mut self, x: f64, y: f64, r: f64, start: f64, end: f64) -> &mut Self {
+            self.push(format!(
+                "{{\"op\":\"arc\",\"x\":{x},\"y\":{y},\"r\":{r},\"start\":{start},\"end\":{end},\"ccw\":false}}"
+            ));
+            self
+        }
+        /// `fill()` the current path.
+        pub fn fill(&mut self) -> &mut Self {
+            self.push(String::from("{\"op\":\"fill\"}"));
+            self
+        }
+        /// `stroke()` the current path.
+        pub fn stroke(&mut self) -> &mut Self {
+            self.push(String::from("{\"op\":\"stroke\"}"));
+            self
+        }
+
+        // ---- rectangles ----
+        /// `fillRect(x, y, w, h)`.
+        pub fn fill_rect(&mut self, x: f64, y: f64, w: f64, h: f64) -> &mut Self {
+            self.push(format!(
+                "{{\"op\":\"fillRect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}}}"
+            ));
+            self
+        }
+        /// `strokeRect(x, y, w, h)`.
+        pub fn stroke_rect(&mut self, x: f64, y: f64, w: f64, h: f64) -> &mut Self {
+            self.push(format!(
+                "{{\"op\":\"strokeRect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}}}"
+            ));
+            self
+        }
+        /// `clearRect(x, y, w, h)`.
+        pub fn clear_rect(&mut self, x: f64, y: f64, w: f64, h: f64) -> &mut Self {
+            self.push(format!(
+                "{{\"op\":\"clearRect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}}}"
+            ));
+            self
+        }
+
+        // ---- styles (color is a CSS string only — never a gradient/pattern) ----
+        /// `fillStyle = color` (CSS color string).
+        pub fn set_fill_style(&mut self, color: &str) -> &mut Self {
+            let mut s = String::from("{\"op\":\"setFillStyle\",\"color\":");
+            json_string(&mut s, color);
+            s.push('}');
+            self.push(s);
+            self
+        }
+        /// `strokeStyle = color` (CSS color string).
+        pub fn set_stroke_style(&mut self, color: &str) -> &mut Self {
+            let mut s = String::from("{\"op\":\"setStrokeStyle\",\"color\":");
+            json_string(&mut s, color);
+            s.push('}');
+            self.push(s);
+            self
+        }
+        /// `lineWidth = w`.
+        pub fn set_line_width(&mut self, w: f64) -> &mut Self {
+            self.push(format!("{{\"op\":\"setLineWidth\",\"w\":{w}}}"));
+            self
+        }
+
+        // ---- text ----
+        /// `fillText(text, x, y)`.
+        pub fn fill_text(&mut self, text: &str, x: f64, y: f64) -> &mut Self {
+            let mut s = format!("{{\"op\":\"fillText\",\"x\":{x},\"y\":{y},\"text\":");
+            json_string(&mut s, text);
+            s.push('}');
+            self.push(s);
+            self
+        }
+
+        // ---- transform stack ----
+        /// `save()` the drawing state.
+        pub fn save(&mut self) -> &mut Self {
+            self.push(String::from("{\"op\":\"save\"}"));
+            self
+        }
+        /// `restore()` the drawing state.
+        pub fn restore(&mut self) -> &mut Self {
+            self.push(String::from("{\"op\":\"restore\"}"));
+            self
+        }
+        /// `translate(x, y)`.
+        pub fn translate(&mut self, x: f64, y: f64) -> &mut Self {
+            self.push(format!("{{\"op\":\"translate\",\"x\":{x},\"y\":{y}}}"));
+            self
+        }
+        /// `scale(x, y)`.
+        pub fn scale(&mut self, x: f64, y: f64) -> &mut Self {
+            self.push(format!("{{\"op\":\"scale\",\"x\":{x},\"y\":{y}}}"));
+            self
+        }
+        /// `rotate(angle)` (radians).
+        pub fn rotate(&mut self, angle: f64) -> &mut Self {
+            self.push(format!("{{\"op\":\"rotate\",\"angle\":{angle}}}"));
+            self
+        }
+        /// `setTransform(a, b, c, d, e, f)`.
+        pub fn set_transform(
+            &mut self,
+            a: f64,
+            b: f64,
+            c: f64,
+            d: f64,
+            e: f64,
+            f: f64,
+        ) -> &mut Self {
+            self.push(format!(
+                "{{\"op\":\"setTransform\",\"a\":{a},\"b\":{b},\"c\":{c},\"d\":{d},\"e\":{e},\"f\":{f}}}"
+            ));
+            self
+        }
+    }
+
+    /// Minimal JSON string emitter (host caps length; we escape control chars so
+    /// the batch stays valid UTF-8 JSON regardless of guest input).
+    fn json_string(out: &mut String, raw: &str) {
+        out.push('"');
+        for ch in raw.chars() {
+            match ch {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+    }
+
+    /// `host:canvas.draw` — replay `list` onto the `<Canvas>` named `canvas_id`.
+    /// Returns `Ok(response)` (`{"ok":true,"dropped":n}`) or `Err(response)` if
+    /// the host fails closed (e.g. unknown/unmounted canvas id).
+    pub async fn draw(canvas_id: &str, list: &DrawList) -> Result<Vec<u8>, Vec<u8>> {
+        let mut body = String::from("{\"canvasId\":");
+        json_string(&mut body, canvas_id);
+        body.push_str(",\"ops\":[");
+        body.push_str(&list.ops);
+        body.push_str("]}");
+        let (ok, bytes) = crate::host_call("host:canvas", "draw", body.into_bytes()).await;
+        if ok == 1 {
+            Ok(bytes)
+        } else {
+            Err(bytes)
+        }
+    }
+
+    /// A linear-memory RGBA8 framebuffer for stage ② `present`. Software-render
+    /// into `pixels_mut()`, then `present(id, &surface).await`.
+    ///
+    /// Straight-alpha (non-premultiplied), row-major, stride = `width * 4` — the
+    /// `putImageData` contract the host blit expects. Backed by the guest's
+    /// `BumpAlloc`, which only grows: allocate a Surface ONCE and reuse it across
+    /// frames (a `Surface::new` per frame leaks its buffer for the guest's life).
+    pub struct Surface {
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    }
+
+    impl Surface {
+        /// Allocate a `width`×`height` RGBA8 buffer (zeroed = transparent black).
+        pub fn new(width: u32, height: u32) -> Self {
+            let len = (width as usize)
+                .saturating_mul(height as usize)
+                .saturating_mul(4);
+            Self {
+                width,
+                height,
+                pixels: vec![0u8; len],
+            }
+        }
+
+        /// Logical width in pixels.
+        pub fn width(&self) -> u32 {
+            self.width
+        }
+        /// Logical height in pixels.
+        pub fn height(&self) -> u32 {
+            self.height
+        }
+        /// The RGBA8 pixels, for software rendering (`[r,g,b,a, r,g,b,a, …]`).
+        pub fn pixels_mut(&mut self) -> &mut [u8] {
+            &mut self.pixels
+        }
+        /// Read-only view of the RGBA8 pixels.
+        pub fn pixels(&self) -> &[u8] {
+            &self.pixels
+        }
+        /// The linear-memory offset of the pixel buffer — the `ptr` the host
+        /// reads (bounds-checked) during `present`.
+        pub fn ptr(&self) -> usize {
+            self.pixels.as_ptr() as usize
+        }
+    }
+
+    /// `host:canvas.present` — hand the host `surface`'s pixels to blit onto the
+    /// `<Canvas>` named `canvas_id`. The host reads guest memory at `surface.ptr()`
+    /// (bounds-checked) and `putImageData`s it; `.await` resolves after the host
+    /// is done reading, so the buffer is then safe to overwrite for the next frame
+    /// (this return is the backpressure signal — at most one frame in flight).
+    ///
+    /// NOTE: the HOST side of `present` lands in stage ②; until then this call
+    /// fails closed (the `host:canvas` contract has no `present` method yet). The
+    /// SDK shape is defined now so native guests compile against the final API.
+    pub async fn present(canvas_id: &str, surface: &Surface) -> Result<Vec<u8>, Vec<u8>> {
+        let mut body = String::from("{\"canvasId\":");
+        json_string(&mut body, canvas_id);
+        body.push_str(&format!(
+            ",\"ptr\":{},\"width\":{},\"height\":{},\"format\":\"rgba8\"}}",
+            surface.ptr(),
+            surface.width,
+            surface.height
+        ));
+        let (ok, bytes) = crate::host_call("host:canvas", "present", body.into_bytes()).await;
+        if ok == 1 {
+            Ok(bytes)
+        } else {
+            Err(bytes)
+        }
+    }
+}
+
 /// Declarative UI: build a small element tree and `render` it. The guest sends a
 /// render batch (CREATE / TEXT / APPEND ops) the host `receiver` materializes —
 /// the same rendering path JS guests use, only the batch is authored in Rust.

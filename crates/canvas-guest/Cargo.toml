@@ -1,0 +1,12 @@
+[package]
+name = "canvas-guest"
+version = "0.0.0"
+edition = "2021"
+description = "Demo native rill guest that draws a recognizable 2D scene via the rill-guest canvas::draw display list."
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rill-guest = { path = "../rill-guest" }
