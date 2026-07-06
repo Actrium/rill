@@ -231,15 +231,16 @@ pub fn host_call(module: &'static str, method: &'static str, input: Vec<u8>) -> 
 
 /// Typed wrapper over the `host:kv` capability (demo).
 pub mod store {
+    use crate::json_escape;
     use alloc::string::String;
     use alloc::vec::Vec;
 
     /// `host:kv.put(k, v)` -> the response body on success (`{"version":n}`).
     pub async fn put(k: &str, v: &str) -> Result<Vec<u8>, Vec<u8>> {
         let mut body = String::from("{\"k\":");
-        push_json_string(&mut body, k);
+        json_escape(&mut body, k);
         body.push_str(",\"v\":");
-        push_json_string(&mut body, v);
+        json_escape(&mut body, v);
         body.push('}');
         let (ok, bytes) = super::host_call("host:kv", "put", body.into_bytes()).await;
         if ok == 1 {
@@ -252,7 +253,7 @@ pub mod store {
     /// `host:kv.get(k)` -> the response body on success (`{"v":"…"}`).
     pub async fn get(k: &str) -> Result<Vec<u8>, Vec<u8>> {
         let mut body = String::from("{\"k\":");
-        push_json_string(&mut body, k);
+        json_escape(&mut body, k);
         body.push('}');
         let (ok, bytes) = super::host_call("host:kv", "get", body.into_bytes()).await;
         if ok == 1 {
@@ -260,18 +261,6 @@ pub mod store {
         } else {
             Err(bytes)
         }
-    }
-
-    fn push_json_string(out: &mut String, raw: &str) {
-        out.push('"');
-        for ch in raw.chars() {
-            match ch {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                _ => out.push(ch),
-            }
-        }
-        out.push('"');
     }
 }
 
@@ -290,6 +279,7 @@ pub mod store {
 /// image/URL reference), and there is deliberately NO readback — the seal's
 /// isolation lives in the ABSENCE of those, not in a runtime check.
 pub mod canvas {
+    use crate::json_escape;
     use alloc::format;
     use alloc::string::String;
     use alloc::vec;
@@ -403,7 +393,7 @@ pub mod canvas {
         /// `fillStyle = color` (CSS color string).
         pub fn set_fill_style(&mut self, color: &str) -> &mut Self {
             let mut s = String::from("{\"op\":\"setFillStyle\",\"color\":");
-            json_string(&mut s, color);
+            json_escape(&mut s, color);
             s.push('}');
             self.push(s);
             self
@@ -411,7 +401,7 @@ pub mod canvas {
         /// `strokeStyle = color` (CSS color string).
         pub fn set_stroke_style(&mut self, color: &str) -> &mut Self {
             let mut s = String::from("{\"op\":\"setStrokeStyle\",\"color\":");
-            json_string(&mut s, color);
+            json_escape(&mut s, color);
             s.push('}');
             self.push(s);
             self
@@ -426,7 +416,7 @@ pub mod canvas {
         /// `fillText(text, x, y)`.
         pub fn fill_text(&mut self, text: &str, x: f64, y: f64) -> &mut Self {
             let mut s = format!("{{\"op\":\"fillText\",\"x\":{x},\"y\":{y},\"text\":");
-            json_string(&mut s, text);
+            json_escape(&mut s, text);
             s.push('}');
             self.push(s);
             self
@@ -475,30 +465,12 @@ pub mod canvas {
         }
     }
 
-    /// Minimal JSON string emitter (host caps length; we escape control chars so
-    /// the batch stays valid UTF-8 JSON regardless of guest input).
-    fn json_string(out: &mut String, raw: &str) {
-        out.push('"');
-        for ch in raw.chars() {
-            match ch {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-                c => out.push(c),
-            }
-        }
-        out.push('"');
-    }
-
     /// `host:canvas.draw` — replay `list` onto the `<Canvas>` named `canvas_id`.
     /// Returns `Ok(response)` (`{"ok":true,"dropped":n}`) or `Err(response)` if
     /// the host fails closed (e.g. unknown/unmounted canvas id).
     pub async fn draw(canvas_id: &str, list: &DrawList) -> Result<Vec<u8>, Vec<u8>> {
         let mut body = String::from("{\"canvasId\":");
-        json_string(&mut body, canvas_id);
+        json_escape(&mut body, canvas_id);
         body.push_str(",\"ops\":[");
         body.push_str(&list.ops);
         body.push_str("]}");
@@ -581,7 +553,7 @@ pub mod canvas {
     /// flood the main thread, its excess presents just fail closed.
     pub async fn present(canvas_id: &str, surface: &Surface) -> Result<Vec<u8>, Vec<u8>> {
         let mut body = String::from("{\"canvasId\":");
-        json_string(&mut body, canvas_id);
+        json_escape(&mut body, canvas_id);
         body.push_str(&format!(
             ",\"ptr\":{},\"width\":{},\"height\":{},\"format\":\"rgba8\"}}",
             surface.ptr(),
@@ -610,6 +582,7 @@ pub mod canvas {
 /// `load(id)` does all three and hands back a ready-to-composite `Surface`.
 pub mod asset {
     use crate::canvas::Surface;
+    use crate::json_escape;
     use alloc::format;
     use alloc::string::String;
 
@@ -617,7 +590,7 @@ pub mod asset {
     /// (unknown/invalid/undecodable id — fail-closed).
     pub async fn info(asset_id: &str) -> Option<(u32, u32)> {
         let mut body = String::from("{\"assetId\":");
-        json_string(&mut body, asset_id);
+        json_escape(&mut body, asset_id);
         body.push('}');
         let (ok, bytes) = crate::host_call("host:asset", "info", body.into_bytes()).await;
         if ok != 1 {
@@ -660,24 +633,6 @@ pub mod asset {
             return None;
         }
         Some(surface)
-    }
-
-    /// Minimal JSON string emitter (escapes control chars so the request stays
-    /// valid UTF-8 JSON regardless of the id; the host caps/validates it anyway).
-    fn json_string(out: &mut String, raw: &str) {
-        out.push('"');
-        for ch in raw.chars() {
-            match ch {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-                c => out.push(c),
-            }
-        }
-        out.push('"');
     }
 
     /// Read an unsigned-integer JSON field (`"field":<digits>`) from a response
@@ -756,6 +711,7 @@ pub mod asset {
 ///    isolated origin but is NOT claimed green: TDR is a shared-hardware residual
 ///    that CSP / process isolation cannot contain.
 pub mod gpu {
+    use crate::json_escape;
     use alloc::format;
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -1033,7 +989,7 @@ pub mod gpu {
     /// CONFLICTING mode (2D / present / the other gpu backend) — fail-closed.
     pub async fn configure(canvas_id: &str, mode: Mode) -> bool {
         let mut body = String::from("{\"canvasId\":");
-        json_string(&mut body, canvas_id);
+        json_escape(&mut body, canvas_id);
         body.push_str(",\"mode\":\"");
         body.push_str(mode.as_str());
         body.push_str("\"}");
@@ -1069,7 +1025,7 @@ pub mod gpu {
             return None; // over the buffer cap; don't even ask the host
         }
         let mut body = String::from("{\"canvasId\":");
-        json_string(&mut body, canvas_id);
+        json_escape(&mut body, canvas_id);
         body.push_str(",\"kind\":\"");
         body.push_str(kind);
         body.push_str(&format!(
@@ -1096,9 +1052,9 @@ pub mod gpu {
     /// guest URL. `None` on any failure (fail-closed).
     pub async fn create_texture(canvas_id: &str, asset_id: &str) -> Option<Handle> {
         let mut body = String::from("{\"canvasId\":");
-        json_string(&mut body, canvas_id);
+        json_escape(&mut body, canvas_id);
         body.push_str(",\"kind\":\"texture\",\"assetId\":");
-        json_string(&mut body, asset_id);
+        json_escape(&mut body, asset_id);
         body.push('}');
         let (ok, bytes) = crate::host_call("host:gpu", "createResource", body.into_bytes()).await;
         if ok != 1 || !json_flag_true(&bytes, "ok") {
@@ -1115,7 +1071,7 @@ pub mod gpu {
     /// as-is; if it does not already end with a `SUBMIT` op the host appends one.
     pub async fn submit(canvas_id: &str, cmds: &CommandBuffer) -> Result<Vec<u8>, Vec<u8>> {
         let mut body = String::from("{\"canvasId\":");
-        json_string(&mut body, canvas_id);
+        json_escape(&mut body, canvas_id);
         body.push_str(",\"ops\":[");
         body.push_str(&cmds.ops);
         body.push_str("]}");
@@ -1135,24 +1091,6 @@ pub mod gpu {
     /// subscription id for [`crate::events::off`].
     pub fn on_device_lost(handler: impl Fn(&[u8]) + 'static) -> u32 {
         crate::events::on("gpu.deviceLost", handler)
-    }
-
-    /// Minimal JSON string emitter (escapes control chars; the host caps/validates
-    /// the id anyway).
-    fn json_string(out: &mut String, raw: &str) {
-        out.push('"');
-        for ch in raw.chars() {
-            match ch {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-                c => out.push(c),
-            }
-        }
-        out.push('"');
     }
 
     /// Read an unsigned-integer JSON field (`"field":<digits>`). Tiny hand parser
@@ -1329,13 +1267,34 @@ fn push_op(ops: &mut alloc::string::String, op: alloc::string::String) {
     ops.push_str(&op);
 }
 
-fn json_escape(out: &mut alloc::string::String, raw: &str) {
+/// Escape `raw` into `out` as a double-quoted JSON string literal.
+///
+/// The ONE JSON string emitter for every wire path in this SDK (store / canvas /
+/// asset / gpu request bodies and the render batch). Escapes `"` and `\`, plus
+/// ALL control characters below 0x20 — `\n` / `\r` / `\t` as short escapes, the
+/// rest as `\u00XX`. Multi-byte UTF-8 passes through unchanged.
+///
+/// A missed control character is not cosmetic: the host `JSON.parse`s the whole
+/// batch/body, and one raw newline inside a string makes the ENTIRE message
+/// invalid — silently dropped host-side. So this must stay strict, and every
+/// module must use this function rather than growing a local copy.
+pub(crate) fn json_escape(out: &mut alloc::string::String, raw: &str) {
     out.push('"');
     for ch in raw.chars() {
         match ch {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
-            _ => out.push(ch),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                let v = c as u32;
+                out.push_str("\\u00");
+                out.push(HEX[(v >> 4) as usize & 0xf] as char);
+                out.push(HEX[v as usize & 0xf] as char);
+            }
+            c => out.push(c),
         }
     }
     out.push('"');
