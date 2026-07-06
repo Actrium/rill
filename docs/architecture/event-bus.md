@@ -1,6 +1,6 @@
 # Event Bus
 
-The Event Bus is a cross-tenant publish/subscribe system implemented in C++. It replaces point-to-point `sendEvent` with a channel-based model that supports system broadcasts, controlled inter-tenant communication, rate limiting, and persistent event buffering.
+The Event Bus is a cross-tenant publish/subscribe system implemented in C++. It complements point-to-point `sendEvent` (which remains available on `RillTenantManager`) with a channel-based model that supports system broadcasts, controlled inter-tenant communication, rate limiting, and persistent event buffering.
 
 ## Design
 
