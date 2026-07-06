@@ -108,6 +108,7 @@ export type {
 export {
   HostMsg,
   isJSIPrimitive,
+  OPERATION_TYPES,
   isSerializedDate,
   isSerializedError,
   isSerializedFunction,

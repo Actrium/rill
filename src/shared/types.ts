@@ -185,16 +185,19 @@ export interface SerializedValueObject {
 /**
  *
  */
-export type OperationType =
-  | 'CREATE'
-  | 'UPDATE'
-  | 'DELETE'
-  | 'APPEND'
-  | 'INSERT'
-  | 'REMOVE'
-  | 'REORDER'
-  | 'TEXT'
-  | 'REF_CALL';
+export const OPERATION_TYPES = [
+  'CREATE',
+  'UPDATE',
+  'DELETE',
+  'APPEND',
+  'INSERT',
+  'REMOVE',
+  'REORDER',
+  'TEXT',
+  'REF_CALL',
+] as const;
+
+export type OperationType = (typeof OPERATION_TYPES)[number];
 
 /**
  *
