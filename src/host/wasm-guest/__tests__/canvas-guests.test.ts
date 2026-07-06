@@ -157,7 +157,8 @@ describe('canvas guests — ① host:canvas.draw display list', () => {
     const list = field(draw.input, 'ops');
     const names = opNames(list);
     // The house scene exercises many distinct 2D ctx ops; the op NAMES on the wire
-    // match host-canvas.ts OP_SPECS exactly (camelCase ctx method names).
+    // match contracts/graphics-seams.json host:canvas.ops (the authoritative op
+    // schema a downstream host validator's OP_SPECS must mirror too).
     for (const op of [
       'setFillStyle',
       'fillRect',
