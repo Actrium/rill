@@ -60,6 +60,20 @@ export class WasmGuestView {
    */
   readonly readGuestMemory = (ptr: number, len: number): Uint8Array => this.host.readBytes(ptr, len);
 
+  /**
+   * Bounds-checked WRITE into the native guest's linear memory — the counterpart
+   * of readGuestMemory, exposed so the platform can late-bind it onto host:asset
+   * for the ④ `blit` path (the host decodes an asset to RGBA and writes it into a
+   * buffer the guest allocated). Delegates to WasmGuestHost.writeBytes, which
+   * assertInBounds BEFORE writing: a hostile dstPtr/dstCap throws (caught by the
+   * host:asset impl -> fail-closed result) and never writes past guest memory.
+   * Only a native guest exposes this; a JS (QuickJS) guest has no writer, so
+   * host:asset.blit stays unavailable to it (mirrors host:canvas.present).
+   *
+   * Arrow field (bound to `this`) so it survives being passed by reference.
+   */
+  readonly writeGuestMemory = (ptr: number, bytes: Uint8Array): void => this.host.writeBytes(ptr, bytes);
+
   constructor(options: WasmGuestViewOptions) {
     this.wasmBytes = options.wasmBytes;
     this.registry = new ComponentRegistry();

@@ -132,6 +132,21 @@ export class WasmGuestHost {
     return new Uint8Array(this.memory.buffer.slice(ptr, ptr + len));
   }
 
+  /**
+   * Copy `bytes` INTO the guest's linear memory at `ptr` (bounds-checked, the
+   * WRITE counterpart of readBytes — the host:asset `blit` path). `ptr`/len are
+   * guest-supplied and UNTRUSTED: assertInBounds fails closed (throws, caught by
+   * the caller) so a hostile ptr/cap can NEVER write past guest memory. The write
+   * targets a LIVE view over `memory.buffer` (unlike readBytes' slice-copy) — that
+   * is the point, we are handing decoded bytes to the guest — but the bounds check
+   * re-reads `memory.buffer.byteLength` first, so a memory.grow that happened
+   * during the async decode is accounted for before the write lands.
+   */
+  writeBytes(ptr: number, bytes: Uint8Array): void {
+    this.assertInBounds(ptr, bytes.length);
+    new Uint8Array(this.memory.buffer, ptr, bytes.length).set(bytes);
+  }
+
   private readString(ptr: number, len: number): string {
     this.assertInBounds(ptr, len);
     return new TextDecoder().decode(new Uint8Array(this.memory.buffer, ptr, len));

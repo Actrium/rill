@@ -597,6 +597,126 @@ pub mod canvas {
     }
 }
 
+/// Typed wrapper over the `host:asset` capability — resolve an app-package
+/// `assetId` to decoded RGBA in the guest's OWN linear memory (the ④ pixera path).
+///
+/// The host owns the resolution + decode: `assetId` is looked up in the app
+/// manifest, gated (same-origin package raster only — never a guest URL, never
+/// svg), and the decode is dimension-capped BEFORE the full raster (anti-bomb).
+/// The guest never fetches or decodes anything; it only:
+///   1. `info(id)` → `(w, h)`,
+///   2. allocates a `Surface` of `w×h` (its own memory),
+///   3. `blit(id, ptr, cap)` → the host writes the RGBA into that buffer.
+/// `load(id)` does all three and hands back a ready-to-composite `Surface`.
+pub mod asset {
+    use crate::canvas::Surface;
+    use alloc::format;
+    use alloc::string::String;
+
+    /// `host:asset.info(id)` → the decoded asset's `(width, height)`, or `None`
+    /// (unknown/invalid/undecodable id — fail-closed).
+    pub async fn info(asset_id: &str) -> Option<(u32, u32)> {
+        let mut body = String::from("{\"assetId\":");
+        json_string(&mut body, asset_id);
+        body.push('}');
+        let (ok, bytes) = crate::host_call("host:asset", "info", body.into_bytes()).await;
+        if ok != 1 {
+            return None;
+        }
+        let w = parse_u32_field(&bytes, "width")?;
+        let h = parse_u32_field(&bytes, "height")?;
+        Some((w, h))
+    }
+
+    /// `host:asset.blit(id, dst_ptr, dst_cap)` → the host writes the asset's RGBA
+    /// into guest memory at `dst_ptr` (bounds-checked host-side). `dst_cap` is the
+    /// number of bytes the guest reserved there; the host refuses if it is smaller
+    /// than `w*h*4`. Returns the bytes written on success, `None` on any failure
+    /// (JS guest / bad id / OOB ptr / too-small cap — all fail-closed).
+    pub async fn blit(asset_id: &str, dst_ptr: usize, dst_cap: usize) -> Option<usize> {
+        let mut body = String::from("{\"assetId\":");
+        json_string(&mut body, asset_id);
+        body.push_str(&format!(",\"dstPtr\":{dst_ptr},\"dstCap\":{dst_cap}}}"));
+        let (ok, bytes) = crate::host_call("host:asset", "blit", body.into_bytes()).await;
+        if ok != 1 || !json_flag_true(&bytes, "ok") {
+            return None;
+        }
+        parse_u32_field(&bytes, "written").map(|n| n as usize)
+    }
+
+    /// Convenience: `info` + allocate a `Surface` + `blit` into it. Returns a
+    /// `Surface` holding the asset's RGBA (ready to composite + `present`), or
+    /// `None` if any step fails. The `Surface` is a normal guest allocation, so
+    /// the usual "allocate once, reuse across frames" rule applies.
+    pub async fn load(asset_id: &str) -> Option<Surface> {
+        let (w, h) = info(asset_id).await?;
+        // The host writes RGBA straight into this buffer's linear-memory range via
+        // `blit(ptr, cap)`, so the binding stays immutable here (no `&mut` path).
+        let surface = Surface::new(w, h);
+        let cap = surface.pixels().len();
+        let written = blit(asset_id, surface.ptr(), cap).await?;
+        // The host must have filled the WHOLE buffer, or the frame is incomplete.
+        if written != cap {
+            return None;
+        }
+        Some(surface)
+    }
+
+    /// Minimal JSON string emitter (escapes control chars so the request stays
+    /// valid UTF-8 JSON regardless of the id; the host caps/validates it anyway).
+    fn json_string(out: &mut String, raw: &str) {
+        out.push('"');
+        for ch in raw.chars() {
+            match ch {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+    }
+
+    /// Read an unsigned-integer JSON field (`"field":<digits>`) from a response
+    /// body. Tiny hand parser — the guest is `no_std` with no JSON crate, and the
+    /// host responses are small, fixed shapes. Saturates at `u32::MAX`.
+    fn parse_u32_field(bytes: &[u8], field: &str) -> Option<u32> {
+        let s = core::str::from_utf8(bytes).ok()?;
+        let needle = format!("\"{field}\":");
+        let start = s.find(&needle)? + needle.len();
+        let mut val: u64 = 0;
+        let mut any = false;
+        for c in s[start..].chars() {
+            if c.is_ascii_digit() {
+                any = true;
+                val = val.saturating_mul(10).saturating_add((c as u8 - b'0') as u64);
+                if val > u32::MAX as u64 {
+                    return Some(u32::MAX);
+                }
+            } else if c == ' ' && !any {
+                continue; // tolerate a space after the colon
+            } else {
+                break;
+            }
+        }
+        if any {
+            Some(val as u32)
+        } else {
+            None
+        }
+    }
+
+    /// Whether a boolean JSON field is present and `true` (`"field":true`).
+    fn json_flag_true(bytes: &[u8], field: &str) -> bool {
+        core::str::from_utf8(bytes)
+            .map(|s| s.contains(&format!("\"{field}\":true")))
+            .unwrap_or(false)
+    }
+}
+
 /// Declarative UI: build a small element tree and `render` it. The guest sends a
 /// render batch (CREATE / TEXT / APPEND ops) the host `receiver` materializes —
 /// the same rendering path JS guests use, only the batch is authored in Rust.
