@@ -95,11 +95,42 @@ namespace hermes_sandbox {
 
 // MARK: - Value Conversion Helpers
 
+// Guard against stack overflow from deeply nested or circular objects.
+// A tenant returning a self-referencing object (a.self = a) must not be able
+// to crash the host process via unbounded native recursion. Same limit and
+// same convention as QuickJSSandboxJSI (kMaxDepth = 100, violation replaces
+// the subtree with a descriptive string instead of throwing). True cycles are
+// additionally caught early via an ancestor-path scan using
+// jsi::Object::strictEquals (path length is bounded by kMaxDepth, so the
+// O(depth) scan per object is cheap).
+static constexpr int kMaxConversionDepth = 100;
+
+// Returns true if `obj` is the same JS object as one of its ancestors on the
+// current conversion path (i.e. a genuine circular reference).
+static bool isCircular(jsi::Runtime &rt, const std::vector<jsi::Object> &path,
+                       const jsi::Object &obj) {
+  for (const auto &ancestor : path) {
+    if (jsi::Object::strictEquals(rt, ancestor, obj)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Deep copy a JSI value from one runtime to another
 // This is necessary because JSI values are tied to their runtime
 jsi::Value HermesSandboxContext::hostToSandbox(jsi::Runtime &hostRt,
                                                 jsi::Runtime &sandboxRt,
                                                 const jsi::Value &value) {
+  std::vector<jsi::Object> path;
+  return hostToSandboxImpl(hostRt, sandboxRt, value, 0, path);
+}
+
+jsi::Value HermesSandboxContext::hostToSandboxImpl(jsi::Runtime &hostRt,
+                                                    jsi::Runtime &sandboxRt,
+                                                    const jsi::Value &value,
+                                                    int depth,
+                                                    std::vector<jsi::Object> &path) {
   if (value.isUndefined()) {
     return jsi::Value::undefined();
   }
@@ -123,6 +154,22 @@ jsi::Value HermesSandboxContext::hostToSandbox(jsi::Runtime &hostRt,
   if (value.isObject()) {
     jsi::Object obj = value.getObject(hostRt);
 
+    // Handle functions - wrap as a callback to host (no recursion, so no
+    // depth/cycle checks needed)
+    if (obj.isFunction(hostRt)) {
+      return wrapHostFunctionForSandbox(hostRt, sandboxRt, obj.asFunction(hostRt));
+    }
+
+    if (isCircular(hostRt, path, obj)) {
+      return jsi::String::createFromUtf8(
+          sandboxRt, "[hostToSandbox: circular reference dropped]");
+    }
+    if (depth >= kMaxConversionDepth) {
+      return jsi::String::createFromUtf8(
+          sandboxRt, "[hostToSandbox: max depth exceeded]");
+    }
+    path.emplace_back(value.getObject(hostRt));
+
     // Handle arrays
     if (obj.isArray(hostRt)) {
       jsi::Array arr = obj.getArray(hostRt);
@@ -131,14 +178,12 @@ jsi::Value HermesSandboxContext::hostToSandbox(jsi::Runtime &hostRt,
       for (size_t i = 0; i < length; i++) {
         newArr.setValueAtIndex(
             sandboxRt, i,
-            hostToSandbox(hostRt, sandboxRt, arr.getValueAtIndex(hostRt, i)));
+            hostToSandboxImpl(hostRt, sandboxRt,
+                              arr.getValueAtIndex(hostRt, i), depth + 1,
+                              path));
       }
+      path.pop_back();
       return newArr;
-    }
-
-    // Handle functions - wrap as a callback to host
-    if (obj.isFunction(hostRt)) {
-      return wrapHostFunctionForSandbox(hostRt, sandboxRt, obj.asFunction(hostRt));
     }
 
     // Handle plain objects
@@ -150,8 +195,10 @@ jsi::Value HermesSandboxContext::hostToSandbox(jsi::Runtime &hostRt,
       std::string nameStr = name.utf8(hostRt);
       jsi::Value propValue = obj.getProperty(hostRt, name);
       newObj.setProperty(sandboxRt, nameStr.c_str(),
-                         hostToSandbox(hostRt, sandboxRt, propValue));
+                         hostToSandboxImpl(hostRt, sandboxRt, propValue,
+                                           depth + 1, path));
     }
+    path.pop_back();
     return newObj;
   }
 
@@ -161,6 +208,15 @@ jsi::Value HermesSandboxContext::hostToSandbox(jsi::Runtime &hostRt,
 jsi::Value HermesSandboxContext::sandboxToHost(jsi::Runtime &sandboxRt,
                                                 jsi::Runtime &hostRt,
                                                 const jsi::Value &value) {
+  std::vector<jsi::Object> path;
+  return sandboxToHostImpl(sandboxRt, hostRt, value, 0, path);
+}
+
+jsi::Value HermesSandboxContext::sandboxToHostImpl(jsi::Runtime &sandboxRt,
+                                                    jsi::Runtime &hostRt,
+                                                    const jsi::Value &value,
+                                                    int depth,
+                                                    std::vector<jsi::Object> &path) {
   if (value.isUndefined()) {
     return jsi::Value::undefined();
   }
@@ -183,6 +239,23 @@ jsi::Value HermesSandboxContext::sandboxToHost(jsi::Runtime &sandboxRt,
   if (value.isObject()) {
     jsi::Object obj = value.getObject(sandboxRt);
 
+    if (obj.isFunction(sandboxRt)) {
+      return wrapSandboxFunctionForHost(sandboxRt, hostRt, obj.asFunction(sandboxRt));
+    }
+
+    // This direction crosses the trust boundary: the sandbox (tenant) is
+    // untrusted, and a self-referencing return value must never overflow the
+    // host's native stack.
+    if (isCircular(sandboxRt, path, obj)) {
+      return jsi::String::createFromUtf8(
+          hostRt, "[sandboxToHost: circular reference dropped]");
+    }
+    if (depth >= kMaxConversionDepth) {
+      return jsi::String::createFromUtf8(
+          hostRt, "[sandboxToHost: max depth exceeded]");
+    }
+    path.emplace_back(value.getObject(sandboxRt));
+
     if (obj.isArray(sandboxRt)) {
       jsi::Array arr = obj.getArray(sandboxRt);
       size_t length = arr.size(sandboxRt);
@@ -190,13 +263,12 @@ jsi::Value HermesSandboxContext::sandboxToHost(jsi::Runtime &sandboxRt,
       for (size_t i = 0; i < length; i++) {
         newArr.setValueAtIndex(
             hostRt, i,
-            sandboxToHost(sandboxRt, hostRt, arr.getValueAtIndex(sandboxRt, i)));
+            sandboxToHostImpl(sandboxRt, hostRt,
+                              arr.getValueAtIndex(sandboxRt, i), depth + 1,
+                              path));
       }
+      path.pop_back();
       return newArr;
-    }
-
-    if (obj.isFunction(sandboxRt)) {
-      return wrapSandboxFunctionForHost(sandboxRt, hostRt, obj.asFunction(sandboxRt));
     }
 
     jsi::Object newObj = jsi::Object(hostRt);
@@ -207,8 +279,10 @@ jsi::Value HermesSandboxContext::sandboxToHost(jsi::Runtime &sandboxRt,
       std::string nameStr = name.utf8(sandboxRt);
       jsi::Value propValue = obj.getProperty(sandboxRt, name);
       newObj.setProperty(hostRt, nameStr.c_str(),
-                         sandboxToHost(sandboxRt, hostRt, propValue));
+                         sandboxToHostImpl(sandboxRt, hostRt, propValue,
+                                           depth + 1, path));
     }
+    path.pop_back();
     return newObj;
   }
 
@@ -418,7 +492,12 @@ HermesSandboxContext::HermesSandboxContext(jsi::Runtime &hostRuntime,
                                            double timeout)
     : sandboxRuntime_(nullptr), hostRuntime_(&hostRuntime), disposed_(false),
       callbackCounter_(0), sandboxFunctionCounter_(0) {
-  (void)timeout; // Reserved for future use
+  // NOT ENFORCED: Hermes has no interrupt/watchdog API comparable to
+  // QuickJS's JS_SetInterruptHandler, so the createRuntime({timeout}) option
+  // is accepted but ignored here. A tenant infinite loop will block the
+  // calling (host) thread indefinitely. Callers must not rely on this engine
+  // for CPU isolation.
+  (void)timeout;
 
   // Create an isolated Hermes runtime for the sandbox
   sandboxRuntime_ = facebook::hermes::makeHermesRuntime();

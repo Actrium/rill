@@ -47,10 +47,11 @@ void QuickJSSandboxContext::ensureClassRegistered() {
 
 // MARK: - QuickJSSandboxContext Implementation
 
-QuickJSSandboxContext::QuickJSSandboxContext(jsi::Runtime &hostRuntime,
-                                             JSRuntime *qjsRuntime,
-                                             double /* timeout */)
+QuickJSSandboxContext::QuickJSSandboxContext(
+    jsi::Runtime &hostRuntime, JSRuntime *qjsRuntime, double timeoutMs,
+    std::shared_ptr<InterruptState> interruptState)
     : qjsContext_(nullptr), qjsRuntime_(qjsRuntime), hostRuntime_(&hostRuntime),
+      timeoutMs_(timeoutMs), interruptState_(std::move(interruptState)),
       disposed_(false), callbackCounter_(0) {
   qjsContext_ = JS_NewContext(qjsRuntime_);
   if (!qjsContext_) {
@@ -248,6 +249,13 @@ jsi::Value QuickJSSandboxContext::eval(jsi::Runtime &rt,
       throw jsi::JSError(rt, "Context has been disposed");
     }
 
+    // Arm the wall-clock execution deadline for this top-level eval.
+    // The runtime-level interrupt handler (see QuickJSSandboxRuntime ctor)
+    // aborts JS execution once the deadline passes. No-op when
+    // timeoutMs_ <= 0 (unlimited) or when an outer deadline is already
+    // active (nested re-entry through a host callback).
+    DeadlineGuard deadline(interruptState_.get(), timeoutMs_);
+
     JSValue result = JS_Eval(qjsContext_, code.c_str(), code.size(), "<eval>",
                              JS_EVAL_TYPE_GLOBAL);
 
@@ -259,6 +267,12 @@ jsi::Value QuickJSSandboxContext::eval(jsi::Runtime &rt,
         JS_FreeCString(qjsContext_, str);
       JS_FreeValue(qjsContext_, exception);
       JS_FreeValue(qjsContext_, result);
+      if (deadline.timedOut()) {
+        throw jsi::JSError(
+            rt, "QuickJS eval timed out after " +
+                    std::to_string(static_cast<long long>(timeoutMs_)) +
+                    "ms (execution interrupted)");
+      }
       throw jsi::JSError(rt, errorMsg);
     }
 
@@ -281,6 +295,12 @@ jsi::Value QuickJSSandboxContext::eval(jsi::Runtime &rt,
           JS_FreeValue(jobCtx, exception);
         }
         JS_FreeValue(qjsContext_, result);
+        if (deadline.timedOut()) {
+          throw jsi::JSError(
+              rt, "QuickJS eval timed out after " +
+                      std::to_string(static_cast<long long>(timeoutMs_)) +
+                      "ms (pending job interrupted)");
+        }
         throw jsi::JSError(rt, errorMsg);
       }
       executedJobs++;
@@ -618,6 +638,11 @@ jsi::Value QuickJSSandboxContext::qjsToJSI(jsi::Runtime &rt, JSValue value,
             qjsArgs.push_back(self->jsiToQJS(rt, args[i]));
           }
 
+          // Sandbox code also runs here (host invoking a tenant function),
+          // so the same wall-clock deadline applies as for eval().
+          DeadlineGuard deadline(self->interruptState_.get(),
+                                 self->timeoutMs_);
+
           JSValue result = JS_Call(self->qjsContext_, sandboxFunc, JS_UNDEFINED,
                                    (int)count, qjsArgs.data());
 
@@ -635,6 +660,13 @@ jsi::Value QuickJSSandboxContext::qjsToJSI(jsi::Runtime &rt, JSValue value,
               JS_FreeCString(self->qjsContext_, str);
             JS_FreeValue(self->qjsContext_, exception);
             JS_FreeValue(self->qjsContext_, result);
+            if (deadline.timedOut()) {
+              throw jsi::JSError(
+                  rt, "QuickJS sandbox function timed out after " +
+                          std::to_string(
+                              static_cast<long long>(self->timeoutMs_)) +
+                          "ms (execution interrupted)");
+            }
             throw jsi::JSError(rt, errorMsg);
           }
 
@@ -675,11 +707,35 @@ jsi::Value QuickJSSandboxContext::qjsToJSI(jsi::Runtime &rt, JSValue value,
 QuickJSSandboxRuntime::QuickJSSandboxRuntime(jsi::Runtime &hostRuntime,
                                              double timeout)
     : qjsRuntime_(nullptr), hostRuntime_(&hostRuntime), timeout_(timeout),
-      disposed_(false) {
+      interruptState_(std::make_shared<InterruptState>()), disposed_(false) {
   qjsRuntime_ = JS_NewRuntime();
   if (!qjsRuntime_) {
     throw jsi::JSError(hostRuntime, "Failed to create QuickJS runtime");
   }
+
+  // Wall-clock watchdog: QuickJS polls this handler periodically while JS
+  // executes. Returning 1 aborts execution with an "interrupted" exception,
+  // which eval()/sandbox function calls translate into a clear timeout error
+  // when their DeadlineGuard armed the deadline. This is what makes
+  // createRuntime({timeout}) an enforced limit rather than a suggestion:
+  // a tenant `while(true){}` no longer hangs the host thread forever.
+  JS_SetInterruptHandler(
+      qjsRuntime_,
+      [](JSRuntime *, void *opaque) -> int {
+        auto *state = static_cast<InterruptState *>(opaque);
+        if (!state->armed.load(std::memory_order_acquire)) {
+          return 0;
+        }
+        int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch())
+                          .count();
+        if (now >= state->deadlineMs.load(std::memory_order_relaxed)) {
+          state->fired.store(true, std::memory_order_release);
+          return 1; // interrupt JS execution
+        }
+        return 0;
+      },
+      interruptState_.get());
 
   // Match the reference QuickJSRuntime defaults used elsewhere in the repo.
   // These settings shouldn't be required, but they help avoid runtime-specific
@@ -782,8 +838,8 @@ jsi::Value QuickJSSandboxRuntime::createContext(jsi::Runtime &rt) {
     throw jsi::JSError(rt, "Runtime has been disposed");
   }
 
-  auto context = std::make_shared<QuickJSSandboxContext>(*hostRuntime_,
-                                                         qjsRuntime_, timeout_);
+  auto context = std::make_shared<QuickJSSandboxContext>(
+      *hostRuntime_, qjsRuntime_, timeout_, interruptState_);
   contexts_.push_back(context);
 
   return jsi::Object::createFromHostObject(rt, context);

@@ -27,7 +27,12 @@ static NSString *safeExceptionMessage(JSValue *exception) {
 
 JSCSandboxContext::JSCSandboxContext(jsi::Runtime &hostRuntime, double timeout)
     : jsContext_(nullptr), hostRuntime_(&hostRuntime), disposed_(false) {
-  (void)timeout; // Reserved for future use
+  // NOT ENFORCED: JavaScriptCore's public API has no safe way to interrupt
+  // running JS (no equivalent of QuickJS's JS_SetInterruptHandler), so the
+  // createRuntime({timeout}) option is accepted but ignored here. A tenant
+  // infinite loop will block the calling (host) thread indefinitely. Callers
+  // must not rely on this engine for CPU isolation.
+  (void)timeout;
   @autoreleasepool {
     JSContext *ctx = [[JSContext alloc] init];
     if (!ctx) {

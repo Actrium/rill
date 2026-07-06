@@ -438,6 +438,35 @@
   assert(ctx.eval('-0') === 0, 'Negative zero'); // Note: -0 === 0 in JS
   assert(ctx.eval("''") === '', 'Empty string literal');
 
+  // 30. Execution timeout (wall-clock interrupt)
+  console.log('\n30. Execution Timeout');
+  var timeoutRt = sandbox.createRuntime({ timeout: 250 });
+  var timeoutCtx = timeoutRt.createContext();
+  var start = Date.now();
+  var threw = false;
+  var errMsg = '';
+  try {
+    timeoutCtx.eval('while (true) {}');
+  } catch (e) {
+    threw = true;
+    errMsg = String(e?.message || e);
+  }
+  var elapsed = Date.now() - start;
+  assert(threw, 'Infinite loop eval throws instead of hanging');
+  assert(errMsg.indexOf('timed out') !== -1, 'Timeout error message is explicit', `got: ${errMsg}`);
+  assert(elapsed >= 200, 'Interrupt fires no earlier than the deadline', `elapsed: ${elapsed}`);
+  assert(elapsed < 5000, 'Interrupt fires promptly after the deadline', `elapsed: ${elapsed}`);
+  assert(timeoutCtx.eval('1 + 1') === 2, 'Context stays usable after a timeout');
+  timeoutRt.dispose();
+
+  var unlimitedRt = sandbox.createRuntime({ timeout: 0 });
+  var unlimitedCtx = unlimitedRt.createContext();
+  assert(
+    unlimitedCtx.eval('var s = 0; for (var i = 0; i < 100000; i++) s += i; s') === 4999950000,
+    'timeout: 0 means unlimited (long loop completes)'
+  );
+  unlimitedRt.dispose();
+
   // Summary
   console.log('\n=== Test Summary ===');
   console.log(`Total: ${testsRun}`);
