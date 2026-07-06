@@ -38,7 +38,8 @@ struct InterruptState {
  * DeadlineGuard - RAII helper that arms the interrupt deadline for one
  * top-level entry into sandbox JS execution.
  *
- * - timeoutMs <= 0 (or NaN) means "no limit": nothing is armed.
+ * - timeoutMs <= 0, NaN, Infinity or otherwise not representable as an
+ *   int64 millisecond deadline means "no limit": nothing is armed.
  * - Nested entries (host callback re-entering the sandbox during an eval)
  *   keep the OUTERMOST deadline: the guard only arms when none is active,
  *   so a tenant cannot extend its budget by bouncing through host callbacks.
@@ -46,8 +47,16 @@ struct InterruptState {
 class DeadlineGuard {
 public:
   DeadlineGuard(InterruptState *state, double timeoutMs) : state_(state) {
-    if (state_ && timeoutMs > 0 &&
-        !state_->armed.load(std::memory_order_relaxed)) {
+    // Guard the double->int64 cast below: casting a value outside int64's
+    // range (Infinity, or callers passing e.g. Number.MAX_VALUE) is undefined
+    // behavior and platform-divergent (x86 wraps negative, ARM saturates).
+    // Anything that large — like NaN and <= 0, both rejected by the
+    // `timeoutMs > 0` comparison — means "no limit".
+    constexpr double kMaxTimeoutMs = 9.0e15; // ~285k years; safely castable
+    if (!(timeoutMs > 0) || timeoutMs >= kMaxTimeoutMs) {
+      return;
+    }
+    if (state_ && !state_->armed.load(std::memory_order_relaxed)) {
       auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                      std::chrono::steady_clock::now().time_since_epoch())
                      .count();

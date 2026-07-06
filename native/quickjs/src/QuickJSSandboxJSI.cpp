@@ -765,8 +765,14 @@ void QuickJSSandboxRuntime::dispose() {
 
   // Drain pending jobs (promises, etc.) before tearing down contexts/runtime.
   // This mirrors QuickJSRuntime::~QuickJSRuntime() and avoids freeing a runtime
-  // while jobs are still queued.
+  // while jobs are still queued. The drain MUST be bounded (same cap as the
+  // eval-path drain): a tenant can enqueue a self-requeueing promise job
+  // (`function f(){Promise.resolve().then(f)}`) that survives an eval timeout,
+  // and an unbounded loop here would hang the host thread in dispose()
+  // forever — the interrupt handler does not run while no deadline is armed.
+  // Leftover jobs are safe to drop: JS_FreeRuntime frees the queued job list.
   if (qjsRuntime_) {
+    int executedJobs = 0;
     for (;;) {
       JSContext *ctx1 = nullptr;
       int ret = JS_ExecutePendingJob(qjsRuntime_, &ctx1);
@@ -779,6 +785,10 @@ void QuickJSSandboxRuntime::dispose() {
           JSValue exception = JS_GetException(ctx1);
           JS_FreeValue(ctx1, exception);
         }
+      }
+      executedJobs++;
+      if (executedJobs > 1000) {
+        break;
       }
     }
   }

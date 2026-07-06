@@ -467,6 +467,35 @@
   );
   unlimitedRt.dispose();
 
+  // timeout: Infinity must mean "no limit" — not a bogus int64 deadline in
+  // the past (double->int64 overflow) that kills every non-trivial eval.
+  var infinityRt = sandbox.createRuntime({ timeout: Infinity });
+  var infinityCtx = infinityRt.createContext();
+  assert(
+    infinityCtx.eval('var s = 0; for (var i = 0; i < 100000; i++) s += i; s') === 4999950000,
+    'timeout: Infinity means unlimited (long loop completes)'
+  );
+  infinityRt.dispose();
+
+  // dispose() must return even when a timed-out tenant left a self-requeueing
+  // promise job in the queue (the drain loop is bounded, leftovers are freed
+  // with the runtime).
+  var drainRt = sandbox.createRuntime({ timeout: 200 });
+  var drainCtx = drainRt.createContext();
+  try {
+    drainCtx.eval(
+      'Promise.resolve().then(function f() { Promise.resolve().then(f); }); while (true) {}'
+    );
+  } catch (_e) {
+    // expected: eval times out; the self-requeueing job stays queued
+  }
+  var disposeStart = Date.now();
+  drainRt.dispose();
+  assert(
+    Date.now() - disposeStart < 5000,
+    'dispose() returns despite a self-requeueing pending job'
+  );
+
   // Summary
   console.log('\n=== Test Summary ===');
   console.log(`Total: ${testsRun}`);

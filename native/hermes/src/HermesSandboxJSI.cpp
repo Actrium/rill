@@ -164,7 +164,7 @@ jsi::Value HermesSandboxContext::hostToSandboxImpl(jsi::Runtime &hostRt,
       return jsi::String::createFromUtf8(
           sandboxRt, "[hostToSandbox: circular reference dropped]");
     }
-    if (depth >= kMaxConversionDepth) {
+    if (depth > kMaxConversionDepth) {
       return jsi::String::createFromUtf8(
           sandboxRt, "[hostToSandbox: max depth exceeded]");
     }
@@ -250,7 +250,7 @@ jsi::Value HermesSandboxContext::sandboxToHostImpl(jsi::Runtime &sandboxRt,
       return jsi::String::createFromUtf8(
           hostRt, "[sandboxToHost: circular reference dropped]");
     }
-    if (depth >= kMaxConversionDepth) {
+    if (depth > kMaxConversionDepth) {
       return jsi::String::createFromUtf8(
           hostRt, "[sandboxToHost: max depth exceeded]");
     }
