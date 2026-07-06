@@ -166,7 +166,8 @@ HermesSandboxNAPIContext::HermesSandboxNAPIContext(jsi::Runtime &hostRuntime,
   // NOT ENFORCED: the Hermes N-API surface exposes no interrupt/watchdog
   // hook, so the createRuntime({timeout}) option is accepted but ignored
   // here. A tenant infinite loop will block the calling (host) thread
-  // indefinitely.
+  // indefinitely. (The C++ JSI variant, HermesSandboxJSI, DOES enforce it
+  // via HermesRuntime::watchTimeLimit.)
   (void)timeout;
 
   jsr_config config = nullptr;

@@ -15,6 +15,12 @@
 #include <unordered_map>
 #include <vector>
 
+namespace facebook {
+namespace hermes {
+class HermesRuntime;
+} // namespace hermes
+} // namespace facebook
+
 namespace hermes_sandbox {
 
 using namespace facebook;
@@ -40,6 +46,22 @@ public:
 
   jsi::Value eval(jsi::Runtime &rt, const std::string &code);
   jsi::Value evalBytecode(jsi::Runtime &rt, const uint8_t *bytecode, size_t size);
+
+  // RAII: arms the Hermes time-limit watchdog (HermesRuntime::watchTimeLimit)
+  // for one top-level entry into sandbox JS execution. Nested entries keep
+  // the OUTERMOST budget — a re-entry can neither replace nor, on exit,
+  // silently remove the outer deadline. timeout <= 0 means unlimited.
+  class TimeLimitScope {
+  public:
+    explicit TimeLimitScope(HermesSandboxContext &ctx);
+    ~TimeLimitScope();
+    TimeLimitScope(const TimeLimitScope &) = delete;
+    TimeLimitScope &operator=(const TimeLimitScope &) = delete;
+
+  private:
+    HermesSandboxContext &ctx_;
+    bool armedHere_ = false;
+  };
   void inject(jsi::Runtime &rt, const std::string &name,
                  const jsi::Value &value);
   jsi::Value extract(jsi::Runtime &rt, const std::string &name);
@@ -49,6 +71,13 @@ public:
 
 private:
   std::unique_ptr<jsi::Runtime> sandboxRuntime_;
+  // Typed view of sandboxRuntime_ for Hermes-specific APIs (watchTimeLimit).
+  // Owned by sandboxRuntime_; nulled in dispose().
+  facebook::hermes::HermesRuntime *hermesRuntime_ = nullptr;
+  // Wall-clock execution budget per top-level eval; <= 0 means unlimited.
+  double timeoutMs_ = 0;
+  // Nesting depth for TimeLimitScope (guarded by mutex_).
+  int timeLimitDepth_ = 0;
   jsi::Runtime *hostRuntime_;
   bool disposed_;
   std::recursive_mutex mutex_;

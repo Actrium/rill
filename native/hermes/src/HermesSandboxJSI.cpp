@@ -454,6 +454,9 @@ jsi::Value HermesSandboxContext::wrapSandboxFunctionForHost(jsi::Runtime & /*san
           return jsi::Value::undefined();
         }
 
+        // Host->sandbox function calls execute tenant JS too: same budget
+        // as eval (nested entries keep the outermost deadline).
+        TimeLimitScope timeLimit(*self);
         try {
           // Convert args from host to sandbox
           std::vector<jsi::Value> sandboxArgs;
@@ -492,15 +495,17 @@ HermesSandboxContext::HermesSandboxContext(jsi::Runtime &hostRuntime,
                                            double timeout)
     : sandboxRuntime_(nullptr), hostRuntime_(&hostRuntime), disposed_(false),
       callbackCounter_(0), sandboxFunctionCounter_(0) {
-  // NOT ENFORCED: Hermes has no interrupt/watchdog API comparable to
-  // QuickJS's JS_SetInterruptHandler, so the createRuntime({timeout}) option
-  // is accepted but ignored here. A tenant infinite loop will block the
-  // calling (host) thread indefinitely. Callers must not rely on this engine
-  // for CPU isolation.
-  (void)timeout;
+  // ENFORCED via HermesRuntime::watchTimeLimit (see TimeLimitScope): each
+  // top-level eval/evalBytecode gets a wall-clock budget; on expiry Hermes
+  // injects an async break and the call throws instead of hanging the host
+  // thread. timeout <= 0 means unlimited.
+  timeoutMs_ = timeout;
 
-  // Create an isolated Hermes runtime for the sandbox
-  sandboxRuntime_ = facebook::hermes::makeHermesRuntime();
+  // Create an isolated Hermes runtime for the sandbox. Keep a typed pointer
+  // for Hermes-specific APIs; ownership stays with sandboxRuntime_.
+  auto hermesRt = facebook::hermes::makeHermesRuntime();
+  hermesRuntime_ = hermesRt.get();
+  sandboxRuntime_ = std::move(hermesRt);
 
   if (!sandboxRuntime_) {
     throw jsi::JSError(hostRuntime, "Failed to create Hermes sandbox runtime");
@@ -582,6 +587,7 @@ void HermesSandboxContext::dispose() {
   wrapperCache_.clear();
   callbacks_.clear();
   sandboxFunctions_.clear();
+  hermesRuntime_ = nullptr; // owned by sandboxRuntime_, about to be freed
   sandboxRuntime_.reset();
   rill_log(kLogTag, "Disposed sandbox context");
 }
@@ -749,6 +755,28 @@ void HermesSandboxContext::drainMicrotasks(jsi::Runtime &hostRt) {
   throw jsi::JSError(hostRt, "Hermes sandbox microtask drain exceeded safety limit");
 }
 
+// MARK: - TimeLimitScope
+
+HermesSandboxContext::TimeLimitScope::TimeLimitScope(HermesSandboxContext &ctx)
+    : ctx_(ctx) {
+  // Guard the double->uint32 cast (Infinity / oversized budgets are UB to
+  // cast — treat them as unlimited), and only arm at the outermost entry.
+  if (ctx_.hermesRuntime_ && ctx_.timeoutMs_ > 0 &&
+      ctx_.timeoutMs_ < 4294967295.0 && ctx_.timeLimitDepth_ == 0) {
+    ctx_.hermesRuntime_->watchTimeLimit(
+        static_cast<uint32_t>(ctx_.timeoutMs_));
+    armedHere_ = true;
+  }
+  ctx_.timeLimitDepth_++;
+}
+
+HermesSandboxContext::TimeLimitScope::~TimeLimitScope() {
+  ctx_.timeLimitDepth_--;
+  if (armedHere_ && ctx_.hermesRuntime_) {
+    ctx_.hermesRuntime_->unwatchTimeLimit();
+  }
+}
+
 jsi::Value HermesSandboxContext::eval(jsi::Runtime &rt,
                                       const std::string &code) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -757,6 +785,7 @@ jsi::Value HermesSandboxContext::eval(jsi::Runtime &rt,
     throw jsi::JSError(rt, "Context has been disposed");
   }
 
+  TimeLimitScope timeLimit(*this);
   try {
     jsi::Value result =
         sandboxRuntime_->evaluateJavaScript(
@@ -808,6 +837,7 @@ jsi::Value HermesSandboxContext::evalBytecode(jsi::Runtime &rt,
     throw jsi::JSError(rt, "evalBytecode: invalid bytecode (null or empty)");
   }
 
+  TimeLimitScope timeLimit(*this);
   try {
     auto prepared = sandboxRuntime_->prepareJavaScript(
         std::make_unique<BytecodeBuffer>(bytecode, size),

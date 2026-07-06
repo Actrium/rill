@@ -56,10 +56,10 @@ export interface SandboxModule {
    * Create an isolated runtime.
    *
    * `timeout` (ms) is a wall-clock execution budget per top-level eval.
-   * Enforcement is engine-specific: QuickJS interrupts execution via a
-   * native interrupt handler; Hermes and JSC have no equivalent interrupt
-   * API and currently IGNORE this option — a tenant loop blocks the host
-   * thread there. `timeout <= 0` means unlimited.
+   * Enforcement is engine-specific: QuickJS interrupts via a native
+   * interrupt handler; Hermes (JSI) enforces via watchTimeLimit; JSC has
+   * no public interrupt API and currently IGNORES this option — a tenant
+   * loop blocks the host thread there. `timeout <= 0` means unlimited.
    *
    * `maxHeapBytes` caps the sandbox heap. Enforced by QuickJS
    * (JS_SetMemoryLimit; <= 0 uses the engine default); Hermes and JSC
