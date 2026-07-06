@@ -4,8 +4,9 @@
 //! OWN linear memory, using the `rill_guest::asset` SDK:
 //!   1. `asset::info("logo")`  -> the decoded `(w, h)`,
 //!   2. allocate a `w×h` RGBA8 `Surface` (guest memory),
-//!   3. `asset::blit("logo", ptr, cap)` -> the host WRITES the decoded pixels
+//!   3. `asset::blit("logo", &mut buffer)` -> the host WRITES the decoded pixels
 //!      straight into that buffer (bounds-checked host-side).
+//!
 //! The guest never fetches or decodes anything — the host owns resolution +
 //! decode; the guest only hands it a buffer to fill. Pixels never enter JSON.
 //!
@@ -51,13 +52,11 @@ async fn guest_main() {
     }
 
     // Step 2: allocate the guest-owned RGBA8 buffer the host will fill.
-    let surface = Surface::new(w, h);
-    let ptr = surface.ptr();
-    let cap = surface.pixels().len();
+    let mut surface = Surface::new(w, h);
 
     // Step 3: hand the host the buffer to blit the decoded pixels into. The
-    // host writes `w*h*4` bytes at `ptr` (bounds-checked) and returns the count.
-    let Some(written) = asset::blit(ASSET_ID, ptr, cap).await else {
+    // host writes `w*h*4` bytes into it (bounds-checked) and returns the count.
+    let Some(written) = asset::blit(ASSET_ID, surface.pixels_mut()).await else {
         return;
     };
 

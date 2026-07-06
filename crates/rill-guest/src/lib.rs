@@ -602,7 +602,8 @@ pub mod canvas {
 /// The guest never fetches or decodes anything; it only:
 ///   1. `info(id)` → `(w, h)`,
 ///   2. allocates a `Surface` of `w×h` (its own memory),
-///   3. `blit(id, ptr, cap)` → the host writes the RGBA into that buffer.
+///   3. `blit(id, &mut buffer)` → the host writes the RGBA into that buffer.
+///
 /// `load(id)` does all three and hands back a ready-to-composite `Surface`.
 pub mod asset {
     use crate::canvas::Surface;
@@ -625,14 +626,19 @@ pub mod asset {
         Some((w, h))
     }
 
-    /// `host:asset.blit(id, dst_ptr, dst_cap)` → the host writes the asset's RGBA
-    /// into guest memory at `dst_ptr` (bounds-checked host-side). `dst_cap` is the
-    /// number of bytes the guest reserved there; the host refuses if it is smaller
-    /// than `w*h*4`. Returns the bytes written on success, `None` on any failure
-    /// (JS guest / bad id / OOB ptr / too-small cap — all fail-closed).
-    pub async fn blit(asset_id: &str, dst_ptr: usize, dst_cap: usize) -> Option<usize> {
+    /// `host:asset.blit(id, dst)` → the host writes the asset's RGBA into `dst`
+    /// (bounds-checked host-side; it refuses if `dst.len()` is smaller than
+    /// `w*h*4`). Returns the bytes written on success, `None` on any failure
+    /// (JS guest / bad id / too-small buffer — all fail-closed).
+    ///
+    /// Taking `&mut [u8]` (not a raw ptr/cap pair) is deliberate: the host will
+    /// WRITE into this range, so safe Rust must only be able to hand it memory
+    /// it exclusively owns — never an arbitrary pointer into its own heap.
+    pub async fn blit(asset_id: &str, dst: &mut [u8]) -> Option<usize> {
+        let dst_ptr = dst.as_mut_ptr() as usize;
+        let dst_cap = dst.len();
         let mut body = String::from("{\"assetId\":");
-        json_string(&mut body, asset_id);
+        json_escape(&mut body, asset_id);
         body.push_str(&format!(",\"dstPtr\":{dst_ptr},\"dstCap\":{dst_cap}}}"));
         let (ok, bytes) = crate::host_call("host:asset", "blit", body.into_bytes()).await;
         if ok != 1 || !json_flag_true(&bytes, "ok") {
@@ -647,11 +653,9 @@ pub mod asset {
     /// the usual "allocate once, reuse across frames" rule applies.
     pub async fn load(asset_id: &str) -> Option<Surface> {
         let (w, h) = info(asset_id).await?;
-        // The host writes RGBA straight into this buffer's linear-memory range via
-        // `blit(ptr, cap)`, so the binding stays immutable here (no `&mut` path).
-        let surface = Surface::new(w, h);
+        let mut surface = Surface::new(w, h);
         let cap = surface.pixels().len();
-        let written = blit(asset_id, surface.ptr(), cap).await?;
+        let written = blit(asset_id, surface.pixels_mut()).await?;
         // The host must have filled the WHOLE buffer, or the frame is incomplete.
         if written != cap {
             return None;
