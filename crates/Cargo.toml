@@ -3,7 +3,7 @@
 # wasm32-unknown-unknown target).
 [workspace]
 resolver = "2"
-members = ["rill-guest", "kv-guest", "ui-guest", "seq-guest", "event-guest", "heap-exhaust-guest", "canvas-guest", "canvas-present-guest", "canvas-gpu-guest"]
+members = ["rill-guest", "kv-guest", "ui-guest", "seq-guest", "event-guest", "heap-exhaust-guest", "canvas-guest", "canvas-present-guest", "canvas-gpu-guest", "canvas-escape-guest", "asset-guest"]
 
 [profile.release]
 panic = "abort"
