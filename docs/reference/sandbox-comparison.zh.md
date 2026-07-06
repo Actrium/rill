@@ -49,9 +49,13 @@ const isJSCAvailable = typeof (globalThis as any).__JSCSandboxJSI !== 'undefined
 
 - 需要链接 `RillSandboxNative` 原生模块。
 - 在运行时通过 `globalThis.__JSCSandboxJSI` 检测。
-- 没有硬超时中断：JavaScriptCore 唯一的执行时限 API
-  (`JSContextGroupSetExecutionTimeLimit`) 是私有头文件，因此未使用。
-  租户死循环会阻塞宿主线程；不要依赖此引擎做 CPU 隔离。
+- 默认没有硬超时中断：JavaScriptCore 唯一的执行时限 API
+  (`JSContextGroupSetExecutionTimeLimit`) 是私有头文件，因此不做静态引用。
+  租户死循环会阻塞宿主线程；默认配置下不要依赖此引擎做 CPU 隔离。
+- 可选强制：`createRuntime({ enableExecutionTimeLimit: true })` 会在运行时
+  通过 `dlsym` 解析该 API 并按 eval 武装，使 `timeout` 成为硬中断。私有 API
+  仍可能被 App Store 审核标记 —— 适用于企业/内部分发；符号不可用时回退到
+  默认的不强制行为。
 - 无堆配额 API；`maxHeapBytes` 被忽略。
 - 没有字节码预编译；代码在每次 `eval` 调用时解析和编译。
 
@@ -271,4 +275,4 @@ interface JSEngineRuntimeOptions {
 
 注意 `createRuntime` 对 WASM provider 返回 `Promise`，对所有其他 provider 返回同步值。
 
-> **强制执行现状:** `timeout` 由 QuickJS（原生中断 handler + wall-clock deadline）、Hermes（JSI 变体,经 `HermesRuntime::watchTimeLimit`）与 Node VM（`vm.Script`）强制执行。JSC **不强制**:JavaScriptCore 唯一的执行时限 API 是私有头文件,租户死循环在 JSC 下会阻塞宿主线程 —— 不要依赖 JSC 做 CPU 隔离。堆配额（`maxHeapBytes`,旧选项名 `memoryLimit` 为其别名）由 QuickJS 经 `JS_SetMemoryLimit` 强制执行（未设置时默认 256 MB）,并通过 tenant-manager 路径下发;Hermes 与 JSC 无堆上限 API,忽略该配额。
+> **强制执行现状:** `timeout` 由 QuickJS（原生中断 handler + wall-clock deadline）、Hermes（JSI 变体,经 `HermesRuntime::watchTimeLimit`）与 Node VM（`vm.Script`）强制执行。JSC 默认**不强制**:JavaScriptCore 唯一的执行时限 API 是私有头文件,租户死循环在 JSC 下会阻塞宿主线程 —— 除非用 `enableExecutionTimeLimit: true` 显式开启（经 `dlsym` 解析私有 API;有 App Store 审核风险,见上文）,否则不要依赖 JSC 做 CPU 隔离。堆配额（`maxHeapBytes`,旧选项名 `memoryLimit` 为其别名）由 QuickJS 经 `JS_SetMemoryLimit` 强制执行（未设置时默认 256 MB）,并通过 tenant-manager 路径下发;Hermes 与 JSC 无堆上限 API,忽略该配额。

@@ -49,10 +49,16 @@ const isJSCAvailable = typeof (globalThis as any).__JSCSandboxJSI !== 'undefined
 
 - Requires the `RillSandboxNative` native module to be linked.
 - Detected at runtime via `globalThis.__JSCSandboxJSI`.
-- No hard timeout interrupt: JavaScriptCore's only execution time limit API
-  (`JSContextGroupSetExecutionTimeLimit`) is a private header, so it is not
-  used. A tenant infinite loop blocks the host thread; do not rely on this
-  engine for CPU isolation.
+- No hard timeout interrupt by default: JavaScriptCore's only execution time
+  limit API (`JSContextGroupSetExecutionTimeLimit`) is a private header, so it
+  is never referenced statically. A tenant infinite loop blocks the host
+  thread; do not rely on this engine for CPU isolation in the default
+  configuration.
+- Opt-in enforcement: `createRuntime({ enableExecutionTimeLimit: true })`
+  resolves that API at runtime via `dlsym` and arms it per eval, turning
+  `timeout` into a hard interrupt. Private-API use may still be flagged by
+  App Store review — intended for enterprise/internal distribution; when the
+  symbols are unavailable it falls back to the unenforced default.
 - No heap quota API; `maxHeapBytes` is ignored.
 - No bytecode precompilation; code is parsed and compiled on every `eval` call.
 
@@ -272,4 +278,4 @@ interface JSEngineRuntimeOptions {
 
 Note that `createRuntime` returns a `Promise` for the WASM provider and a synchronous value for all others.
 
-> **Enforcement status:** `timeout` is enforced by QuickJS (native interrupt handler with a wall-clock deadline), Hermes (JSI variant, via `HermesRuntime::watchTimeLimit`), and Node VM (`vm.Script`). JSC does **not** enforce it: JavaScriptCore's only execution time limit API is a private header, so a tenant infinite loop blocks the host thread there — do not rely on JSC for CPU isolation. Heap quota (`maxHeapBytes`, aliased by the legacy `memoryLimit` option) is enforced by QuickJS via `JS_SetMemoryLimit` (256 MB default when unset) and delivered through the tenant-manager path; Hermes and JSC expose no heap-cap API and ignore it.
+> **Enforcement status:** `timeout` is enforced by QuickJS (native interrupt handler with a wall-clock deadline), Hermes (JSI variant, via `HermesRuntime::watchTimeLimit`), and Node VM (`vm.Script`). JSC does **not** enforce it by default: JavaScriptCore's only execution time limit API is a private header, so a tenant infinite loop blocks the host thread there — do not rely on JSC for CPU isolation unless you opt in with `enableExecutionTimeLimit: true` (private API via `dlsym`; App Store review caveat, see above). Heap quota (`maxHeapBytes`, aliased by the legacy `memoryLimit` option) is enforced by QuickJS via `JS_SetMemoryLimit` (256 MB default when unset) and delivered through the tenant-manager path; Hermes and JSC expose no heap-cap API and ignore it.
