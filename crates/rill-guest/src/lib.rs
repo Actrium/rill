@@ -896,6 +896,11 @@ pub mod gpu {
         // guest sets one, in which case pixel accounting is skipped guest-side (the
         // host applies the real canvas dimensions).
         viewport_area: u64,
+        // Latched when a SINGLE draw exceeds a per-draw cap (elements/instances).
+        // Those caps are not running sums, so they can't be checked in
+        // within_budget() from `cost` alone — one oversized draw is a violation
+        // on its own even if the submit totals look fine.
+        violated: bool,
     }
 
     impl CommandBuffer {
@@ -1013,6 +1018,13 @@ pub mod gpu {
         }
 
         fn account_draw(&mut self, count: u32, instances: u32) {
+            // Per-draw caps, mirroring the host's per-op validation: a single
+            // draw over MAX_ELEMENTS_PER_DRAW / MAX_INSTANCES_PER_DRAW would be
+            // dropped host-side, so latch `violated` and let within_budget()
+            // report it before the guest wastes the submit.
+            if count > MAX_ELEMENTS_PER_DRAW || instances > MAX_INSTANCES_PER_DRAW {
+                self.violated = true;
+            }
             self.cost.draw_calls += 1;
             let tris = (count as u64) / 3;
             self.cost.primitives = self
@@ -1048,7 +1060,8 @@ pub mod gpu {
         /// over-budget buffer is dropped host-side with a reason regardless.
         pub fn within_budget(&self) -> bool {
             let c = &self.cost;
-            c.cmds <= MAX_CMDS
+            !self.violated
+                && c.cmds <= MAX_CMDS
                 && c.draw_calls <= MAX_DRAW_CALLS
                 && c.primitives <= MAX_PRIMITIVES
                 && c.instances <= MAX_INSTANCES_TOTAL
