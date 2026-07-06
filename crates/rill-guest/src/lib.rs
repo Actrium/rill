@@ -42,6 +42,17 @@ extern "C" {
     );
     // One-way render channel: hand the host an operation batch (UTF-8 JSON).
     fn rill_send_batch(batch_ptr: *const u8, batch_len: usize);
+    // One-way diagnostics channel: hand the host a UTF-8 log line
+    // (wasm-guest-host.ts wires it to its `onLog` sink).
+    fn rill_log(msg_ptr: *const u8, msg_len: usize);
+}
+
+/// Send a UTF-8 diagnostic message to the host (`env.rill_log` → the host's
+/// `onLog` sink). Fire-and-forget: the host may drop or ignore it, so use it
+/// for observability, never as a data channel. This is a native guest's ONLY
+/// window for "what went wrong" — the panic handler reports through it too.
+pub fn log(msg: &str) {
+    unsafe { rill_log(msg.as_ptr(), msg.len()) }
 }
 
 // ---- Bump allocator (leaks; fine for short-lived guests) ----
@@ -163,6 +174,39 @@ pub mod rt {
     /// cannot alias `&mut TASK`. Do NOT call it from inside a running poll.
     pub fn wake() {
         poll();
+    }
+
+    /// Report a panic's location + message to the host via `rill_log`, then
+    /// return so the caller (the generated panic handler) can trap.
+    ///
+    /// Uses a fixed-size STACK buffer with a truncating `core::fmt::Write` —
+    /// no allocation, because the panic may itself be an allocation failure
+    /// (bump heap exhausted). Truncation lands on a UTF-8 char boundary so the
+    /// host's text decoding never sees a split code point.
+    pub fn panic_log(info: &core::panic::PanicInfo) {
+        struct StackBuf {
+            buf: [u8; 512],
+            len: usize,
+        }
+        impl core::fmt::Write for StackBuf {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                let space = self.buf.len() - self.len;
+                let mut n = s.len().min(space);
+                while n > 0 && !s.is_char_boundary(n) {
+                    n -= 1;
+                }
+                self.buf[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
+                self.len += n;
+                Ok(()) // swallow overflow: a truncated report beats none
+            }
+        }
+        let mut out = StackBuf {
+            buf: [0; 512],
+            len: 0,
+        };
+        // PanicInfo's Display includes the source location and the message.
+        let _ = core::fmt::write(&mut out, format_args!("guest panic: {info}"));
+        unsafe { super::rill_log(out.buf.as_ptr(), out.len) };
     }
 
     pub(crate) fn next_cb() -> u32 {
@@ -1399,11 +1443,17 @@ macro_rules! rill_guest_main {
         static __RILL_GUEST_ALLOC: $crate::BumpAlloc = $crate::BumpAlloc::new();
 
         #[panic_handler]
-        fn __rill_guest_panic(_: &core::panic::PanicInfo) -> ! {
-            // Trap, don't spin: a panicking / aborting guest (incl. allocation
-            // failure) surfaces to the host as a catchable WASM error instead of
-            // an infinite loop that would hang the host's main thread. (A guest
-            // that spins on its own is a separate concern — see the Worker path.)
+        fn __rill_guest_panic(info: &core::panic::PanicInfo) -> ! {
+            // First report the panic location/message through env.rill_log (a
+            // fixed stack buffer — no allocation, since the panic may BE an
+            // allocation failure). Without this a native guest dies with zero
+            // diagnostics.
+            $crate::rt::panic_log(info);
+            // Then trap, don't spin: a panicking / aborting guest (incl.
+            // allocation failure) surfaces to the host as a catchable WASM error
+            // instead of an infinite loop that would hang the host's main
+            // thread. (A guest that spins on its own is a separate concern —
+            // see the Worker path.)
             core::arch::wasm32::unreachable()
         }
 
