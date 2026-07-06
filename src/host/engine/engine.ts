@@ -246,11 +246,21 @@ export class Engine implements IEngine {
     // Initialize JS engine provider
     // Priority: TenantManager (explicit or auto-detect) > DefaultProvider
     // Note: custom provider injection is intentionally not part of the public API.
+    // Explicit backend selection never falls back silently: like the other
+    // explicit sandbox values, 'tenant-manager' throws when unavailable.
+    if (options.sandbox === 'tenant-manager' && !TenantManagerProvider.isAvailable()) {
+      throw new Error(
+        `[rill:${this.id}] sandbox 'tenant-manager' was explicitly requested, but the ` +
+          `native __RillTenantManager global is not present in this environment. ` +
+          `It requires the Rill native module (Apple platforms). ` +
+          `Link the native module, or omit 'sandbox' to auto-detect a backend.`
+      );
+    }
     const useTenantManager =
       options.sandbox === 'tenant-manager' ||
       (!options.sandbox && TenantManagerProvider.isAvailable());
 
-    if (useTenantManager && TenantManagerProvider.isAvailable()) {
+    if (useTenantManager) {
       const tenantConfig = options.tenant ?? { appId: this.id };
       this.provider = new TenantManagerProvider({
         tenantConfig: {
