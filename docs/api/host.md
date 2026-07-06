@@ -131,13 +131,21 @@ engine.destroy(): void
 
 #### Observability (optional)
 
-For monitoring and debugging:
+For monitoring and debugging, `getDiagnostics()` is the single public entry point:
 
 ```typescript
-engine.getHealth(): EngineHealth;
-engine.getResourceStats(): { timers: number; nodes: number; callbacks: number };
 engine.getDiagnostics(): EngineDiagnostics;
 ```
+
+The returned `EngineDiagnostics` snapshot aggregates everything in one call:
+
+- `health: EngineHealth` -- loaded/destroyed flags, error count, last error timestamp, receiver node count, batching state
+- `resources: ResourceStats` -- `{ timers, nodes, callbacks }`
+- `activity: EngineActivityStats` -- ops/s, batches/s, totals, optional timeline
+- `receiver: ReceiverStats | null` -- receiver-side stats and backpressure info
+- `host` / `guest` -- last event name, timestamp, and payload size on each side
+
+There are no separate `engine.getHealth()` or `engine.getResourceStats()` methods; read the `health` and `resources` fields of the diagnostics snapshot instead.
 
 ### Events
 

@@ -110,26 +110,29 @@ const engine = new Engine({
 
 ## 健康检查 API
 
+所有健康与资源数据都通过单一方法 `engine.getDiagnostics()` 暴露,该方法返回一个 `EngineDiagnostics` 快照。
+
 ### 引擎健康
 
 ```ts
-const health = engine.getHealth();
+const { health } = engine.getDiagnostics();
 ```
 
 ```ts
 interface EngineHealth {
-  loaded: boolean;        // 如果 bundle 已成功加载则为 true
-  destroyed: boolean;     // 如果调用了 engine.destroy() 则为 true
-  errorCount: number;     // 自创建以来的总错误数
-  lastErrorAt: number;    // 最近错误的时间戳(ms),或 0
-  receiverNodes: number;  // receiver 当前跟踪的节点数
+  loaded: boolean;             // 如果 bundle 已成功加载则为 true
+  destroyed: boolean;          // 如果调用了 engine.destroy() 则为 true
+  errorCount: number;          // 自创建以来的总错误数
+  lastErrorAt: number | null;  // 最近错误的时间戳(ms),或 null
+  receiverNodes: number;       // receiver 当前跟踪的节点数
+  batching: boolean;           // 操作批处理是否处于启用状态
 }
 ```
 
 ### 资源统计
 
 ```ts
-const stats = engine.getResourceStats();
+const { resources } = engine.getDiagnostics();
 ```
 
 ```ts
@@ -140,7 +143,7 @@ interface ResourceStats {
 }
 ```
 
-使用这些端点构建活性探针或仪表板面板,与您的应用程序指标一起显示沙箱健康状况。
+使用该快照构建活性探针或仪表板面板,与您的应用程序指标一起显示沙箱健康状况。
 
 ---
 
@@ -217,5 +220,5 @@ useEffect(() => {
 - `logger` 已连接到您的结构化日志记录管道。
 - 在组件卸载或不再需要引擎时调用 `engine.destroy()`。
 - Bundle 已通过 `rill analyze`,没有违规。
-- 健康检查(`getHealth`、`getResourceStats`)已集成到监控仪表板。
+- 健康检查(`engine.getDiagnostics()` 的 `health` 与 `resources` 字段)已集成到监控仪表板。
 - 错误处理涵盖 `RequireError`、`ExecutionError` 和 `TimeoutError`。
