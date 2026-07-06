@@ -628,7 +628,7 @@ export class Engine implements IEngine {
     const logger = this.options.logger;
 
     if (!this.provider) {
-      throw new Error('[rill] QuickJS provider not initialized');
+      throw new Error('[rill] Sandbox provider not initialized');
     }
 
     // After runtime + context are created, set up Bridge, polyfills, and runtime API
