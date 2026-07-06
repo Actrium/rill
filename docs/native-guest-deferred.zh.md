@@ -37,9 +37,9 @@
 - **Path A · CLI 调 cargo/clang**：CLI 直接编译原生 guest 源 → `.wasm`。集成度高但把 Rust/C 工具链耦进 CLI（重）。
 - **Path B · 打包预编译 `.wasm`（推荐先做）**：CLI 接受一个**已编好的 `.wasm`**，校验其 import ⊆ `{rill_host_call, rill_send_batch, rill_log, rill_on_event}`（复用封口不变量），写 `manifest.runtime="wasm"`。低风险、无工具链耦合。
 
-**依赖/阻塞**：需 **application.ist 平台侧先加 `manifest.runtime: "js" | "wasm"` 字段 + 分发/装载时按之分流**（平台侧改动，不在 rill 仓）。所以本项**卡在上游决策**。文件 `src/cli/{build,bin}.ts` 与其它项**不相交**，capacity 允许时 Path B 可随任意波并行。
+**依赖/阻塞**：需 **下游平台仓侧先加 `manifest.runtime: "js" | "wasm"` 字段 + 分发/装载时按之分流**（平台侧改动，不在 rill 仓）。所以本项**卡在上游决策**。文件 `src/cli/{build,bin}.ts` 与其它项**不相交**，capacity 允许时 Path B 可随任意波并行。
 
-**触发条件**：application.ist 定了 `runtime` 字段 + 装载分流后，做 Path B。**effort M**。
+**触发条件**：下游平台仓定了 `runtime` 字段 + 装载分流后，做 Path B。**effort M**。
 
 ---
 
@@ -49,7 +49,7 @@
 
 **现状（grounded）**：`crates/rill-guest/src/lib.rs` 有通用 `host_call` + 一个 `host:store` demo（`store::put/get`，手拼 JSON，wire 对齐平台 host-store.ts 的 putText/getText）。**ABI 无需改**。
 
-**关键定性（核实后）**：app 专属能力（`host:net`/`identity`/`billing`）住在 **application.ist**，不在 rill 框架——**框架 SDK 不该硬编码它们**。所以本项是「选抽象」，不是「加能力」：
+**关键定性（核实后）**：app 专属能力（`host:net`/`identity`/`billing`）住在**下游平台仓**，不在 rill 框架——**框架 SDK 不该硬编码它们**。所以本项是「选抽象」，不是「加能力」：
 - **推荐 · Tier 2 代码生成**：从 `src/contract/index.ts` 的契约定义**生成** typed Rust 包装（TS→Rust codegen），app 作者按自己的契约生成自己的 SDK。
 - **可选 · proc-macro**：Rust 宏从 schema 生成包装（更 Rust 原生，但增依赖）。
 - **纪律**：framework 里只放**通用**helper（编解码/错误映射），保持 no_std + 最小体积；app 专属留 app SDK。
@@ -80,4 +80,4 @@
 
 ## 一句话
 
-四项都排在活跃集之后：**#1 二进制 wire** 等 API 面稳、一次换 wire（保 JSON 回退）；**#3 CLI** 卡 application.ist 的 `runtime` 字段，解锁后先做低风险 Path B；**#4 typed 宏** 等第二个真实契约再定抽象、且只放通用 helper；**#6 QuickJS 统一** 最险，先设计+测基准、ABI 证稳且 QuickJS 非生产默认时再动。定序主线始终是：**只在已上线主路径花钱、内部边界可安全重构、不为预期未来预造抽象。**
+四项都排在活跃集之后：**#1 二进制 wire** 等 API 面稳、一次换 wire（保 JSON 回退）；**#3 CLI** 卡下游平台仓的 `runtime` 字段，解锁后先做低风险 Path B；**#4 typed 宏** 等第二个真实契约再定抽象、且只放通用 helper；**#6 QuickJS 统一** 最险，先设计+测基准、ABI 证稳且 QuickJS 非生产默认时再动。定序主线始终是：**只在已上线主路径花钱、内部边界可安全重构、不为预期未来预造抽象。**
