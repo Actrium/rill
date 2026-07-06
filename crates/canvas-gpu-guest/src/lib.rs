@@ -97,7 +97,9 @@ async fn guest_main() {
 
     // Mount the viewport in WEBGPU mode so the host locks the <canvas> to a webgpu
     // context (mode is fixed at mount; host:gpu.configure(Webgpu) then matches it).
-    let kids = alloc::vec![rill_guest::ui::canvas_mode(CANVAS_ID, W as u32, H as u32, "webgpu")];
+    let kids = alloc::vec![rill_guest::ui::canvas_mode(
+        CANVAS_ID, W as u32, H as u32, "webgpu"
+    )];
     rill_guest::render(rill_guest::ui::view(kids));
 
     // Build the vertex bytes ONCE (BumpAlloc only grows). Kept alive for the
