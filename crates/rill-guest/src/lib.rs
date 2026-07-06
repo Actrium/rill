@@ -360,15 +360,17 @@ pub mod canvas {
     pub struct DrawList {
         ops: String,
         count: usize,
+        // Latched when an op was fed a non-finite number. NaN/inf format as
+        // `NaN`/`inf` — not legal JSON — so ONE bad op would make the whole
+        // batch unparseable host-side and the entire frame would be dropped
+        // with no reason. Instead: skip the op, latch, and fail loud in draw().
+        non_finite: bool,
     }
 
     impl DrawList {
         /// A fresh, empty display list.
         pub fn new() -> Self {
-            Self {
-                ops: String::new(),
-                count: 0,
-            }
+            Self::default()
         }
 
         fn push(&mut self, op: String) {
@@ -377,6 +379,23 @@ pub mod canvas {
             }
             self.ops.push_str(&op);
             self.count += 1;
+        }
+
+        // Guard for every float-taking op: non-finite input skips the op and
+        // latches the list invalid (see `non_finite`).
+        fn finite(&mut self, vals: &[f64]) -> bool {
+            if vals.iter().all(|v| v.is_finite()) {
+                true
+            } else {
+                self.non_finite = true;
+                false
+            }
+        }
+
+        /// Whether every op so far had finite numeric arguments. A `false`
+        /// list is rejected by [`draw`] before it reaches the host.
+        pub fn is_valid(&self) -> bool {
+            !self.non_finite
         }
 
         /// Number of ops queued.
@@ -401,16 +420,25 @@ pub mod canvas {
         }
         /// `moveTo(x, y)`.
         pub fn move_to(&mut self, x: f64, y: f64) -> &mut Self {
+            if !self.finite(&[x, y]) {
+                return self;
+            }
             self.push(format!("{{\"op\":\"moveTo\",\"x\":{x},\"y\":{y}}}"));
             self
         }
         /// `lineTo(x, y)`.
         pub fn line_to(&mut self, x: f64, y: f64) -> &mut Self {
+            if !self.finite(&[x, y]) {
+                return self;
+            }
             self.push(format!("{{\"op\":\"lineTo\",\"x\":{x},\"y\":{y}}}"));
             self
         }
         /// `rect(x, y, w, h)` (adds a rectangle sub-path).
         pub fn rect(&mut self, x: f64, y: f64, w: f64, h: f64) -> &mut Self {
+            if !self.finite(&[x, y, w, h]) {
+                return self;
+            }
             self.push(format!(
                 "{{\"op\":\"rect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}}}"
             ));
@@ -418,6 +446,9 @@ pub mod canvas {
         }
         /// `arc(x, y, r, start, end)` counter-clockwise=false.
         pub fn arc(&mut self, x: f64, y: f64, r: f64, start: f64, end: f64) -> &mut Self {
+            if !self.finite(&[x, y, r, start, end]) {
+                return self;
+            }
             self.push(format!(
                 "{{\"op\":\"arc\",\"x\":{x},\"y\":{y},\"r\":{r},\"start\":{start},\"end\":{end},\"ccw\":false}}"
             ));
@@ -437,6 +468,9 @@ pub mod canvas {
         // ---- rectangles ----
         /// `fillRect(x, y, w, h)`.
         pub fn fill_rect(&mut self, x: f64, y: f64, w: f64, h: f64) -> &mut Self {
+            if !self.finite(&[x, y, w, h]) {
+                return self;
+            }
             self.push(format!(
                 "{{\"op\":\"fillRect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}}}"
             ));
@@ -444,6 +478,9 @@ pub mod canvas {
         }
         /// `strokeRect(x, y, w, h)`.
         pub fn stroke_rect(&mut self, x: f64, y: f64, w: f64, h: f64) -> &mut Self {
+            if !self.finite(&[x, y, w, h]) {
+                return self;
+            }
             self.push(format!(
                 "{{\"op\":\"strokeRect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}}}"
             ));
@@ -451,6 +488,9 @@ pub mod canvas {
         }
         /// `clearRect(x, y, w, h)`.
         pub fn clear_rect(&mut self, x: f64, y: f64, w: f64, h: f64) -> &mut Self {
+            if !self.finite(&[x, y, w, h]) {
+                return self;
+            }
             self.push(format!(
                 "{{\"op\":\"clearRect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}}}"
             ));
@@ -476,6 +516,9 @@ pub mod canvas {
         }
         /// `lineWidth = w`.
         pub fn set_line_width(&mut self, w: f64) -> &mut Self {
+            if !self.finite(&[w]) {
+                return self;
+            }
             self.push(format!("{{\"op\":\"setLineWidth\",\"w\":{w}}}"));
             self
         }
@@ -483,6 +526,9 @@ pub mod canvas {
         // ---- text ----
         /// `fillText(text, x, y)`.
         pub fn fill_text(&mut self, text: &str, x: f64, y: f64) -> &mut Self {
+            if !self.finite(&[x, y]) {
+                return self;
+            }
             let mut s = format!("{{\"op\":\"fillText\",\"x\":{x},\"y\":{y},\"text\":");
             json_escape(&mut s, text);
             s.push('}');
@@ -503,16 +549,25 @@ pub mod canvas {
         }
         /// `translate(x, y)`.
         pub fn translate(&mut self, x: f64, y: f64) -> &mut Self {
+            if !self.finite(&[x, y]) {
+                return self;
+            }
             self.push(format!("{{\"op\":\"translate\",\"x\":{x},\"y\":{y}}}"));
             self
         }
         /// `scale(x, y)`.
         pub fn scale(&mut self, x: f64, y: f64) -> &mut Self {
+            if !self.finite(&[x, y]) {
+                return self;
+            }
             self.push(format!("{{\"op\":\"scale\",\"x\":{x},\"y\":{y}}}"));
             self
         }
         /// `rotate(angle)` (radians).
         pub fn rotate(&mut self, angle: f64) -> &mut Self {
+            if !self.finite(&[angle]) {
+                return self;
+            }
             self.push(format!("{{\"op\":\"rotate\",\"angle\":{angle}}}"));
             self
         }
@@ -526,6 +581,9 @@ pub mod canvas {
             e: f64,
             f: f64,
         ) -> &mut Self {
+            if !self.finite(&[a, b, c, d, e, f]) {
+                return self;
+            }
             self.push(format!(
                 "{{\"op\":\"setTransform\",\"a\":{a},\"b\":{b},\"c\":{c},\"d\":{d},\"e\":{e},\"f\":{f}}}"
             ));
@@ -537,6 +595,13 @@ pub mod canvas {
     /// Returns `Ok(response)` (`{"ok":true,"dropped":n}`) or `Err(response)` if
     /// the host fails closed (e.g. unknown/unmounted canvas id).
     pub async fn draw(canvas_id: &str, list: &DrawList) -> Result<Vec<u8>, Vec<u8>> {
+        if !list.is_valid() {
+            // Fail loud guest-side: a non-finite op would have produced invalid
+            // JSON and the host would drop the whole batch with no reason.
+            return Err(Vec::from(
+                &b"{\"error\":\"non-finite number in draw list\"}"[..],
+            ));
+        }
         let mut body = String::from("{\"canvasId\":");
         json_escape(&mut body, canvas_id);
         body.push_str(",\"ops\":[");
@@ -901,6 +966,10 @@ pub mod gpu {
         // within_budget() from `cost` alone — one oversized draw is a violation
         // on its own even if the submit totals look fine.
         violated: bool,
+        // Latched when an op was fed a non-finite float: NaN/inf format as
+        // `NaN`/`inf` — not legal JSON — so one bad op would make the whole
+        // submit unparseable host-side. Skip the op, latch, fail loud in submit().
+        non_finite: bool,
     }
 
     impl CommandBuffer {
@@ -919,7 +988,27 @@ pub mod gpu {
 
         /// `BEGIN_PASS` — open a render pass on the configured canvas, clearing to
         /// the given straight-alpha color (each channel in `[0, 1]`).
+        // Guard for float-taking ops: non-finite input skips the op and
+        // latches the buffer invalid (see `non_finite`).
+        fn finite(&mut self, vals: &[f32]) -> bool {
+            if vals.iter().all(|v| v.is_finite()) {
+                true
+            } else {
+                self.non_finite = true;
+                false
+            }
+        }
+
+        /// Whether every op so far had finite numeric arguments. A `false`
+        /// buffer is rejected by [`submit`] before it reaches the host.
+        pub fn is_valid(&self) -> bool {
+            !self.non_finite
+        }
+
         pub fn begin_pass(&mut self, r: f32, g: f32, b: f32, a: f32) -> &mut Self {
+            if !self.finite(&[r, g, b, a]) {
+                return self;
+            }
             self.push(format!(
                 "{{\"op\":\"BEGIN_PASS\",\"r\":{r},\"g\":{g},\"b\":{b},\"a\":{a}}}"
             ));
@@ -976,6 +1065,9 @@ pub mod gpu {
         /// `SET_VIEWPORT` — restrict rasterization to a rectangle (device px). Also
         /// sets the fill-rate estimate's current area for subsequent draws.
         pub fn set_viewport(&mut self, x: f32, y: f32, w: f32, h: f32) -> &mut Self {
+            if !self.finite(&[x, y, w, h]) {
+                return self;
+            }
             let aw = if w > 0.0 { w as u64 } else { 0 };
             let ah = if h > 0.0 { h as u64 } else { 0 };
             self.viewport_area = aw.saturating_mul(ah);
@@ -1155,6 +1247,13 @@ pub mod gpu {
     /// (unknown/unconfigured canvas, over-budget, device lost). The buffer is sent
     /// as-is; if it does not already end with a `SUBMIT` op the host appends one.
     pub async fn submit(canvas_id: &str, cmds: &CommandBuffer) -> Result<Vec<u8>, Vec<u8>> {
+        if !cmds.is_valid() {
+            // Fail loud guest-side: a non-finite op would have produced invalid
+            // JSON and the host would drop the whole submit with no reason.
+            return Err(Vec::from(
+                &b"{\"ok\":false,\"reason\":\"non-finite number in command buffer\"}"[..],
+            ));
+        }
         let mut body = String::from("{\"canvasId\":");
         json_escape(&mut body, canvas_id);
         body.push_str(",\"ops\":[");
@@ -1582,6 +1681,42 @@ mod tests {
                 "control char {:#x} leaked through unescaped",
                 c as u32
             );
+        }
+    }
+
+    mod non_finite_guard {
+        use crate::{canvas, gpu};
+
+        #[test]
+        fn draw_list_latches_on_nan_and_skips_the_op() {
+            let mut list = canvas::DrawList::new();
+            list.fill_rect(0.0, 0.0, 10.0, 10.0);
+            assert!(list.is_valid());
+            assert_eq!(list.len(), 1);
+            list.line_to(f64::NAN, 1.0);
+            assert!(!list.is_valid());
+            assert_eq!(list.len(), 1, "non-finite op must not be queued");
+            // Latch is sticky: later valid ops don't un-latch.
+            list.fill_rect(1.0, 1.0, 2.0, 2.0);
+            assert!(!list.is_valid());
+        }
+
+        #[test]
+        fn draw_list_latches_on_infinity() {
+            let mut list = canvas::DrawList::new();
+            list.set_transform(1.0, 0.0, 0.0, f64::INFINITY, 0.0, 0.0);
+            assert!(!list.is_valid());
+            assert!(list.is_empty());
+        }
+
+        #[test]
+        fn command_buffer_latches_on_non_finite() {
+            let mut cb = gpu::CommandBuffer::new();
+            cb.begin_pass(0.0, 0.0, 0.0, 1.0);
+            assert!(cb.is_valid());
+            cb.set_viewport(0.0, 0.0, f32::NAN, 100.0);
+            assert!(!cb.is_valid());
+            assert_eq!(cb.cost().cmds, 1, "non-finite op must not be queued");
         }
     }
 
