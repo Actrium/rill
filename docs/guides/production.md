@@ -36,7 +36,7 @@ const engine = new Engine({
 });
 ```
 
-For the QuickJS provider, timeout enforcement is best-effort because QuickJS does not support preemptive interruption from another thread in all cases.
+Enforcement is engine-specific: the QuickJS and Hermes (JSI) providers abort a runaway eval with a hard wall-clock interrupt; JSC has no public interrupt API and does not enforce the timeout — see [Sandbox Comparison](../reference/sandbox-comparison.md) for the full matrix.
 
 ### Error Classification
 

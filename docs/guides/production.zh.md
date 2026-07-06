@@ -36,7 +36,7 @@ const engine = new Engine({
 });
 ```
 
-对于 QuickJS provider,超时强制执行是尽力而为的,因为 QuickJS 在所有情况下都不支持从另一个线程进行抢占式中断。
+强制执行方式因引擎而异:QuickJS 与 Hermes (JSI) provider 会以硬性 wall-clock 中断终止失控的 eval;JSC 没有公开的中断 API,不强制超时 —— 完整矩阵见[沙箱对比](../reference/sandbox-comparison.zh.md)。
 
 ### 错误分类
 
