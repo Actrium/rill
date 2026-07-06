@@ -33,7 +33,12 @@ import type {
   BridgeValueObject,
   SendToHost,
 } from '../../shared';
-import { CallbackRegistryImpl as CallbackRegistry, HostMsg } from '../../shared';
+import {
+  CallbackRegistryImpl as CallbackRegistry,
+  CONFIG_UPDATE_EVENT,
+  HostMsg,
+  REF_RESULT_EVENT,
+} from '../../shared';
 import { Bridge } from '../../shared/bridge/bridge';
 import { Receiver } from '../receiver';
 import type { ComponentMap } from '../registry';
@@ -729,7 +734,7 @@ export class Engine implements IEngine {
           if (message.type === HostMsg.REF_METHOD_RESULT) {
             this.context.inject('__refResultMessage', message);
             await this.evalCode(
-              "globalThis.__rill.dispatchEvent('__REF_RESULT__', __refResultMessage)"
+              `globalThis.__rill.dispatchEvent('${REF_RESULT_EVENT}', __refResultMessage)`
             );
             this.context.inject('__refResultMessage', undefined);
             return;
@@ -1361,11 +1366,11 @@ export class Engine implements IEngine {
                 typeof globalThis.__rill.dispatchEvent === 'function') {
               globalThis.__rill.dispatchEvent(message.eventName, message.payload);
             }
-          } else if (message.type === 'CONFIG_UPDATE') {
+          } else if (message.type === '${HostMsg.CONFIG_UPDATE}') {
             // Forward config updates to the Host event system so Guest hooks can subscribe.
             if (typeof globalThis.__rill !== 'undefined' &&
                 typeof globalThis.__rill.dispatchEvent === 'function') {
-              globalThis.__rill.dispatchEvent('CONFIG_UPDATE', message.config);
+              globalThis.__rill.dispatchEvent('${CONFIG_UPDATE_EVENT}', message.config);
             }
             // Also trigger a re-render (idempotent, no-op before first render).
             if (typeof globalThis.__rill_scheduleRender === 'function') {
