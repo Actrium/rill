@@ -7,16 +7,22 @@
 # --remap-path-prefix keeps build-machine absolute paths out of the .wasm
 # (panic Location strings would otherwise embed them), so fixtures are
 # byte-reproducible across checkouts.
+#
+# CARGO_TARGET_DIR is dedicated: plain `cargo test`/`cargo clippy` runs (no
+# remap flag) share the default target/ and cargo may reuse their artifacts
+# without honoring the RUSTFLAGS change — which silently re-embeds absolute
+# paths. An isolated target dir makes the remap unconditional.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 TARGET=wasm32-unknown-unknown
 FIXTURES=../src/host/wasm-guest/__tests__/fixtures
+export CARGO_TARGET_DIR=target/fixtures
 
 RUSTFLAGS="--remap-path-prefix=$(pwd)=." cargo build -p kv-guest -p ui-guest -p seq-guest -p event-guest -p heap-exhaust-guest -p canvas-guest -p canvas-present-guest -p canvas-gpu-guest -p canvas-escape-guest -p asset-guest --target "$TARGET" --release
 
 stage() { # <crate-lib-name> <fixture-name>
-  cp "target/$TARGET/release/$1.wasm" "$FIXTURES/$2"
+  cp "$CARGO_TARGET_DIR/$TARGET/release/$1.wasm" "$FIXTURES/$2"
   echo "staged: $FIXTURES/$2 ($(wc -c < "$FIXTURES/$2") bytes)"
 }
 stage kv_guest kv-guest.wasm
