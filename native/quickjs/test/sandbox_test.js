@@ -496,6 +496,34 @@
     'dispose() returns despite a self-requeueing pending job'
   );
 
+  // 31. Heap quota (maxHeapBytes -> JS_SetMemoryLimit)
+  console.log('\n31. Heap Quota');
+  var quotaRt = sandbox.createRuntime({ maxHeapBytes: 8 * 1024 * 1024 });
+  var quotaCtx = quotaRt.createContext();
+  var oomThrew = false;
+  var oomMsg = '';
+  try {
+    quotaCtx.eval('var big = new Uint8Array(64 * 1024 * 1024); big.length');
+  } catch (e) {
+    oomThrew = true;
+    oomMsg = String(e?.message || e);
+  }
+  assert(oomThrew, 'Allocation beyond maxHeapBytes throws', `got: ${oomMsg}`);
+  assert(quotaCtx.eval('1 + 1') === 2, 'Context stays usable after quota OOM');
+  assert(
+    quotaCtx.eval('new Uint8Array(1024 * 1024).length') === 1048576,
+    'Small allocations still work under the quota'
+  );
+  quotaRt.dispose();
+
+  var defaultHeapRt = sandbox.createRuntime({});
+  var defaultHeapCtx = defaultHeapRt.createContext();
+  assert(
+    defaultHeapCtx.eval('new Uint8Array(64 * 1024 * 1024).length') === 67108864,
+    'Default heap limit still allows a 64MB allocation'
+  );
+  defaultHeapRt.dispose();
+
   // Summary
   console.log('\n=== Test Summary ===');
   console.log(`Total: ${testsRun}`);

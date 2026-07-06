@@ -158,7 +158,10 @@ private:
  */
 class QuickJSSandboxRuntime : public jsi::HostObject {
 public:
-  QuickJSSandboxRuntime(jsi::Runtime &hostRuntime, double timeout);
+  // `maxHeapBytes <= 0` (or non-finite / not representable as size_t) means
+  // "use the default heap limit" (256MB).
+  QuickJSSandboxRuntime(jsi::Runtime &hostRuntime, double timeout,
+                        double maxHeapBytes = 0);
   ~QuickJSSandboxRuntime() override;
 
   jsi::Value get(jsi::Runtime &rt, const jsi::PropNameID &name) override;

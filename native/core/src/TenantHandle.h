@@ -21,7 +21,10 @@ public:
 
   /// Create the underlying sandbox runtime + context.
   /// Must be called on the thread where the sandbox will run.
-  void createSandbox(facebook::jsi::Runtime& hostRuntime, double timeout);
+  /// `maxHeapBytes <= 0` means "engine default". Engines that cannot cap
+  /// their heap (JSC, Hermes today) ignore the option.
+  void createSandbox(facebook::jsi::Runtime& hostRuntime, double timeout,
+                     double maxHeapBytes = 0);
 
   /// Evaluate JS code in the sandbox context.
   facebook::jsi::Value eval(facebook::jsi::Runtime& hostRuntime,

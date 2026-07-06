@@ -60,8 +60,12 @@ export interface SandboxModule {
    * native interrupt handler; Hermes and JSC have no equivalent interrupt
    * API and currently IGNORE this option — a tenant loop blocks the host
    * thread there. `timeout <= 0` means unlimited.
+   *
+   * `maxHeapBytes` caps the sandbox heap. Enforced by QuickJS
+   * (JS_SetMemoryLimit; <= 0 uses the engine default); Hermes and JSC
+   * currently ignore it.
    */
-  createRuntime(options?: { timeout?: number }): SandboxRuntime;
+  createRuntime(options?: { timeout?: number; maxHeapBytes?: number }): SandboxRuntime;
   isAvailable(): boolean;
 }
 

@@ -705,7 +705,8 @@ jsi::Value QuickJSSandboxContext::qjsToJSI(jsi::Runtime &rt, JSValue value,
 // MARK: - QuickJSSandboxRuntime Implementation
 
 QuickJSSandboxRuntime::QuickJSSandboxRuntime(jsi::Runtime &hostRuntime,
-                                             double timeout)
+                                             double timeout,
+                                             double maxHeapBytes)
     : qjsRuntime_(nullptr), hostRuntime_(&hostRuntime), timeout_(timeout),
       interruptState_(std::make_shared<InterruptState>()), disposed_(false) {
   qjsRuntime_ = JS_NewRuntime();
@@ -751,8 +752,15 @@ QuickJSSandboxRuntime::QuickJSSandboxRuntime(jsi::Runtime &hostRuntime,
   JS_SetCanBlock(qjsRuntime_, true);
   JS_SetRuntimeInfo(qjsRuntime_, "RillQuickJSSandbox");
 
-  // Set memory limit (optional)
-  JS_SetMemoryLimit(qjsRuntime_, 256 * 1024 * 1024); // 256MB
+  // Heap limit: the tenant quota when provided, the 256MB default otherwise.
+  // Guard the double->size_t cast (Infinity / oversized values are UB to
+  // cast): anything not representable falls back to the default.
+  constexpr double kMaxRepresentableHeap = 1.0e18; // < SIZE_MAX on 64-bit
+  size_t heapLimit = 256 * 1024 * 1024; // 256MB default
+  if (maxHeapBytes >= 1 && maxHeapBytes < kMaxRepresentableHeap) {
+    heapLimit = static_cast<size_t>(maxHeapBytes);
+  }
+  JS_SetMemoryLimit(qjsRuntime_, heapLimit);
 }
 
 QuickJSSandboxRuntime::~QuickJSSandboxRuntime() { dispose(); }
@@ -870,7 +878,8 @@ jsi::Value QuickJSSandboxModule::get(jsi::Runtime &rt,
         rt, name, 1,
         [](jsi::Runtime &rt, const jsi::Value &, const jsi::Value *args,
            size_t count) -> jsi::Value {
-          double timeout = 30000; // default 30s
+          double timeout = 30000;   // default 30s
+          double maxHeapBytes = 0;  // <= 0: default heap limit (256MB)
 
           if (count > 0 && args[0].isObject()) {
             jsi::Object opts = args[0].asObject(rt);
@@ -880,9 +889,16 @@ jsi::Value QuickJSSandboxModule::get(jsi::Runtime &rt,
                 timeout = timeoutVal.getNumber();
               }
             }
+            if (opts.hasProperty(rt, "maxHeapBytes")) {
+              jsi::Value heapVal = opts.getProperty(rt, "maxHeapBytes");
+              if (heapVal.isNumber()) {
+                maxHeapBytes = heapVal.getNumber();
+              }
+            }
           }
 
-          auto runtime = std::make_shared<QuickJSSandboxRuntime>(rt, timeout);
+          auto runtime =
+              std::make_shared<QuickJSSandboxRuntime>(rt, timeout, maxHeapBytes);
           return jsi::Object::createFromHostObject(rt, runtime);
         });
   }

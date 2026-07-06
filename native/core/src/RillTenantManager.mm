@@ -668,7 +668,8 @@ TenantId RillTenantManager::createTenant(facebook::jsi::Runtime& rt,
 
   // P0.1: Create sandbox on the host thread (same thread)
   try {
-    handle->createSandbox(rt, tc.timeout);
+    handle->createSandbox(rt, tc.timeout,
+                          static_cast<double>(tc.quota.maxHeapBytes));
   } catch (const std::exception& e) {
     // Copy callback under a dedicated mutex; do NOT call Host JS while holding
     // the TenantManager state mutex (risk of re-entrant deadlocks).
