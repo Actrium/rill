@@ -21,6 +21,8 @@ export {
   CallbackRegistry as CallbackRegistryImpl,
   globalCallbackRegistry,
 } from './callback-registry';
+// Host <-> guest boundary event names
+export { CONFIG_UPDATE_EVENT, REF_RESULT_EVENT, RENDER_ERROR_EVENT } from './events';
 // Web keyboard bridge protocol (issue #19, L3)
 export {
   KBD_EVENT,
@@ -116,5 +118,6 @@ export {
   isSerializedRegExp,
   isSerializedSet,
   isSerializedSpecialType,
+  OPERATION_TYPES,
   operationHasProps,
 } from './types';

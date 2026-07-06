@@ -6,6 +6,7 @@
  */
 
 import type { ReviewedUnknown } from '../shared';
+import { REF_RESULT_EVENT, RENDER_ERROR_EVENT } from '../shared/events';
 import { KBD_EVENT, KBD_SUBSCRIBE, KBD_UNSUBSCRIBE, type RillKeyEvent } from '../shared/keyboard';
 import type {
   ImageSource,
@@ -589,7 +590,7 @@ export function useKeyboard(spec: UseKeyboardSpec): void {
 
   // Re-subscribe only when the key set or preventDefault intent changes.
   const specKeys = spec.keys ?? null;
-  const keysKey = specKeys === null ? '*' : [...specKeys].sort().join(' ');
+  const keysKey = specKeys === null ? '*' : [...specKeys].sort().join('\u0000');
   const preventDefault = spec.preventDefault ?? false;
 
   useEffect(() => {
@@ -744,10 +745,10 @@ export function useRemoteRef<T = unknown>(options?: {
       }
     };
 
-    // Subscribe to __REF_RESULT__ events
+    // Subscribe to REF_RESULT_EVENT messages from the host
     const unsubscribe = (
       g.__rill_onHostEvent as (name: string, cb: (payload: RefMethodResult) => void) => () => void
-    )('__REF_RESULT__', handleResult);
+    )(REF_RESULT_EVENT, handleResult);
 
     return unsubscribe;
   }, [nodeId]);
@@ -921,7 +922,7 @@ export class RillErrorBoundary extends (React.Component as unknown as new (
     if ('__rill_emitEvent' in g) {
       // Reason: Error payload can be any serializable type
       const sendToHost = g.__rill_emitEvent as (name: string, payload: unknown) => void;
-      sendToHost('RENDER_ERROR', {
+      sendToHost(RENDER_ERROR_EVENT, {
         message: error.message,
         stack: error.stack,
         componentStack: info.componentStack,

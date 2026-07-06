@@ -35,8 +35,14 @@ import {
   decodeObject as sharedDecodeObject,
   encodeObject as sharedEncodeObject,
 } from '..';
+// Imported from './types' directly (not '..') to avoid a circular-init TDZ:
+// shared/index.ts re-exports this module before types constants initialize.
+import { OPERATION_TYPES } from '../types';
 import { BinaryProtocol, type BinaryProtocolConfig } from './binary-protocol';
 import { PromiseManager, type PromiseSettleResult } from './promise-manager';
+
+// Runtime membership set for the OperationType union (see shared/types.ts).
+const VALID_OPERATION_TYPES: ReadonlySet<string> = new Set(OPERATION_TYPES);
 
 /**
  * Bridge
@@ -278,11 +284,51 @@ export class Bridge {
     if (this.debug) {
       console.log('[Bridge] sendJsonBatch input:', `JSON string(${json.length})`);
     }
-    const serializedBatch = JSON.parse(json) as SerializedOperationBatch;
+    const serializedBatch = Bridge.assertSerializedBatchShape(JSON.parse(json));
     if (this.debug) {
       console.log('[Bridge] Decoded JSON batch:', serializedBatch.operations.length, 'operations');
     }
     this.dispatchSerializedBatch(serializedBatch);
+  }
+
+  /**
+   * Cheap structural validation for a JSON-decoded batch arriving across the
+   * guest -> host trust boundary. Deliberately not a full schema check — it
+   * only guards the invariants the dispatch path relies on (batch is an
+   * object, `operations` is an array, every entry is an object with a known
+   * `op` discriminant). Anything else throws with enough context to trace
+   * the offending guest payload.
+   */
+  // Reason: JSON.parse output from the guest is untrusted until this check runs
+  private static assertSerializedBatchShape(value: unknown): SerializedOperationBatch {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      throw new Error(
+        `[Bridge] sendJsonBatch: expected a batch object, got ${value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value}`
+      );
+    }
+    // Reason: probing an untrusted object's field before it is proven to be an array
+    const operations = (value as { operations?: unknown }).operations;
+    if (!Array.isArray(operations)) {
+      throw new Error(
+        `[Bridge] sendJsonBatch: batch.operations must be an array, got ${typeof operations}`
+      );
+    }
+    for (let i = 0; i < operations.length; i++) {
+      const op = operations[i];
+      if (typeof op !== 'object' || op === null) {
+        throw new Error(
+          `[Bridge] sendJsonBatch: operations[${i}] must be an object, got ${op === null ? 'null' : typeof op}`
+        );
+      }
+      // Reason: probing an untrusted operation's discriminant before validation
+      const opType = (op as { op?: unknown }).op;
+      if (typeof opType !== 'string' || !VALID_OPERATION_TYPES.has(opType)) {
+        throw new Error(
+          `[Bridge] sendJsonBatch: operations[${i}].op is not a known operation type (got ${JSON.stringify(opType)})`
+        );
+      }
+    }
+    return value as SerializedOperationBatch;
   }
 
   /**

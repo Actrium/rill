@@ -270,16 +270,6 @@ export function transformGuestElement(
   const looksLikeElement =
     !isRillElement && !hasSymbolType && Object.hasOwn(el, 'type') && Object.hasOwn(el, 'props');
 
-  // DEBUG: log element being processed
-  const elType = typeof el.type === 'string' ? el.type : 'non-string';
-  if (elType === 'TouchableOpacity') {
-    const propKeys = el.props ? Object.keys(el.props as Record<string, unknown>) : [];
-    const hasOnPress = el.props && 'onPress' in (el.props as Record<string, unknown>);
-    console.log(
-      `[rill:transform] TouchableOpacity | isRillElement=${isRillElement} | looksLikeElement=${looksLikeElement} | propKeys=${propKeys.join(',')} | hasOnPress=${hasOnPress}`
-    );
-  }
-
   // Note: looksLikeElement fires when elements lose markers across JSI bridge.
   // No console output here — see PERF comment at top of file.
 
