@@ -1,0 +1,12 @@
+[package]
+name = "canvas-present-guest"
+version = "0.0.0"
+edition = "2021"
+description = "Demo native rill guest that software-renders an animated RGBA8 framebuffer and hands each frame to host:canvas.present (stage ② framebuffer path)."
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rill-guest = { path = "../rill-guest" }

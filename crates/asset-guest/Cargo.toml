@@ -1,0 +1,12 @@
+[package]
+name = "asset-guest"
+version = "0.0.0"
+edition = "2021"
+description = "Demo native rill guest that resolves an app-package asset to decoded RGBA in its own linear memory via host:asset.info + host:asset.blit (the ④ pixera path)."
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rill-guest = { path = "../rill-guest" }

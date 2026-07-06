@@ -3,6 +3,41 @@
 version = 4
 
 [[package]]
+name = "asset-guest"
+version = "0.0.0"
+dependencies = [
+ "rill-guest",
+]
+
+[[package]]
+name = "canvas-escape-guest"
+version = "0.0.0"
+dependencies = [
+ "rill-guest",
+]
+
+[[package]]
+name = "canvas-gpu-guest"
+version = "0.0.0"
+dependencies = [
+ "rill-guest",
+]
+
+[[package]]
+name = "canvas-guest"
+version = "0.0.0"
+dependencies = [
+ "rill-guest",
+]
+
+[[package]]
+name = "canvas-present-guest"
+version = "0.0.0"
+dependencies = [
+ "rill-guest",
+]
+
+[[package]]
 name = "event-guest"
 version = "0.0.0"
 dependencies = [

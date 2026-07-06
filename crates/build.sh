@@ -9,7 +9,7 @@ cd "$(dirname "$0")"
 TARGET=wasm32-unknown-unknown
 FIXTURES=../src/host/wasm-guest/__tests__/fixtures
 
-RUSTFLAGS=" " cargo build -p kv-guest -p ui-guest -p seq-guest -p event-guest -p heap-exhaust-guest --target "$TARGET" --release
+RUSTFLAGS=" " cargo build -p kv-guest -p ui-guest -p seq-guest -p event-guest -p heap-exhaust-guest -p canvas-guest -p canvas-present-guest -p canvas-gpu-guest -p canvas-escape-guest -p asset-guest --target "$TARGET" --release
 
 stage() { # <crate-lib-name> <fixture-name>
   cp "target/$TARGET/release/$1.wasm" "$FIXTURES/$2"
@@ -20,3 +20,8 @@ stage seq_guest seq-guest.wasm
 stage ui_guest ui-guest.wasm
 stage event_guest event-guest.wasm
 stage heap_exhaust_guest heap-exhaust-guest.wasm
+stage canvas_guest canvas-guest.wasm
+stage canvas_present_guest canvas-present-guest.wasm
+stage canvas_gpu_guest canvas-gpu-guest.wasm
+stage canvas_escape_guest canvas-escape-guest.wasm
+stage asset_guest asset-guest.wasm

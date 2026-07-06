@@ -1,0 +1,12 @@
+[package]
+name = "canvas-gpu-guest"
+version = "0.0.0"
+edition = "2021"
+description = "Demo native rill guest for the stage ③-a host-mediated GPU path: configures a <Canvas> for webgpu (webgl2 fallback), uploads a vertex buffer, and submits a validated command buffer that draws a triangle with a host-preset pipeline each frame (no guest shaders, no readback, within the per-submit cost budget)."
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rill-guest = { path = "../rill-guest" }
