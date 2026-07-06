@@ -57,15 +57,29 @@ export interface SandboxModule {
    *
    * `timeout` (ms) is a wall-clock execution budget per top-level eval.
    * Enforcement is engine-specific: QuickJS interrupts via a native
-   * interrupt handler; Hermes (JSI) enforces via watchTimeLimit; JSC has
-   * no public interrupt API and currently IGNORES this option — a tenant
-   * loop blocks the host thread there. `timeout <= 0` means unlimited.
+   * interrupt handler; Hermes (JSI) enforces via watchTimeLimit; JSC
+   * ignores it by DEFAULT (no public interrupt API — a tenant loop blocks
+   * the host thread), but enforces it when `enableExecutionTimeLimit` is
+   * explicitly true. `timeout <= 0` means unlimited.
+   *
+   * `enableExecutionTimeLimit` (JSC only, default false): opt in to enforce
+   * `timeout` via JavaScriptCore's private
+   * JSContextGroupSetExecutionTimeLimit API, resolved at runtime with dlsym
+   * so no private symbol is statically linked. App Store review caveat:
+   * private-API use may still be rejected — intended for enterprise or
+   * internal distribution. If the symbols cannot be resolved at runtime,
+   * JSC logs and falls back to the unenforced default. QuickJS and Hermes
+   * ignore this flag (they always enforce `timeout`).
    *
    * `maxHeapBytes` caps the sandbox heap. Enforced by QuickJS
    * (JS_SetMemoryLimit; <= 0 uses the engine default); Hermes and JSC
    * currently ignore it.
    */
-  createRuntime(options?: { timeout?: number; maxHeapBytes?: number }): SandboxRuntime;
+  createRuntime(options?: {
+    timeout?: number;
+    enableExecutionTimeLimit?: boolean;
+    maxHeapBytes?: number;
+  }): SandboxRuntime;
   isAvailable(): boolean;
 }
 
