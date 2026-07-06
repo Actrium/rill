@@ -5,6 +5,14 @@
 resolver = "2"
 members = ["rill-guest", "kv-guest", "ui-guest", "seq-guest", "event-guest", "heap-exhaust-guest", "canvas-guest", "canvas-present-guest", "canvas-gpu-guest", "canvas-escape-guest", "asset-guest"]
 
+# Shared package metadata: members inherit via `<field>.workspace = true` so
+# version / edition / license live in ONE place. Every member is internal SDK /
+# test-fixture tooling, never published — hence `publish = false` on each.
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+
 [profile.release]
 panic = "abort"
 opt-level = "s"

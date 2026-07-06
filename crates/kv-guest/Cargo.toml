@@ -1,9 +1,10 @@
 [package]
 name = "kv-guest"
-version = "0.0.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Demo native rill guest: calls host:kv.put through the rill-guest SDK."
-license = "Apache-2.0"
+license.workspace = true
+publish = false
 
 [lib]
 crate-type = ["cdylib"]
