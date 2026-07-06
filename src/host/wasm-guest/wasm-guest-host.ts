@@ -118,6 +118,13 @@ export class WasmGuestHost {
   /** Allocate guest memory via rill_alloc and copy `bytes` in; returns the ptr. */
   private allocWrite(bytes: Uint8Array): number {
     const ptr = (this.instance.exports.rill_alloc as (n: number) => number)(bytes.length) >>> 0;
+    // rill_alloc returning 0 (NULL) is the allocator's failure signal (e.g. the
+    // SDK's bump heap is exhausted). Address 0 is IN bounds, so without this
+    // check the write below would silently corrupt whatever the guest keeps at
+    // the bottom of its linear memory. Fail closed instead.
+    if (ptr === 0 && bytes.length > 0) {
+      throw new Error(`guest rill_alloc failed (returned 0) for ${bytes.length} bytes`);
+    }
     // rill_alloc is guest code: a broken/exhausted allocator can hand back a
     // pointer that doesn't fit. Validate before writing (re-reads the buffer,
     // which may have grown during alloc). Fails closed instead of writing OOB.

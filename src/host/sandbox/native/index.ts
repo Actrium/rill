@@ -52,6 +52,15 @@ export interface SandboxRuntime {
  * Common module interface
  */
 export interface SandboxModule {
+  /**
+   * Create an isolated runtime.
+   *
+   * `timeout` (ms) is a wall-clock execution budget per top-level eval.
+   * Enforcement is engine-specific: QuickJS interrupts execution via a
+   * native interrupt handler; Hermes and JSC have no equivalent interrupt
+   * API and currently IGNORE this option — a tenant loop blocks the host
+   * thread there. `timeout <= 0` means unlimited.
+   */
   createRuntime(options?: { timeout?: number }): SandboxRuntime;
   isAvailable(): boolean;
 }

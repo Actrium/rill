@@ -23,8 +23,8 @@ import { WasmGuestHost } from '../wasm-guest-host';
 import { WasmGuestView } from '../wasm-guest-view';
 
 // A real guest gives us a real WebAssembly.Memory to write into. roundtrip.wasm
-// calls host:kv on init; whether or not host:kv is wired, load() sets up memory,
-// which is all these tests need.
+// calls host:store on init; whether or not host:store is wired, load() sets up
+// memory, which is all these tests need.
 const WASM = readFileSync(join(import.meta.dir, 'fixtures/roundtrip.wasm'));
 
 // --- tiny seeded PRNG (reproducible, no deps) — same shape as the host test's ---
@@ -40,20 +40,20 @@ function makePrng(seed: number): () => number {
   };
 }
 
-// A minimal host:kv contract + impl so a WasmGuestView can be constructed the
+// A minimal host:store contract + impl so a WasmGuestView can be constructed the
 // same way an Engine would (contract + hostModules, dispatch built internally).
 // The impl is irrelevant to the memory tests; roundtrip.wasm just needs load()
 // to succeed so the view owns a live WasmGuestHost + memory.
-function kvContract(): { contract: RillContractShape; hostModules: HostModuleImplementationMap } {
+function storeContract(): { contract: RillContractShape; hostModules: HostModuleImplementationMap } {
   const contract = defineRillContract({
     version: '1',
     hostModules: {
-      'host:kv': {
-        put: rpc<{ k: string; v: string }, { version: number }>({
+      'host:store': {
+        putText: rpc<{ key: string; text: string }, { version: number }>({
           schema: {
             parseInput: (x) => ({
-              k: String((x as { k?: unknown })?.k ?? ''),
-              v: String((x as { v?: unknown })?.v ?? ''),
+              key: String((x as { key?: unknown })?.key ?? ''),
+              text: String((x as { text?: unknown })?.text ?? ''),
             }),
             parseOutput: (x) => ({ version: Number((x as { version?: unknown })?.version) || 0 }),
           },
@@ -63,8 +63,8 @@ function kvContract(): { contract: RillContractShape; hostModules: HostModuleImp
     guestExports: {},
   });
   const hostModules = implementHostModules(contract, {
-    'host:kv': {
-      put: async () => ({ version: 1 }),
+    'host:store': {
+      putText: async () => ({ version: 1 }),
     },
   });
   return { contract, hostModules };
@@ -155,7 +155,7 @@ describe('WasmGuestView.readGuestMemory / writeGuestMemory — delegate to the b
   const N = 32;
 
   async function makeView(): Promise<WasmGuestView> {
-    const { contract, hostModules } = kvContract();
+    const { contract, hostModules } = storeContract();
     const view = new WasmGuestView({
       wasmBytes: WASM,
       contract,

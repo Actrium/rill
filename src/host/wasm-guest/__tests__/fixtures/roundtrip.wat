@@ -1,8 +1,8 @@
 ;; Minimal native (non-JS) rill guest — proves the linear-memory host:* ABI.
-;; On rill_init it makes ONE host call (test:kv.put); the host writes the result
-;; back into this module's memory (via rill_alloc) and calls rill_resolve, which
-;; stashes ok/ptr/len into globals the test reads. Hand-written so the ABI is
-;; visible at the wire level; see docs/native-guest.zh.md.
+;; On rill_init it makes ONE host call (host:store.putText); the host writes the
+;; result back into this module's memory (via rill_alloc) and calls rill_resolve,
+;; which stashes ok/ptr/len into globals the test reads. Hand-written so the ABI
+;; is visible at the wire level; see docs/native-guest.zh.md.
 (module
   ;; host -> guest import: rill_host_call(mod_ptr,mod_len, method_ptr,method_len, in_ptr,in_len, cb_id)
   (import "env" "rill_host_call"
@@ -11,9 +11,9 @@
   (memory (export "memory") 1)
 
   ;; static request bytes
-  (data (i32.const 0)  "host:kv")                     ;; module @0  len 7
-  (data (i32.const 16) "put")                         ;; method @16 len 3
-  (data (i32.const 32) "{\"k\":\"a\",\"v\":\"b\"}")   ;; input  @32 len 17
+  (data (i32.const 0)  "host:store")                       ;; module @0  len 10
+  (data (i32.const 16) "putText")                          ;; method @16 len 7
+  (data (i32.const 32) "{\"key\":\"a\",\"text\":\"b\"}")  ;; input  @32 len 22
 
   (global $bump (mut i32) (i32.const 1024))           ;; bump allocator (above the request region)
   (global $r_ok  (mut i32) (i32.const -1))
@@ -36,9 +36,9 @@
   ;; entry: make one host:* call
   (func (export "rill_init")
     (call $host_call
-      (i32.const 0)  (i32.const 7)
-      (i32.const 16) (i32.const 3)
-      (i32.const 32) (i32.const 17)
+      (i32.const 0)  (i32.const 10)
+      (i32.const 16) (i32.const 7)
+      (i32.const 32) (i32.const 22)
       (i32.const 1)))
 
   (func (export "resolve_ok")  (result i32) (global.get $r_ok))

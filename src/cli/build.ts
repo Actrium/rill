@@ -72,7 +72,7 @@ export interface BuildOptions {
 
   /**
    * Custom footer file path (replaces default auto-render footer)
-   * Used for custom render logic (e.g., askc usePanels hook)
+   * Used for custom render logic (e.g., a host-specific layout hook)
    */
   footer?: string;
 

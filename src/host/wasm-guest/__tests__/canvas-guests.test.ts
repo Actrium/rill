@@ -9,7 +9,7 @@ import { WasmGuestHost } from '../wasm-guest-host';
 // Real Rust guests built via the rill-guest canvas/asset/gpu SDK (crates/build.sh).
 // These drive the SDK modules end-to-end over the native-guest ABI: rill knows
 // nothing about host:canvas / host:gpu, so a test-local dispatch RECORDS what the
-// guest emitted — exactly as kvDispatch does for host:kv in wasm-guest-host.test.ts.
+// guest emitted — exactly as storeDispatch does for host:store in wasm-guest-host.test.ts.
 const fx = (n: string) => readFileSync(join(import.meta.dir, 'fixtures', n));
 const CANVAS_GUEST = fx('canvas-guest.wasm'); // ① host:canvas.draw display list
 const PRESENT_GUEST = fx('canvas-present-guest.wasm'); // ② framebuffer present
