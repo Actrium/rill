@@ -1,3 +1,6 @@
+// WIP subsystem — gated behind RILL_WIP_NATIVE_SECURITY (off by default in production builds).
+// Rationale, goals, current status, and completion TODO live in security/SecurityManager.h.
+#if RILL_WIP_NATIVE_SECURITY
 #include "SecurityManager.h"
 
 namespace rill::security {
@@ -84,3 +87,4 @@ SecurityManager::GlobalAuditReport SecurityManager::getAuditReport() const {
 }
 
 } // namespace rill::security
+#endif // RILL_WIP_NATIVE_SECURITY

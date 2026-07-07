@@ -63,9 +63,14 @@ TEST_BINARY = $(BUILD_DIR)/core_test
 EXTRA_CXXFLAGS ?=
 EXTRA_LDFLAGS ?=
 
+# WIP subsystems are gated out of production builds (see RillSandboxNative.podspec).
+# The test build always enables them so the CDP and native-security code keeps
+# compiling and running — tests are what stop "WIP" from rotting into "broken".
+WIP_DEFS = -DRILL_WIP_CDP_DEVTOOLS=1 -DRILL_WIP_NATIVE_SECURITY=1
+
 # C++ compiler flags
 CXXFLAGS = -std=c++17 -O2 -Wall -Wextra -Wpedantic
-CXXFLAGS += -I.
+CXXFLAGS += -I. $(WIP_DEFS)
 CXXFLAGS += $(EXTRA_CXXFLAGS)
 
 # Linker flags
@@ -108,7 +113,7 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 # Debug build
-debug: CXXFLAGS = -std=c++17 -g -O0 -Wall -Wextra -Wpedantic -DDEBUG -I. $(EXTRA_CXXFLAGS)
+debug: CXXFLAGS = -std=c++17 -g -O0 -Wall -Wextra -Wpedantic -DDEBUG -I. $(WIP_DEFS) $(EXTRA_CXXFLAGS)
 debug: clean all
 
 # Address sanitizer build

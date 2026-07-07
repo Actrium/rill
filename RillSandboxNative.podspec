@@ -43,6 +43,11 @@ Pod::Spec.new do |s|
     "native/core/src/TenantContext.{h,cpp}",
     "native/core/src/TenantRegistry.{h,cpp}",
     "native/core/src/EventBus.{h,cpp}",
+    # WIP subsystems. Their bodies are wrapped in #if RILL_WIP_* (off by default),
+    # so these files compile to empty translation units in a normal build — no
+    # binary weight, no accidental use. Enable for evaluation with
+    # RILL_WIP_CDP_DEVTOOLS=1 / RILL_WIP_NATIVE_SECURITY=1 (forwarded below).
+    # See devtools/CDPServer.h and security/SecurityManager.h for status/TODO.
     "native/core/src/security/*.{h,cpp}",
     "native/core/src/devtools/*.{h,cpp}",
     "native/core/src/devtools/CDPTransportApple.{h,mm}"
@@ -115,6 +120,11 @@ Pod::Spec.new do |s|
   else
     preprocessor_defs += ' RILL_SANDBOX_ENGINE=1'
   end
+
+  # WIP subsystems, opt-in for evaluation builds (off by default). See the
+  # common_sources note above and the headers for status/TODO.
+  preprocessor_defs += ' RILL_WIP_CDP_DEVTOOLS=1' if ENV['RILL_WIP_CDP_DEVTOOLS'] == '1'
+  preprocessor_defs += ' RILL_WIP_NATIVE_SECURITY=1' if ENV['RILL_WIP_NATIVE_SECURITY'] == '1'
 
   s.pod_target_xcconfig = {
     'GCC_PREPROCESSOR_DEFINITIONS' => preprocessor_defs,

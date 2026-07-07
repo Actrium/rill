@@ -690,7 +690,11 @@ TenantId RillTenantManager::createTenant(facebook::jsi::Runtime& rt,
 
   tenants_.emplace(id, std::move(handle));
 
-  // P2: Create security context for the tenant
+#if RILL_WIP_NATIVE_SECURITY
+  // WIP (RILL_WIP_NATIVE_SECURITY): build a per-tenant native security context.
+  // Off by default — nothing queries getFileSandbox()/getNetworkSandbox() yet, so
+  // this enforces nothing. It becomes live only if a host module is ever lowered
+  // to native C++ that touches fs/net directly (see security/SecurityManager.h).
   {
     rill::security::SecurityPolicy secPolicy;
     secPolicy.enforced = true;  // Default: enforce security
@@ -714,6 +718,7 @@ TenantId RillTenantManager::createTenant(facebook::jsi::Runtime& rt,
 
     securityManager_.createSecurityContext(id, secPolicy);
   }
+#endif
 
   // P0.2: Create a dedicated TenantThread for timer management
   bool registryRegistered = false;
@@ -759,8 +764,10 @@ void RillTenantManager::destroyTenant(TenantId id) {
   // P2: Clean up EventBus subscriptions for this tenant
   eventBus_.unsubscribeAll(id);
 
-  // P2: Destroy security context
+#if RILL_WIP_NATIVE_SECURITY
+  // WIP (RILL_WIP_NATIVE_SECURITY): tear down the native security context.
   securityManager_.destroySecurityContext(id);
+#endif
 
   it->second->dispose();
   tenants_.erase(it);

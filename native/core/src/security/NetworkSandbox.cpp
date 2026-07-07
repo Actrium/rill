@@ -1,3 +1,6 @@
+// WIP subsystem — gated behind RILL_WIP_NATIVE_SECURITY (off by default in production builds).
+// Rationale, goals, current status, and completion TODO live in security/SecurityManager.h.
+#if RILL_WIP_NATIVE_SECURITY
 #include "NetworkSandbox.h"
 #include <algorithm>
 #include <cctype>
@@ -280,3 +283,4 @@ NetworkPolicy NetworkSandbox::getPolicy() const {
 }
 
 } // namespace rill::security
+#endif // RILL_WIP_NATIVE_SECURITY
