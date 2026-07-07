@@ -87,9 +87,16 @@ pub enum Value<'a> {
     Int32(i32),
     Float64(f64),
     Str(&'a str),
-    /// Only `__fnId` is on the wire in v1 (name/sourceFile are reserved).
+    /// A function reference plus its OPTIONAL DevTools debug metadata. `fn_id`
+    /// is always on the wire; `name` / `source_file` / `source_line` are each
+    /// optional and gated by a flags byte (see `values.FUNCTION` in the
+    /// contract). Present strings are interned in first-appearance order after
+    /// `fn_id`; `source_line` is an inline u32 (a 1-based line, not interned).
     Function {
         fn_id: &'a str,
+        name: Option<&'a str>,
+        source_file: Option<&'a str>,
+        source_line: Option<u32>,
     },
     Object(Vec<(&'a str, Value<'a>)>),
     Array(Vec<Value<'a>>),
@@ -463,10 +470,40 @@ impl Encoder {
                 let r = self.intern(s)?;
                 put_u16(buf, r);
             }
-            Value::Function { fn_id } => {
+            Value::Function {
+                fn_id,
+                name,
+                source_file,
+                source_line,
+            } => {
                 buf.push(tag::FUNCTION);
                 let r = self.intern(fn_id)?;
                 put_u16(buf, r);
+                // flags: bit0=has_name, bit1=has_sourceFile, bit2=has_sourceLine.
+                let mut flags = 0u8;
+                if name.is_some() {
+                    flags |= 0b001;
+                }
+                if source_file.is_some() {
+                    flags |= 0b010;
+                }
+                if source_line.is_some() {
+                    flags |= 0b100;
+                }
+                buf.push(flags);
+                // Present optional fields only, in fnId->name->sourceFile->
+                // sourceLine order (matches the intern first-appearance walk).
+                if let Some(n) = name {
+                    let nr = self.intern(n)?;
+                    put_u16(buf, nr);
+                }
+                if let Some(sf) = source_file {
+                    let sr = self.intern(sf)?;
+                    put_u16(buf, sr);
+                }
+                if let Some(sl) = source_line {
+                    put_u32(buf, *sl);
+                }
             }
             Value::Object(entries) => {
                 if depth > contract::limits::MAX_VALUE_DEPTH {
@@ -609,12 +646,92 @@ mod tests {
                 }
             }
             Json::Arr(items) => Value::Array(items.iter().map(json_to_value).collect()),
-            Json::Obj(entries) => Value::Object(
-                entries
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), json_to_value(v)))
-                    .collect(),
-            ),
+            Json::Obj(entries) => {
+                // A JSON object is a plain OBJECT value UNLESS it carries one of
+                // the matrix fixture's two fixture-only discriminators: an "__mv"
+                // sentinel (for a value JSON cannot express, e.g. undefined) or a
+                // "__type" tag (function/date/error/regexp/map/set/promise, the
+                // guest SerializedValue special kinds). The golden vectors use
+                // neither, so their plain objects/props fall straight through.
+                if let Some(mv) = j.get("__mv").and_then(Json::as_str) {
+                    match mv {
+                        "undefined" => Value::Undefined,
+                        other => panic!("unknown __mv sentinel {other:?}"),
+                    }
+                } else if let Some(ty) = j.get("__type").and_then(Json::as_str) {
+                    match ty {
+                        "function" => Value::Function {
+                            fn_id: req_str(j, "__fnId"),
+                            name: j.get("__name").and_then(Json::as_str),
+                            source_file: j.get("__sourceFile").and_then(Json::as_str),
+                            source_line: j
+                                .get("__sourceLine")
+                                .and_then(Json::as_u64)
+                                .map(|n| n as u32),
+                        },
+                        "date" => Value::Date {
+                            epoch_ms: req_f64(j, "__epochMs"),
+                        },
+                        "error" => Value::Error {
+                            name: req_str(j, "__name"),
+                            message: req_str(j, "__message"),
+                            // Empty/absent stack interns as "" (decoders map that
+                            // back to an absent stack).
+                            stack: j.get("__stack").and_then(Json::as_str).unwrap_or(""),
+                        },
+                        "regexp" => Value::Regexp {
+                            source: req_str(j, "__source"),
+                            flags: req_str(j, "__flags"),
+                        },
+                        "promise" => Value::Promise {
+                            promise_id: req_str(j, "__promiseId"),
+                        },
+                        "map" => Value::Map(
+                            j.get("__entries")
+                                .and_then(Json::items)
+                                .expect("map __entries[]")
+                                .iter()
+                                .map(|pair| {
+                                    let kv = pair.items().expect("map entry is [key, value]");
+                                    (json_to_value(&kv[0]), json_to_value(&kv[1]))
+                                })
+                                .collect(),
+                        ),
+                        "set" => Value::Set(
+                            j.get("__values")
+                                .and_then(Json::items)
+                                .expect("set __values[]")
+                                .iter()
+                                .map(json_to_value)
+                                .collect(),
+                        ),
+                        other => panic!("unknown __type discriminator {other:?}"),
+                    }
+                } else {
+                    Value::Object(
+                        entries
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), json_to_value(v)))
+                            .collect(),
+                    )
+                }
+            }
+        }
+    }
+
+    /// A required interned-string field of a `__type`-tagged matrix value.
+    fn req_str<'a>(j: &'a Json, key: &str) -> &'a str {
+        j.get(key)
+            .and_then(Json::as_str)
+            .unwrap_or_else(|| panic!("matrix value missing string field {key}"))
+    }
+
+    /// A required numeric field (used for `Date.__epochMs`, which may be
+    /// negative, so `as_u64` is not enough).
+    fn req_f64(j: &Json, key: &str) -> f64 {
+        match j.get(key) {
+            Some(Json::Num(n)) => *n,
+            _ => panic!("matrix value missing number field {key}"),
         }
     }
 
@@ -1119,5 +1236,605 @@ mod tests {
             }],
         };
         assert!(enc2.encode_batch(&at_cap).is_ok());
+    }
+
+    // ========================================================================
+    // Comprehensive op x value CONFORMANCE matrix
+    //
+    // The 4 hand golden vectors pin the format byte-exact; this generates a
+    // BROAD corpus (every op kind x every value type, plus nested/mixed combos
+    // and boundary sizes) from THIS encoder — the pinned oracle — into the
+    // checked-in fixture contracts/op-batch-wire.matrix.json. The TS and C++
+    // decoder suites load the SAME file and decode each vector back to its
+    // batch, so all three codecs lock to one artifact. Regenerate the fixture
+    // with `RILL_REGEN_MATRIX=1 cargo test -p rill-guest \
+    //   --features wip-binary-protocol matrix_fixture_in_sync`.
+    // ========================================================================
+
+    /// Build and encode one batch from its `batch` JSON (fresh encoder,
+    /// index-from-0). Shared by the matrix generator and the re-encode test.
+    fn encode_batch_json(batch_json: &Json) -> Vec<u8> {
+        let batch_id = batch_json
+            .get("batchId")
+            .and_then(Json::as_u64)
+            .expect("batch.batchId") as u32;
+        let ops: Vec<Op> = batch_json
+            .get("operations")
+            .and_then(Json::items)
+            .expect("batch.operations")
+            .iter()
+            .map(json_to_op)
+            .collect();
+        Encoder::new()
+            .encode_batch(&Batch { batch_id, ops })
+            .expect("matrix vector must encode")
+    }
+
+    // ---- JSON text builders (values) ---------------------------------------
+    //
+    // Each returns a fragment of JSON text in the guest SerializedValue shape,
+    // with two fixture-only encodings JSON cannot express directly: undefined is
+    // {"__mv":"undefined"} and a Date is {"__type":"date","__epochMs":N} (the
+    // decoders rebuild the ISO string from the ms).
+
+    fn jstr(s: &str) -> String {
+        let mut out = String::from("\"");
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                _ => out.push(c),
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    fn mv_null() -> String {
+        "null".to_string()
+    }
+    fn mv_undefined() -> String {
+        "{\"__mv\":\"undefined\"}".to_string()
+    }
+    fn mv_bool(b: bool) -> String {
+        if b { "true" } else { "false" }.to_string()
+    }
+    fn mv_int(n: i32) -> String {
+        n.to_string()
+    }
+    /// A raw JSON numeric literal chosen to land on FLOAT64 (fractional, or a
+    /// whole number outside i32 range).
+    fn mv_float(lit: &str) -> String {
+        lit.to_string()
+    }
+    fn mv_string(s: &str) -> String {
+        jstr(s)
+    }
+    fn mv_function(fn_id: &str) -> String {
+        format!("{{\"__type\":\"function\",\"__fnId\":{}}}", jstr(fn_id))
+    }
+    /// A function value carrying the full DevTools debug metadata
+    /// (name + sourceFile + sourceLine present, so its flags byte is 0x07).
+    fn mv_function_full(fn_id: &str, name: &str, source_file: &str, source_line: u32) -> String {
+        format!(
+            "{{\"__type\":\"function\",\"__fnId\":{},\"__name\":{},\"__sourceFile\":{},\"__sourceLine\":{}}}",
+            jstr(fn_id),
+            jstr(name),
+            jstr(source_file),
+            source_line
+        )
+    }
+    fn mv_date(ms: i64) -> String {
+        format!("{{\"__type\":\"date\",\"__epochMs\":{ms}}}")
+    }
+    fn mv_error(name: &str, message: &str, stack: Option<&str>) -> String {
+        match stack {
+            Some(s) => format!(
+                "{{\"__type\":\"error\",\"__name\":{},\"__message\":{},\"__stack\":{}}}",
+                jstr(name),
+                jstr(message),
+                jstr(s)
+            ),
+            None => format!(
+                "{{\"__type\":\"error\",\"__name\":{},\"__message\":{}}}",
+                jstr(name),
+                jstr(message)
+            ),
+        }
+    }
+    fn mv_regexp(source: &str, flags: &str) -> String {
+        format!(
+            "{{\"__type\":\"regexp\",\"__source\":{},\"__flags\":{}}}",
+            jstr(source),
+            jstr(flags)
+        )
+    }
+    fn mv_promise(id: &str) -> String {
+        format!("{{\"__type\":\"promise\",\"__promiseId\":{}}}", jstr(id))
+    }
+    fn mv_object(pairs: &[(&str, String)]) -> String {
+        let body: Vec<String> = pairs
+            .iter()
+            .map(|(k, v)| format!("{}:{}", jstr(k), v))
+            .collect();
+        format!("{{{}}}", body.join(","))
+    }
+    fn mv_array(items: &[String]) -> String {
+        format!("[{}]", items.join(","))
+    }
+    fn mv_map(entries: &[(String, String)]) -> String {
+        let body: Vec<String> = entries.iter().map(|(k, v)| format!("[{k},{v}]")).collect();
+        format!("{{\"__type\":\"map\",\"__entries\":[{}]}}", body.join(","))
+    }
+    fn mv_set(items: &[String]) -> String {
+        format!("{{\"__type\":\"set\",\"__values\":[{}]}}", items.join(","))
+    }
+
+    // ---- JSON text builders (operations) -----------------------------------
+
+    fn props_json(props: &[(&str, String)]) -> String {
+        let body: Vec<String> = props
+            .iter()
+            .map(|(k, v)| format!("{}:{}", jstr(k), v))
+            .collect();
+        format!("{{{}}}", body.join(","))
+    }
+    fn op_create(id: u32, ty: &str, props: &[(&str, String)]) -> String {
+        format!(
+            "{{\"op\":\"CREATE\",\"id\":{},\"type\":{},\"props\":{}}}",
+            id,
+            jstr(ty),
+            props_json(props)
+        )
+    }
+    fn op_update(id: u32, props: &[(&str, String)], removed: &[&str]) -> String {
+        if removed.is_empty() {
+            format!(
+                "{{\"op\":\"UPDATE\",\"id\":{},\"props\":{}}}",
+                id,
+                props_json(props)
+            )
+        } else {
+            let r: Vec<String> = removed.iter().map(|s| jstr(s)).collect();
+            format!(
+                "{{\"op\":\"UPDATE\",\"id\":{},\"props\":{},\"removedProps\":[{}]}}",
+                id,
+                props_json(props),
+                r.join(",")
+            )
+        }
+    }
+    fn op_delete(id: u32) -> String {
+        format!("{{\"op\":\"DELETE\",\"id\":{id}}}")
+    }
+    fn op_append(id: u32, parent: u32, child: u32) -> String {
+        format!("{{\"op\":\"APPEND\",\"id\":{id},\"parentId\":{parent},\"childId\":{child}}}")
+    }
+    fn op_insert(id: u32, parent: u32, child: u32, index: u16) -> String {
+        format!(
+            "{{\"op\":\"INSERT\",\"id\":{id},\"parentId\":{parent},\"childId\":{child},\"index\":{index}}}"
+        )
+    }
+    fn op_remove(id: u32, parent: u32, child: u32) -> String {
+        format!("{{\"op\":\"REMOVE\",\"id\":{id},\"parentId\":{parent},\"childId\":{child}}}")
+    }
+    fn op_reorder(id: u32, parent: u32, child_ids: &[u32]) -> String {
+        let c: Vec<String> = child_ids.iter().map(|x| x.to_string()).collect();
+        format!(
+            "{{\"op\":\"REORDER\",\"id\":{id},\"parentId\":{parent},\"childIds\":[{}]}}",
+            c.join(",")
+        )
+    }
+    fn op_text(id: u32, text: &str) -> String {
+        format!("{{\"op\":\"TEXT\",\"id\":{},\"text\":{}}}", id, jstr(text))
+    }
+    fn op_refcall(id: u32, method: &str, call_id: &str, args: &[String]) -> String {
+        // refId is NOT on the wire (decoder mirrors id); include it so the
+        // decoded op compares equal to the batch JSON.
+        format!(
+            "{{\"op\":\"REF_CALL\",\"id\":{},\"refId\":{},\"method\":{},\"callId\":{},\"args\":[{}]}}",
+            id,
+            id,
+            jstr(method),
+            jstr(call_id),
+            args.join(",")
+        )
+    }
+    fn make_batch(batch_id: u32, ops: &[String]) -> String {
+        format!(
+            "{{\"version\":1,\"batchId\":{},\"operations\":[{}]}}",
+            batch_id,
+            ops.join(",")
+        )
+    }
+
+    /// The 16 value variants, each labelled, used to build the op x value cells.
+    fn value_catalog() -> Vec<(&'static str, String)> {
+        std::vec![
+            ("null", mv_null()),
+            ("undefined", mv_undefined()),
+            ("bool-false", mv_bool(false)),
+            ("bool-true", mv_bool(true)),
+            ("int32", mv_int(42)),
+            ("float64", mv_float("3.5")),
+            ("string", mv_string("hello")),
+            ("function", mv_function("fn_7")),
+            (
+                "object",
+                mv_object(&[("a", mv_int(1)), ("b", mv_string("x"))])
+            ),
+            (
+                "array",
+                mv_array(&[mv_int(1), mv_bool(true), mv_null(), mv_string("x")])
+            ),
+            ("date", mv_date(1_700_000_000_000)),
+            (
+                "error",
+                mv_error("TypeError", "boom", Some("at f (a.js:1:2)"))
+            ),
+            ("regexp", mv_regexp("ab+c", "gi")),
+            (
+                "map",
+                mv_map(&[(mv_string("a"), mv_int(1)), (mv_string("b"), mv_date(0)),])
+            ),
+            ("set", mv_set(&[mv_int(1), mv_int(2), mv_string("x")])),
+            ("promise", mv_promise("p_3")),
+        ]
+    }
+
+    /// (name, batch JSON) for every matrix vector. Deterministic order.
+    fn matrix_specs() -> Vec<(String, String)> {
+        let mut specs: Vec<(String, String)> = Vec::new();
+        let mut batch_id = 1000u32;
+        let mut push = |specs: &mut Vec<(String, String)>, name: &str, ops: &[String]| {
+            specs.push((name.to_string(), make_batch(batch_id, ops)));
+            batch_id += 1;
+        };
+
+        // op x value: the value-carrying ops are CREATE props, UPDATE props and
+        // REF_CALL args. Each carries all 16 value variants.
+        for (label, v) in value_catalog() {
+            let ops = std::vec![op_create(1, "View", &[("v", v)])];
+            push(&mut specs, &format!("create-value-{label}"), &ops);
+        }
+        for (label, v) in value_catalog() {
+            let ops = std::vec![op_update(1, &[("v", v)], &[])];
+            push(&mut specs, &format!("update-value-{label}"), &ops);
+        }
+        for (label, v) in value_catalog() {
+            let ops = std::vec![op_refcall(1, "measure", "call_1", &[v])];
+            push(&mut specs, &format!("refcall-arg-{label}"), &ops);
+        }
+
+        // Structural ops (no SerializedValue payload).
+        push(&mut specs, "op-delete", &std::vec![op_delete(5)]);
+        push(&mut specs, "op-append", &std::vec![op_append(0, 1, 2)]);
+        push(&mut specs, "op-insert", &std::vec![op_insert(0, 1, 2, 3)]);
+        push(&mut specs, "op-remove", &std::vec![op_remove(0, 1, 2)]);
+        push(
+            &mut specs,
+            "op-reorder",
+            &std::vec![op_reorder(1, 0, &[5, 4, 3, 2, 1])],
+        );
+        push(
+            &mut specs,
+            "op-text",
+            &std::vec![op_text(9, "Hello, world")],
+        );
+        push(
+            &mut specs,
+            "op-update-removed-props",
+            &std::vec![op_update(1, &[("k", mv_int(1))], &["old1", "old2"])],
+        );
+
+        // Boundary sizes / edge scalars.
+        push(
+            &mut specs,
+            "boundary-int32-min",
+            &std::vec![op_create(1, "View", &[("v", mv_int(i32::MIN))])],
+        );
+        push(
+            &mut specs,
+            "boundary-int32-max",
+            &std::vec![op_create(1, "View", &[("v", mv_int(i32::MAX))])],
+        );
+        push(
+            &mut specs,
+            "boundary-float64-large",
+            &std::vec![op_create(1, "View", &[("v", mv_float("3000000000"))])],
+        );
+        push(
+            &mut specs,
+            "boundary-float64-negative",
+            &std::vec![op_create(1, "View", &[("v", mv_float("-2.5"))])],
+        );
+        push(
+            &mut specs,
+            "boundary-date-min",
+            &std::vec![op_create(
+                1,
+                "View",
+                &[("v", mv_date(-8_640_000_000_000_000))]
+            )],
+        );
+        push(
+            &mut specs,
+            "boundary-date-max",
+            &std::vec![op_create(
+                1,
+                "View",
+                &[("v", mv_date(8_640_000_000_000_000))]
+            )],
+        );
+        push(
+            &mut specs,
+            "boundary-empty-string",
+            &std::vec![op_create(1, "View", &[("v", mv_string(""))])],
+        );
+        push(
+            &mut specs,
+            "boundary-empty-object",
+            &std::vec![op_create(1, "View", &[("v", mv_object(&[]))])],
+        );
+        push(
+            &mut specs,
+            "boundary-empty-array",
+            &std::vec![op_create(1, "View", &[("v", mv_array(&[]))])],
+        );
+        push(
+            &mut specs,
+            "boundary-empty-map",
+            &std::vec![op_create(1, "View", &[("v", mv_map(&[]))])],
+        );
+        push(
+            &mut specs,
+            "boundary-empty-set",
+            &std::vec![op_create(1, "View", &[("v", mv_set(&[]))])],
+        );
+        let hundred: Vec<String> = (0..100).map(mv_int).collect();
+        push(
+            &mut specs,
+            "boundary-array-100-ints",
+            &std::vec![op_create(1, "View", &[("v", mv_array(&hundred))])],
+        );
+        let long = "x".repeat(1000);
+        push(
+            &mut specs,
+            "boundary-long-string",
+            &std::vec![op_text(1, &long)],
+        );
+
+        // Nested / mixed combos.
+        let nested_obj = mv_object(&[
+            (
+                "arr",
+                mv_array(&[
+                    mv_int(1),
+                    mv_map(&[(mv_string("k"), mv_bool(true))]),
+                    mv_set(&[mv_string("s")]),
+                ]),
+            ),
+            ("when", mv_date(0)),
+            ("re", mv_regexp("^a$", "i")),
+        ]);
+        push(
+            &mut specs,
+            "nested-object-mixed",
+            &std::vec![op_create(1, "View", &[("data", nested_obj)])],
+        );
+        let deep = mv_array(&[mv_array(&[mv_array(&[mv_array(&[mv_array(&[mv_int(
+            7,
+        )])])])])]);
+        push(
+            &mut specs,
+            "nested-array-depth-5",
+            &std::vec![op_create(1, "View", &[("v", deep)])],
+        );
+        let special_map = mv_map(&[
+            (mv_date(0), mv_function("f1")),
+            (mv_int(1), mv_error("E", "m", None)),
+            (mv_array(&[mv_int(1)]), mv_promise("p")),
+        ]);
+        push(
+            &mut specs,
+            "nested-map-special-kv",
+            &std::vec![op_create(1, "View", &[("m", special_map)])],
+        );
+        let mixed_props: Vec<(&str, String)> = std::vec![
+            ("s", mv_string("txt")),
+            ("n", mv_int(-3)),
+            ("f", mv_float("1.25")),
+            ("b", mv_bool(false)),
+            ("nil", mv_null()),
+            ("u", mv_undefined()),
+            ("d", mv_date(123_456_789)),
+            ("fn", mv_function("cb")),
+        ];
+        push(
+            &mut specs,
+            "mixed-props-create",
+            &std::vec![op_create(1, "View", &mixed_props)],
+        );
+        let mixed_args = std::vec![
+            mv_int(1),
+            mv_string("a"),
+            mv_bool(true),
+            mv_null(),
+            mv_undefined(),
+            mv_array(&[mv_int(9)]),
+            mv_object(&[("k", mv_int(2))]),
+        ];
+        push(
+            &mut specs,
+            "mixed-args-refcall",
+            &std::vec![op_refcall(3, "scrollTo", "c9", &mixed_args)],
+        );
+        let multi = std::vec![
+            op_create(
+                1,
+                "View",
+                &[
+                    ("id", mv_string("root")),
+                    ("style", mv_object(&[("flex", mv_int(1))])),
+                ],
+            ),
+            op_create(2, "Text", &[]),
+            op_append(0, 1, 2),
+            op_text(2, "Hi"),
+            op_update(1, &[("id", mv_string("main"))], &["style"]),
+            op_reorder(1, 0, &[2]),
+            op_refcall(2, "focus", "c1", &[]),
+            op_delete(2),
+        ];
+        push(&mut specs, "multi-op-mixed", &multi);
+
+        // FUNCTION debug metadata: name + sourceFile + sourceLine all present
+        // (flags byte 0x07), exercised in all three value-carrying op contexts.
+        // The bare-function case (flags=0) is already covered by the
+        // create/update/refcall "function" cells above.
+        push(
+            &mut specs,
+            "create-value-function-debug",
+            &std::vec![op_create(
+                1,
+                "View",
+                &[("v", mv_function_full("fn_9", "onPress", "App.tsx", 42))],
+            )],
+        );
+        push(
+            &mut specs,
+            "update-value-function-debug",
+            &std::vec![op_update(
+                1,
+                &[("v", mv_function_full("fn_9", "onPress", "App.tsx", 42))],
+                &[],
+            )],
+        );
+        push(
+            &mut specs,
+            "refcall-arg-function-debug",
+            &std::vec![op_refcall(
+                1,
+                "measure",
+                "call_1",
+                &[mv_function_full("fn_9", "onPress", "App.tsx", 42)],
+            )],
+        );
+
+        specs
+    }
+
+    fn matrix_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../contracts/op-batch-wire.matrix.json")
+    }
+
+    /// Render the whole fixture as pretty-ish JSON text (one vector per line).
+    fn build_matrix_json() -> (String, usize) {
+        let specs = matrix_specs();
+        let comment = jstr(
+            "GENERATED by the rill-guest wire_encode matrix generator \
+             (RILL_REGEN_MATRIX=1 cargo test -p rill-guest --features \
+             wip-binary-protocol matrix_fixture_in_sync). DO NOT EDIT BY HAND. \
+             Comprehensive op x value conformance corpus for the op-batch binary \
+             wire protocol (contracts/op-batch-wire.json), produced by the pinned \
+             Rust encoder (the oracle). All three codecs lock to this file: Rust \
+             re-encodes each vector byte-exact, the TS and C++ decoders decode it \
+             back to `batch`. Two fixture-only value encodings JSON cannot express \
+             directly: undefined is {\"__mv\":\"undefined\"}, and a Date is \
+             {\"__type\":\"date\",\"__epochMs\":N} (decoders rebuild the ISO string \
+             from the ms). Everything else is the exact decoded SerializedValue \
+             shape.",
+        );
+        let mut out = String::new();
+        out.push_str("{\n");
+        out.push_str("  \"$comment\": ");
+        out.push_str(&comment);
+        out.push_str(",\n");
+        out.push_str("  \"version\": 1,\n");
+        out.push_str("  \"vectors\": [\n");
+        for (i, (name, batch)) in specs.iter().enumerate() {
+            let batch_j = Json::parse(batch)
+                .unwrap_or_else(|e| panic!("vector {name}: built invalid batch json: {e}"));
+            let bytes = encode_batch_json(&batch_j);
+            let hex = to_hex(&bytes);
+            out.push_str("    { \"name\": ");
+            out.push_str(&jstr(name));
+            out.push_str(", \"batch\": ");
+            out.push_str(batch);
+            out.push_str(", \"hex\": ");
+            out.push_str(&jstr(&hex));
+            out.push_str(&format!(", \"byteLength\": {} }}", bytes.len()));
+            if i + 1 < specs.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str("  ]\n");
+        out.push_str("}\n");
+        (out, specs.len())
+    }
+
+    /// The generator + drift guard. With `RILL_REGEN_MATRIX=1` set it (re)writes
+    /// the checked-in fixture; otherwise it asserts the committed file matches
+    /// what the specs would generate, so the fixture can never silently drift
+    /// from the encoder. Read-only in CI (no write, no race with the loader).
+    #[test]
+    fn matrix_fixture_in_sync() {
+        let (generated, count) = build_matrix_json();
+        assert!(
+            count >= 60,
+            "matrix should be a comprehensive corpus, only built {count} vectors"
+        );
+        let path = matrix_path();
+        if std::env::var("RILL_REGEN_MATRIX").is_ok() {
+            std::fs::write(&path, generated.as_bytes()).expect("write matrix fixture");
+            return;
+        }
+        let committed = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "read {}: {e}\nrun `RILL_REGEN_MATRIX=1 cargo test -p rill-guest \
+                 --features wip-binary-protocol matrix_fixture_in_sync` to create it",
+                path.display()
+            )
+        });
+        assert_eq!(
+            committed, generated,
+            "op-batch-wire.matrix.json is stale; regenerate with RILL_REGEN_MATRIX=1"
+        );
+    }
+
+    /// Rust re-encodes every matrix vector byte-exact — the encoder half of the
+    /// three-codec conformance loop (the mirror of the golden re-encode test,
+    /// reading the checked-in fixture independently of the generator).
+    #[test]
+    fn matrix_vectors_encode_byte_exact() {
+        let src = std::fs::read_to_string(matrix_path()).expect("read matrix fixture");
+        let root = Json::parse(&src).expect("parse matrix json");
+        let vectors = root
+            .get("vectors")
+            .and_then(Json::items)
+            .expect("vectors[]");
+        assert!(!vectors.is_empty(), "matrix has no vectors");
+        for vec_entry in vectors {
+            let name = vec_entry.get("name").and_then(Json::as_str).unwrap_or("?");
+            let batch_json = vec_entry.get("batch").expect("vector.batch");
+            let expected_hex = vec_entry
+                .get("hex")
+                .and_then(Json::as_str)
+                .expect("vector.hex");
+            let bytes = encode_batch_json(batch_json);
+            let got = to_hex(&bytes);
+            assert_eq!(
+                got, expected_hex,
+                "vector {name}: re-encode disagrees with the matrix hex"
+            );
+            if let Some(bl) = vec_entry.get("byteLength").and_then(Json::as_u64) {
+                assert_eq!(bytes.len() as u64, bl, "vector {name}: byteLength mismatch");
+            }
+        }
     }
 }

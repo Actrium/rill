@@ -21,9 +21,10 @@
  *     a malformed/truncated batch throws WireDecodeError and NOTHING partial is
  *     observable beyond the apply() calls already made for fully-decoded ops.
  *   - Bad magic / unsupported version / reserved-and-unimplemented flag bits
- *     (DELTA_INTERN, STRUCTURAL_ONLY) / unknown opcode / unknown value tag /
- *     out-of-range intern index / oversized batch → typed throw, never an
- *     out-of-bounds read or a silently-wrapped length.
+ *     (DELTA_INTERN, STRUCTURAL_ONLY, HAS_TIMESTAMPS) / unknown opcode / unknown
+ *     value tag / out-of-range intern index / oversized batch / trailing bytes
+ *     after the last op → typed throw, never an out-of-bounds read or a
+ *     silently-wrapped length.
  *
  * INTEGRATION STATUS: experimental. The live path still uses PayloadEncoding
  * 'json' by default (see BinaryProtocolConfig). This file changes no defaults
@@ -32,6 +33,7 @@
  */
 
 import type {
+  SerializedFunction,
   SerializedOperation,
   SerializedValue,
   SerializedValueObject,
@@ -48,7 +50,7 @@ const HEADER_SIZE = 16;
 // header.flags bitmask (batchFlags)
 const FLAG_DELTA_INTERN = 0x01; // reserved in v1: recognise + reject
 const FLAG_STRUCTURAL_ONLY = 0x02; // reserved in v1: recognise + reject
-const FLAG_HAS_TIMESTAMPS = 0x04;
+const FLAG_HAS_TIMESTAMPS = 0x04; // reserved in v1: recognise + reject (no per-op trailer in v1)
 const KNOWN_FLAGS = FLAG_DELTA_INTERN | FLAG_STRUCTURAL_ONLY | FLAG_HAS_TIMESTAMPS;
 
 const OpType = {
@@ -201,10 +203,18 @@ class WireDecoder {
     // table; DELTA_INTERN is rejected in readHeader).
     this.readInternTable();
 
-    const hasTimestamps = (header.flags & FLAG_HAS_TIMESTAMPS) !== 0;
     for (let i = 0; i < header.opCount; i++) {
       // Stream: decode one op, hand it off, keep no reference to it.
-      apply(this.readOperation(hasTimestamps));
+      apply(this.readOperation());
+    }
+
+    // STRICT TRAILING (contracts/op-batch-wire.json ops.$comment): a batch is
+    // EXACTLY its declared opCount records — after the last one the buffer MUST
+    // be fully consumed. Any leftover byte is a fail-closed whole-batch reject
+    // (the encoder writes nothing after the final record). This matches the C++
+    // decoder and closes the earlier drift where TS silently ignored trailers.
+    if (this.pos !== this.len) {
+      throw new WireDecodeError('trailing bytes after batch', this.pos);
     }
 
     return header;
@@ -240,6 +250,11 @@ class WireDecoder {
     }
     if ((flags & FLAG_STRUCTURAL_ONLY) !== 0) {
       throw new WireDecodeError('STRUCTURAL_ONLY flag is reserved and unsupported in v1', 12);
+    }
+    if ((flags & FLAG_HAS_TIMESTAMPS) !== 0) {
+      // Per the decision, HAS_TIMESTAMPS is reserved in v1: no per-op u64 trailer
+      // is emitted or decoded. Reject fail-closed like the other reserved bits.
+      throw new WireDecodeError('HAS_TIMESTAMPS flag is reserved and unsupported in v1', 12);
     }
 
     // reserved[3]: consumed (ignored on read) to reach the 16-byte boundary.
@@ -287,7 +302,7 @@ class WireDecoder {
     this.intern = table;
   }
 
-  private readOperation(hasTimestamps: boolean): SerializedOperation {
+  private readOperation(): SerializedOperation {
     const opcode = this.readU8();
     const id = this.readU32();
 
@@ -384,11 +399,8 @@ class WireDecoder {
         throw new WireDecodeError(`Unknown opcode: 0x${opcode.toString(16)}`, this.pos - 5);
     }
 
-    if (hasTimestamps) {
-      const timestamp = this.readU64();
-      (op as SerializedOperation & { timestamp?: number }).timestamp = timestamp;
-    }
-
+    // v1 emits NO per-op trailer (HAS_TIMESTAMPS is reserved + rejected in
+    // readHeader), so a record ends exactly at its last field.
     return op;
   }
 
@@ -456,8 +468,20 @@ class WireDecoder {
       case ValueType.STRING:
         return this.internRef();
 
-      case ValueType.FUNCTION:
-        return { __type: 'function' as const, __fnId: this.internRef() };
+      case ValueType.FUNCTION: {
+        // Layout (contracts/op-batch-wire.json values.FUNCTION): fnId internRef,
+        // then a u8 flags byte, then ONLY the present optional fields IN ORDER —
+        // name (internRef, bit0), sourceFile (internRef, bit1), sourceLine (u32,
+        // bit2). flags=0 => no metadata, one extra byte over a bare fnId. Present
+        // strings are interned like every other string; sourceLine is inline u32.
+        const fnId = this.internRef();
+        const fnFlags = this.readU8();
+        const fn: SerializedFunction = { __type: 'function', __fnId: fnId };
+        if ((fnFlags & 0x01) !== 0) fn.__name = this.internRef();
+        if ((fnFlags & 0x02) !== 0) fn.__sourceFile = this.internRef();
+        if ((fnFlags & 0x04) !== 0) fn.__sourceLine = this.readU32();
+        return fn;
+      }
 
       case ValueType.OBJECT: {
         const count = this.readU16();
@@ -601,14 +625,6 @@ class WireDecoder {
     const v = this.view.getInt32(this.pos, true);
     this.pos += 4;
     return v;
-  }
-
-  private readU64(): number {
-    this.require(8, 'u64');
-    const low = this.view.getUint32(this.pos, true);
-    const high = this.view.getUint32(this.pos + 4, true);
-    this.pos += 8;
-    return low + high * 0x100000000;
   }
 
   private readF64(): number {

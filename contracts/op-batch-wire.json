@@ -1,5 +1,5 @@
 {
-  "$comment": "SINGLE SOURCE OF TRUTH for the guest->host op-batch BINARY wire protocol (the reconciler flush path: guest emits a SerializedOperationBatch, host decodes it into DOM/UI mutations). Every codec MUST generate from or validate against THIS file, never hand-copy from a peer implementation. Authoritative implementations locked to it: the TS encoder src/guest/runtime/reconciler/binary-encoder.ts and the TS decoder src/shared/bridge/binary-protocol.ts (BinaryDecoder). A Rust/native codec generates its opcode + value-tag constants and its limit constants from this file the same way crates/rill-guest/build.rs generates from contracts/graphics-seams.json, and locks its record shapes to it via conformance tests + the golden vectors in op-batch-wire.golden.json. This is DELIBERATELY NOT FlatBuffers (see native/core/src/protocol/rill_protocol.fbs for the rejected eval): the whole point is the cross-batch string INTERN table, which FlatBuffers cannot express. DOM type names and prop names repeat ~80% across a batch, so interning is rill's key size win. Field names below are the exact record field order on the wire; opcode/tag numbers are the exact bytes. All integers are UNSIGNED unless the type says i32. Every multi-byte scalar is LITTLE-ENDIAN.",
+  "$comment": "SINGLE SOURCE OF TRUTH for the guest->host op-batch BINARY wire protocol (the reconciler flush path: guest emits a SerializedOperationBatch, host decodes it into DOM/UI mutations). Every codec MUST generate from or validate against THIS file, never hand-copy from a peer implementation. Authoritative implementations locked to it (M2): the Rust encoder crates/rill-guest/src/wire_encode.rs plus the two hardened streaming decoders src/host/wasm-guest/wire-decoder.ts (TS) and native/core/src/protocol/WireDecoder.cpp (C++), all conformance-tested against this schema and the golden/matrix vectors (op-batch-wire.golden.json, op-batch-wire.matrix.json). SUPERSEDED — pending reconciliation/retirement in M2: the old TS pair src/guest/runtime/reconciler/binary-encoder.ts (encoder) and src/shared/bridge/binary-protocol.ts (BinaryDecoder); they DIVERGE from this schema on FUNCTION (they still emit fnId-only + orphan intern entries for __name/__sourceFile, whereas this schema carries name/sourceFile/sourceLine on the wire via the FUNCTION flags byte). Do not treat the old pair as authoritative. A Rust/native codec generates its opcode + value-tag constants and its limit constants from this file the same way crates/rill-guest/build.rs generates from contracts/graphics-seams.json, and locks its record shapes to it via conformance tests + the golden vectors in op-batch-wire.golden.json. This is DELIBERATELY NOT FlatBuffers (see native/core/src/protocol/rill_protocol.fbs for the rejected eval): the whole point is the cross-batch string INTERN table, which FlatBuffers cannot express. DOM type names and prop names repeat ~80% across a batch, so interning is rill's key size win. Field names below are the exact record field order on the wire; opcode/tag numbers are the exact bytes. All integers are UNSIGNED unless the type says i32. Every multi-byte scalar is LITTLE-ENDIAN.",
   "version": 1,
   "endianness": "little",
 
@@ -22,7 +22,7 @@
     "u32": "4 bytes unsigned, little-endian",
     "i32": "4 bytes signed two's-complement, little-endian",
     "f64": "8 bytes IEEE-754 double, little-endian",
-    "u64": "8 bytes unsigned little-endian, emitted low-32 then high-32 (only present when the HAS_TIMESTAMPS batch flag is set)",
+    "u64": "8 bytes unsigned little-endian. RESERVED and UNUSED in v1: no u64 field is emitted or decoded anywhere in a v1 batch (the HAS_TIMESTAMPS flag that would have used it is itself reserved + rejected, see batchFlags). Kept in this table only for forward-compat documentation.",
     "internRef": "u16 index into the intern table; MUST be < the table's count. A decoder resolving an out-of-range index fails closed.",
     "utf8": "raw UTF-8 code units, no terminator; always length-prefixed by the field that precedes it"
   },
@@ -56,19 +56,19 @@
       {
         "name": "flags",
         "type": "u8",
-        "note": "bitmask, see batchFlags. Default emission is NONE (0x00)."
+        "note": "bitmask, see batchFlags. Default emission is NONE (0x00). A decoder MUST reject fail-closed any batch that sets a RESERVED bit (DELTA_INTERN, STRUCTURAL_ONLY, HAS_TIMESTAMPS)."
       },
       {
         "name": "reserved",
         "type": "u8[3]",
         "value": [0, 0, 0],
-        "note": "three zero bytes; MUST be written 0, ignored on read."
+        "note": "three padding bytes rounding the header to 16. The encoder MUST write them 0. A decoder MUST ignore them on read and MUST NOT reject a batch when they are nonzero — this is a forward-compat field, so a future version may repurpose them without breaking a v1 decoder."
       }
     ]
   },
 
   "batchFlags": {
-    "$comment": "Bit values OR'd into header.flags. NONE is what the reference encoder emits by default. DELTA_INTERN and STRUCTURAL_ONLY are RESERVED bit positions (defined so a decoder can recognise + reject them in v1); the v1 encoder never sets them and always emits the FULL intern table. HAS_TIMESTAMPS, when set, appends a u64 timestamp AFTER every operation record.",
+    "$comment": "Bit values OR'd into header.flags. NONE is what the reference encoder emits by default. DELTA_INTERN, STRUCTURAL_ONLY and HAS_TIMESTAMPS are ALL RESERVED bit positions in v1: the v1 encoder never sets any of them (it always emits the FULL intern table and never a per-op trailer), and a v1 decoder MUST reject fail-closed any batch whose flags set a reserved bit. In particular HAS_TIMESTAMPS is NOT decoded in v1 — it does not cause a u64 timestamp (or any other trailer) to be emitted or read after an operation record; no per-op timestamp exists in this version. These bits are defined only so a v1 decoder can recognise and reject a batch that uses a feature it does not implement.",
     "NONE": 0,
     "DELTA_INTERN": 1,
     "STRUCTURAL_ONLY": 2,
@@ -136,7 +136,7 @@
   },
 
   "ops": {
-    "$comment": "Fixed-order record layout for EVERY operation kind. Each record begins with its u8 opcode, then a u32 'id' (the target node id) for ALL kinds, then kind-specific fields in the order listed. If header.flags has HAS_TIMESTAMPS set, a u64 'timestamp' is appended after the last field of EACH record (the v1 default does not set that flag, so no timestamp is present). An unknown opcode is a fail-closed decode error for the whole batch.",
+    "$comment": "Fixed-order record layout for EVERY operation kind. Each record begins with its u8 opcode, then a u32 'id' (the target node id) for ALL kinds, then kind-specific fields in the order listed. v1 emits NO per-op trailer: the HAS_TIMESTAMPS flag that would have appended a u64 timestamp after each record is reserved and rejected in v1 (see batchFlags), so every record ends exactly at its last listed field. An unknown opcode is a fail-closed decode error for the whole batch. STRICT TRAILING (whole-batch decode contract): a decoder reads EXACTLY opCount operation records and MUST then have fully consumed the buffer — ZERO bytes may remain after the last record. Any trailing bytes are a fail-closed whole-batch reject (a batch is exactly its declared ops); the encoder writes nothing after the final record.",
     "CREATE": {
       "opcode": 1,
       "description": "Create a node of a given host component type with an initial prop set.",
@@ -263,7 +263,7 @@
   },
 
   "values": {
-    "$comment": "Every SerializedValue variant. Each value is a u8 tag followed by the payload below. NUMBER RULE: a JS number that Number.isInteger and fits [-2147483648, 2147483647] is encoded as INT32; every other finite number (fractional, or out of i32 range) is FLOAT64. NaN/Infinity are not legal here. An unknown tag is a fail-closed decode error. NOTE on FUNCTION: the collection pre-pass also interns a function's __name/__sourceFile, but v1 encodes ONLY __fnId on the wire (name/sourceFile are reserved, not serialised).",
+    "$comment": "Every SerializedValue variant. Each value is a u8 tag followed by the payload below. NUMBER RULE: a JS number that Number.isInteger and fits [-2147483648, 2147483647] is encoded as INT32; every other finite number (fractional, or out of i32 range) is FLOAT64. NaN/Infinity are not legal here. An unknown tag is a fail-closed decode error. NOTE on FUNCTION: beyond __fnId, a function value carries the DevTools debug metadata the JS host consumes via receiver.ts/type-rules.ts — __name, __sourceFile, __sourceLine — each OPTIONAL and gated by a flags byte (see values.FUNCTION for the exact layout). Present strings are interned in first-appearance order AFTER fnId; sourceLine is an inline u32 (not interned). flags=0 means no metadata is present (one extra byte over a bare fnId).",
     "NULL": { "tag": 0, "payload": [] },
     "UNDEFINED": { "tag": 1, "payload": [] },
     "BOOL_FALSE": {
@@ -279,7 +279,36 @@
     "INT32": { "tag": 4, "payload": [{ "name": "value", "type": "i32" }] },
     "FLOAT64": { "tag": 5, "payload": [{ "name": "value", "type": "f64" }] },
     "STRING": { "tag": 6, "payload": [{ "name": "value", "type": "internRef" }] },
-    "FUNCTION": { "tag": 7, "payload": [{ "name": "fnId", "type": "internRef" }] },
+    "FUNCTION": {
+      "tag": 7,
+      "$comment": "A function reference plus its OPTIONAL DevTools debug metadata (name/sourceFile/sourceLine) that the JS host reads via receiver.ts/type-rules.ts. Byte-exact layout: fnId (internRef u16), then a u8 'flags' byte, then ONLY the present optional fields IN THIS ORDER — name (internRef u16, if flags bit0), sourceFile (internRef u16, if flags bit1), sourceLine (u32, if flags bit2). Absent metadata => flags=0 and no trailing fields, i.e. exactly one extra byte over a bare fnId. The present strings are interned like every other string (first-appearance order, after fnId); sourceLine is an inline little-endian u32 (a 1-based line number), NOT interned.",
+      "payload": [
+        { "name": "fnId", "type": "internRef" },
+        {
+          "name": "flags",
+          "type": "u8",
+          "note": "bit0=has_name, bit1=has_sourceFile, bit2=has_sourceLine; the other bits are reserved and MUST be written 0."
+        },
+        {
+          "name": "name",
+          "type": "internRef",
+          "presentIf": "flags bit0 set",
+          "note": "function name for DevTools; the whole field is absent (no bytes) when bit0 is clear."
+        },
+        {
+          "name": "sourceFile",
+          "type": "internRef",
+          "presentIf": "flags bit1 set",
+          "note": "source file path/URL for DevTools; absent (no bytes) when bit1 is clear."
+        },
+        {
+          "name": "sourceLine",
+          "type": "u32",
+          "presentIf": "flags bit2 set",
+          "note": "1-based source line number, inline u32 (not interned); absent (no bytes) when bit2 is clear."
+        }
+      ]
+    },
     "OBJECT": {
       "tag": 8,
       "payload": [

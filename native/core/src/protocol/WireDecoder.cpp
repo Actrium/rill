@@ -21,6 +21,7 @@ const char* toString(WireError e) {
     case WireError::BadVersion: return "BadVersion";
     case WireError::BadFlags: return "BadFlags";
     case WireError::BadReserved: return "BadReserved";
+    case WireError::InvalidUtf8: return "InvalidUtf8";
     case WireError::TruncatedIntern: return "TruncatedIntern";
     case WireError::InternRefOutOfRange: return "InternRefOutOfRange";
     case WireError::TruncatedOps: return "TruncatedOps";
@@ -37,6 +38,58 @@ const char* toString(WireError e) {
 }
 
 namespace {
+
+// Strict UTF-8 validator over `n` raw bytes. Returns true only for well-formed
+// UTF-8: it rejects overlong encodings, bytes above the Unicode ceiling
+// (U+10FFFF), UTF-16 surrogates (U+D800..U+DFFF), and truncated/stray
+// continuation bytes. This mirrors the TS decoder's fatal `TextDecoder`
+// (throws on malformed input): the native path MUST fail-closed on the same
+// bytes the TS path rejects, so a malformed guest string can never cross the
+// untrusted seam decoded as-is. Uses the well-known decode-and-range-check
+// table over the 1/2/3/4-byte forms.
+bool isValidUtf8(const char* s, size_t n) {
+  const auto* p = reinterpret_cast<const unsigned char*>(s);
+  size_t i = 0;
+  while (i < n) {
+    unsigned char c = p[i];
+    if (c < 0x80) {
+      // ASCII.
+      i += 1;
+    } else if ((c & 0xE0) == 0xC0) {
+      // 2-byte: reject overlong (< 0xC2).
+      if (c < 0xC2) return false;
+      if (i + 1 >= n) return false;
+      if ((p[i + 1] & 0xC0) != 0x80) return false;
+      i += 2;
+    } else if ((c & 0xF0) == 0xE0) {
+      // 3-byte.
+      if (i + 2 >= n) return false;
+      unsigned char c1 = p[i + 1];
+      if ((c1 & 0xC0) != 0x80) return false;
+      if ((p[i + 2] & 0xC0) != 0x80) return false;
+      // Reject overlong (E0 A0..BF) and UTF-16 surrogates (ED 80..9F).
+      if (c == 0xE0 && c1 < 0xA0) return false;
+      if (c == 0xED && c1 > 0x9F) return false;
+      i += 3;
+    } else if ((c & 0xF8) == 0xF0) {
+      // 4-byte: U+10000..U+10FFFF.
+      if (c > 0xF4) return false; // beyond U+10FFFF
+      if (i + 3 >= n) return false;
+      unsigned char c1 = p[i + 1];
+      if ((c1 & 0xC0) != 0x80) return false;
+      if ((p[i + 2] & 0xC0) != 0x80) return false;
+      if ((p[i + 3] & 0xC0) != 0x80) return false;
+      // Reject overlong (F0 80..8F) and above-ceiling (F4 90..BF).
+      if (c == 0xF0 && c1 < 0x90) return false;
+      if (c == 0xF4 && c1 > 0x8F) return false;
+      i += 4;
+    } else {
+      // Stray continuation byte or invalid lead (0x80..0xBF, 0xF8..0xFF).
+      return false;
+    }
+  }
+  return true;
+}
 
 // Internal fail-closed control-flow signal. Thrown by the reader on the first
 // breach and caught at the decode() boundary; never escapes the decoder. This
@@ -229,10 +282,35 @@ WireValue decodeValue(DecodeCtx& ctx, uint32_t depth) {
       break;
     }
     case ValueTag::String:
-    case ValueTag::Function:
     case ValueTag::Promise:
       v.str = ctx.internRef();
       break;
+    case ValueTag::Function: {
+      // fnId, then a u8 flags byte, then ONLY the present optional fields IN
+      // ORDER: name (internRef, bit0), sourceFile (internRef, bit1), sourceLine
+      // (inline u32, bit2). flags=0 => bare fnId + one flags byte, no metadata.
+      v.str = ctx.internRef(); // fnId
+      uint8_t fnFlags = ctx.r.u8();
+      // bits 3..7 are reserved and MUST be written 0; a set reserved bit implies
+      // unknown trailing fields we cannot length — reject fail-closed rather than
+      // desync the stream.
+      if ((fnFlags & 0xF8u) != 0) {
+        ByteReader::fail(WireError::BadFlags);
+      }
+      if (fnFlags & 0x01u) {
+        v.funcName = ctx.internRef();
+        v.hasFuncName = true;
+      }
+      if (fnFlags & 0x02u) {
+        v.funcSourceFile = ctx.internRef();
+        v.hasFuncSourceFile = true;
+      }
+      if (fnFlags & 0x04u) {
+        v.funcSourceLine = ctx.r.u32();
+        v.hasFuncSourceLine = true;
+      }
+      break;
+    }
     case ValueTag::Object:
       // Reject BEFORE recursing so a maliciously deep tree cannot overflow the
       // native stack (a stack-overflow crash is uncatchable by DecodeAbort).
@@ -316,7 +394,7 @@ std::vector<WireProp> decodePropsTable(DecodeCtx& ctx) {
   return props;
 }
 
-WireOp decodeOp(DecodeCtx& ctx, bool hasTimestamps) {
+WireOp decodeOp(DecodeCtx& ctx) {
   WireOp op;
   uint8_t opcode = ctx.r.u8();
   op.kind = static_cast<OpKind>(opcode);
@@ -383,9 +461,9 @@ WireOp decodeOp(DecodeCtx& ctx, bool hasTimestamps) {
       ByteReader::fail(WireError::UnknownOpcode);
   }
 
-  if (hasTimestamps) {
-    op.timestamp = ctx.r.u64();
-  }
+  // v1 emits NO per-op trailer. HAS_TIMESTAMPS (the only flag that would have
+  // appended a u64 here) is reserved + rejected at the header, so a decoded op
+  // ends exactly at its last listed field; op.timestamp is never populated.
   return op;
 }
 
@@ -423,18 +501,21 @@ std::optional<WireBatch> WireDecoder::decode(const uint8_t* data, size_t size) {
     uint32_t batchId = r.u32();
     uint16_t opCount = r.u16();
     uint8_t flagsByte = r.u8();
-    // Only HAS_TIMESTAMPS is acceptable in v1. DELTA_INTERN / STRUCTURAL_ONLY
-    // are recognised-but-rejected; any higher bit is unknown -> reject.
-    if ((flagsByte & static_cast<uint8_t>(~flags::kHasTimestamps)) != 0) {
+    // v1 emits flags = NONE. Every defined flag bit — DELTA_INTERN,
+    // STRUCTURAL_ONLY, HAS_TIMESTAMPS — is RESERVED and rejected fail-closed, as
+    // is any unknown higher bit. In particular HAS_TIMESTAMPS is NOT decoded in
+    // v1 (no per-op u64 trailer exists), so a batch that sets it is rejected here
+    // rather than mis-parsed.
+    if (flagsByte != flags::kNone) {
       ByteReader::fail(WireError::BadFlags);
     }
-    uint8_t reserved0 = r.u8();
-    uint8_t reserved1 = r.u8();
-    uint8_t reserved2 = r.u8();
-    if (reserved0 != 0 || reserved1 != 0 || reserved2 != 0) {
-      ByteReader::fail(WireError::BadReserved);
-    }
-    const bool hasTimestamps = (flagsByte & flags::kHasTimestamps) != 0;
+    // reserved[3]: forward-compat padding. Read PAST the three bytes WITHOUT
+    // inspecting them — the contract says they are ignored on read, so a future
+    // version may repurpose them without breaking this v1 decoder. (Was
+    // previously rejected as BadReserved; that violated the contract.)
+    r.u8();
+    r.u8();
+    r.u8();
 
     WireBatch batch;
     batch.version = version;
@@ -459,13 +540,20 @@ std::optional<WireBatch> WireDecoder::decode(const uint8_t* data, size_t size) {
       if (byteLen > r.remaining()) {
         ByteReader::fail(WireError::TruncatedIntern);
       }
-      batch.intern.push_back(r.bytes(byteLen));
+      std::string_view entry = r.bytes(byteLen);
+      // Strict UTF-8 on the untrusted seam: reject fail-closed on malformed bytes
+      // (matches the TS decoder's fatal TextDecoder). Without this the native path
+      // would fail OPEN, accepting guest bytes the TS host rejects.
+      if (!isValidUtf8(entry.data(), entry.size())) {
+        ByteReader::fail(WireError::InvalidUtf8);
+      }
+      batch.intern.push_back(entry);
     }
 
     // --- Operations ---
     batch.ops.reserve(std::min<size_t>(opCount, r.remaining()));
     for (uint16_t i = 0; i < opCount; ++i) {
-      batch.ops.push_back(decodeOp(ctx, hasTimestamps));
+      batch.ops.push_back(decodeOp(ctx));
     }
 
     // Fail-closed on trailing garbage: a well-formed batch is fully consumed.
