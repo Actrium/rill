@@ -14,3 +14,11 @@ crate-type = ["rlib"]
 # wire protocol (contracts/op-batch-wire.json). Gated so nothing of it compiles
 # into the shipped guest until the protocol is wired into the live emit path.
 wip-binary-protocol = []
+
+# talc: the guest's global allocator. no_std, no default features (pure
+# core/alloc). On wasm the guest wires `talc::wasm::WasmDynamicTalc`, a
+# memory.grow-backed growable heap that REUSES freed memory (real free list),
+# so the heap grows to fit the working set then plateaus — replacing the old
+# only-grows bump allocator.
+[dependencies]
+talc = { version = "5.0.4", default-features = false }

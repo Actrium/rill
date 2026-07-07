@@ -1,8 +1,8 @@
 [package]
-name = "heap-exhaust-guest"
+name = "heap-churn-guest"
 version.workspace = true
 edition.workspace = true
-description = "Adversarial native rill guest that exhausts its bump heap to test host resilience."
+description = "Native rill guest that churns alloc/free far past the old 1 MiB heap cap, proving talc reclaims freed memory and keeps linear memory bounded."
 license.workspace = true
 publish = false
 

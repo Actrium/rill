@@ -145,14 +145,23 @@ describe('host never resolves a guest call synchronously', () => {
 });
 
 describe('wire buffers are recycled per turn (leak regression)', () => {
-  it('delivers 8000 x 512B events without exhausting the 1 MiB guest heap', async () => {
+  it('delivers 8000 x 512B events with linear memory staying bounded', async () => {
     const host = new WasmGuestHost({ dispatch: {} });
     await host.load(EVENT_GUEST);
     await host.drain();
+    const memory = host.exports.memory as WebAssembly.Memory;
     const payload = 'x'.repeat(512);
-    const n = 8000; // wire total ~4.1 MiB >> the SDK's 1 MiB bump heap:
-    // passes ONLY if the wire arena recycles per turn.
+    const n = 8000;
+    // Prime one turn so any first-touch growth settles, then measure.
+    host.emitEvent('tick', payload);
+    const bytesBefore = memory.buffer.byteLength;
+    // Wire total ~4.1 MiB. The per-turn wire arena (64 KiB) must recycle: if it
+    // leaked, the oversized-wire path would grow linear memory by megabytes
+    // (talc now grows instead of trapping, so bounded-memory is the surviving
+    // invariant — the retired 1 MiB bump heap would instead have trapped).
     for (let i = 0; i < n; i++) host.emitEvent('tick', payload);
-    expect((host.exports.tick_count as () => number)()).toBe(n);
+    expect((host.exports.tick_count as () => number)()).toBe(n + 1);
+    // Recycling holds memory flat; a leak would balloon it toward ~4 MiB.
+    expect(memory.buffer.byteLength - bytesBefore).toBeLessThan(512 * 1024);
   });
 });

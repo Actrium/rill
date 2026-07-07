@@ -69,8 +69,9 @@ const BAD_BATCH = readFileSync(join(import.meta.dir, 'fixtures/bad-batch.wasm'))
 const EVENT_GUEST = readFileSync(join(import.meta.dir, 'fixtures/event-guest.wasm'));
 // Guest authored in C via the C SDK (sdk/c) — proves the ABI is language-neutral.
 const C_GUEST = readFileSync(join(import.meta.dir, 'fixtures/c-guest.wasm'));
-// Adversarial guest that over-allocates past its bump heap (allocation trap).
-const HEAP_EXHAUST = readFileSync(join(import.meta.dir, 'fixtures/heap-exhaust-guest.wasm'));
+// Guest that churns alloc/free far past the old 1 MiB heap cap; its `heap_churn`
+// export drives the fragmentation/plateau proof (talc reclaims freed frames).
+const HEAP_CHURN = readFileSync(join(import.meta.dir, 'fixtures/heap-churn-guest.wasm'));
 // Adversarial guest that imports an undeclared function (must be rejected).
 const BAD_IMPORT = readFileSync(join(import.meta.dir, 'fixtures/bad-import.wasm'));
 // Adversarial guest whose rill_on_event traps.
@@ -457,17 +458,60 @@ describe('WasmGuestHost — fuzz + resilience (trust boundary)', () => {
     }
   });
 
-  it('a heap-exhausted guest fails to load with a catchable error; the host survives', async () => {
-    const bad = new WasmGuestHost({ dispatch: {} });
-    let threw = false;
-    try {
-      await bad.load(HEAP_EXHAUST);
-    } catch {
-      threw = true; // guest trapped -> catchable JS error, not a process crash
-    }
-    expect(threw).toBe(true);
+  it('churns hundreds of MiB through the heap yet linear memory plateaus (talc reclaims freed frames)', async () => {
+    // R3 acceptance. The guest allocator is talc (memory.grow-backed, real free
+    // list), NOT the retired fixed 1 MiB bump heap. `heap_churn(frames, bytes,
+    // window)` allocates one `bytes`-sized buffer per frame and frees the OLDEST
+    // once more than `window` are live (FIFO -> non-LIFO reclamation). Cumulative
+    // bytes = frames*bytes; peak live = window*bytes (kept tiny). A leaking or
+    // grow-only allocator would push linear memory past the cumulative total; a
+    // correct reclaiming allocator grows once during warm-up, then PLATEAUS.
+    const host = new WasmGuestHost({ dispatch: {} });
+    await host.load(HEAP_CHURN);
+    const memory = host.exports.memory as WebAssembly.Memory;
+    const churn = host.exports.heap_churn as (f: number, b: number, w: number) => number;
 
-    // The host process survived: a normal guest still loads and works.
+    const FRAME = 64 * 1024; // 64 KiB per frame
+    const WINDOW = 4; // <= 256 KiB ever live
+    const bytesAtStart = memory.buffer.byteLength;
+
+    // Warm-up: fill the window and let talc claim its steady-state pages.
+    churn(64, FRAME, WINDOW); // 4 MiB cumulative
+    const bytesAfterWarmup = memory.buffer.byteLength;
+
+    // Now pour hundreds of MiB through the same heap. Each call's cumulative
+    // allocation alone dwarfs the old 1 MiB cap.
+    churn(256, FRAME, WINDOW); // +16 MiB
+    const bytesAfter16 = memory.buffer.byteLength;
+    churn(1024, FRAME, WINDOW); // +64 MiB
+    const bytesAfter64 = memory.buffer.byteLength;
+    churn(4096, FRAME, WINDOW); // +256 MiB
+    const bytesAfter256 = memory.buffer.byteLength;
+
+    const cumulative = (64 + 256 + 1024 + 4096) * FRAME; // ~340 MiB
+
+    // Sanity: we really did churn far more than the old 1 MiB cap.
+    expect(cumulative).toBeGreaterThan(256 * 1024 * 1024);
+
+    // PLATEAU: after warm-up, 336 MiB more churn grows linear memory by ZERO —
+    // every freed frame is reused. (The old bump heap would have trapped at
+    // 1 MiB; a grow-only bump would have leaked to hundreds of MiB.)
+    expect(bytesAfterWarmup).toBeGreaterThan(bytesAtStart); // warm-up grew once
+    expect(bytesAfter16).toBe(bytesAfterWarmup);
+    expect(bytesAfter64).toBe(bytesAfterWarmup);
+    expect(bytesAfter256).toBe(bytesAfterWarmup);
+
+    // BOUNDED: total footprint stayed a tiny fraction of what was churned.
+    expect(bytesAfter256 - bytesAtStart).toBeLessThan(2 * 1024 * 1024);
+    expect(bytesAfter256).toBeLessThan(cumulative / 100);
+
+    // Fragmentation: varied-size frames (16..48 KiB) over a wider window mix bins
+    // and interleave lifetimes; memory must still hold the plateau, not creep.
+    for (let i = 0; i < 2048; i++) churn(1, 16 * 1024 + (i % 32) * 1024, 8);
+    expect(memory.buffer.byteLength).toBe(bytesAfterWarmup);
+
+    // The host process survived a hostile-scale workload: a normal guest still
+    // loads and works.
     const { table, store } = storeDispatch();
     const ok = new WasmGuestHost({ dispatch: table });
     await ok.load(RUST_GUEST);

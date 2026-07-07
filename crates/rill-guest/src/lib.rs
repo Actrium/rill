@@ -11,7 +11,7 @@
 //! ```
 //!
 //! Under the hood the SDK owns the ABI exports (`rill_alloc` / `rill_resolve` /
-//! `rill_init`), a bump allocator, and a minimal single-task async executor. A
+//! `rill_init`), a global allocator (talc), and a minimal single-task async executor. A
 //! host call is a future: on first poll it issues `rill_host_call` and parks;
 //! when the host later calls `rill_resolve(cb, …)` the executor re-polls and the
 //! future completes. This is the guest side of the same callback-resolve model
@@ -22,8 +22,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::alloc::{GlobalAlloc, Layout};
-use core::cell::UnsafeCell;
+use core::alloc::Layout;
 use core::future::Future;
 use core::pin::Pin;
 use core::ptr::addr_of_mut;
@@ -61,75 +60,21 @@ pub fn log(msg: &str) {
     unsafe { rill_log(msg.as_ptr(), msg.len()) }
 }
 
-// ---- Bump allocator (leaks; fine for short-lived guests) ----
-const HEAP_SIZE: usize = 1 << 20; // 1 MiB
-
-/// Backing storage for the bump heap. The newtype exists for its `align(16)`:
-/// a bare `[u8; N]` static is only guaranteed 1-byte alignment, so aligning
-/// OFFSETS into it would not make the resulting ADDRESSES aligned. 16 covers
-/// every layout the SDK itself allocates; `alloc` below additionally aligns
-/// the actual address, so even rarer over-aligned requests stay correct.
-#[repr(C, align(16))]
-struct Heap([u8; HEAP_SIZE]);
-static mut HEAP: Heap = Heap([0; HEAP_SIZE]);
-
-pub struct BumpAlloc {
-    offset: UnsafeCell<usize>,
-}
-// Single-threaded wasm: no real concurrency.
-unsafe impl Sync for BumpAlloc {}
-impl BumpAlloc {
-    pub const fn new() -> Self {
-        Self {
-            offset: UnsafeCell::new(0),
-        }
-    }
-}
-impl Default for BumpAlloc {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-unsafe impl GlobalAlloc for BumpAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let off = &mut *self.offset.get();
-        let base = addr_of_mut!(HEAP) as usize;
-        // Align the ADDRESS handed out, not merely the offset: the offset math
-        // only yields an aligned pointer if the heap base itself is at least as
-        // aligned as the request, which `Heap`'s align(16) does not promise for
-        // exotic (>16) alignments.
-        let cur = match base.checked_add(*off) {
-            Some(v) => v,
-            None => return core::ptr::null_mut(),
-        };
-        let aligned_addr = match cur.checked_add(layout.align() - 1) {
-            Some(v) => v & !(layout.align() - 1),
-            None => return core::ptr::null_mut(),
-        };
-        let aligned = aligned_addr - base;
-        let end = match aligned.checked_add(layout.size()) {
-            Some(v) => v,
-            None => return core::ptr::null_mut(),
-        };
-        if end > HEAP_SIZE {
-            return core::ptr::null_mut();
-        }
-        *off = end;
-        aligned_addr as *mut u8
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // LIFO rollback: reclaim iff this block is the TOP of the bump heap.
-        // Promptly-dropped allocations (the SDK's own per-turn copies) are
-        // recycled; interleaved lifetimes still leak, as before. Never frees
-        // anything that is not provably the top block (conservative, safe).
-        let off = &mut *self.offset.get();
-        let base = addr_of_mut!(HEAP) as usize;
-        let p = ptr as usize;
-        if p >= base && p.wrapping_add(layout.size()) == base + *off {
-            *off = p - base;
-        }
-    }
-}
+// ---- Global allocator: talc (memory.grow-backed, growable, real free) ----
+//
+// The guest's own Rust allocations (Box/Vec/String/…) are served by talc, wired
+// as the `#[global_allocator]` inside `rill_guest_main!` so each cdylib guest
+// instantiates it. On wasm it is `talc::wasm::WasmDynamicTalc`: a single-threaded
+// bump-and-free allocator whose backing memory is claimed on demand via
+// `memory.grow` (WebAssembly's `memory_grow`), and — unlike the retired
+// `BumpAlloc` — it maintains a real free list, so freed blocks are RECLAIMED
+// regardless of order. The heap therefore grows to fit the working set and then
+// PLATEAUS under alloc/free churn instead of only ever growing (the R3 fix).
+//
+// These two symbols are re-exported (hidden) so the macro can name them through
+// `$crate` — the downstream guest crate does not depend on talc directly.
+#[doc(hidden)]
+pub use talc::wasm::{new_wasm_dynamic_allocator, WasmDynamicTalc};
 
 /// Runtime the generated ABI exports call into. Not part of the public API.
 pub mod rt {
@@ -148,10 +93,11 @@ pub mod rt {
     // Invariant (load-bearing): a host-written wire buffer is fully consumed
     // before the host->guest entry that delivers it returns (resolve copies at
     // entry via to_vec; dispatch hands handlers a &[u8] that must not escape the
-    // call). So the arena is recycled when the outermost turn closes. Previously
-    // these came from the global bump heap and leaked permanently — structural
-    // heap exhaustion for long-lived guests. Oversized requests fall back to the
-    // global bump heap (leaks, as before; rare).
+    // call). So the arena is recycled when the outermost turn closes. Before the
+    // arena existed these came straight from the global heap and were never freed
+    // — structural heap exhaustion for long-lived guests. Oversized requests still
+    // fall back to the global heap (talc); that raw buffer has no matching dealloc,
+    // so it leaks — but bounded per turn and rare.
     pub(crate) const WIRE_SIZE: usize = 64 * 1024;
     #[repr(C, align(16))]
     struct WireArena([u8; WIRE_SIZE]);
@@ -176,7 +122,7 @@ pub mod rt {
 
     /// Test-only accessor for the wire arena's address range, so unit tests can
     /// assert whether a returned pointer landed inside the arena or fell back to
-    /// the global bump heap.
+    /// the global heap.
     #[cfg(test)]
     pub(crate) fn wire_range() -> (usize, usize) {
         let base = addr_of_mut!(WIRE) as usize;
@@ -197,7 +143,8 @@ pub mod rt {
     ///
     /// Host-written wire buffers come from the per-turn WIRE arena (recycled at
     /// each outermost turn boundary); an oversized request falls back to the
-    /// global bump heap (leaks, as before; rare).
+    /// global heap (talc). That fallback buffer has no matching dealloc, so it
+    /// leaks (rare).
     pub fn alloc(size: usize) -> *mut u8 {
         unsafe {
             let need = size.max(1);
@@ -208,7 +155,7 @@ pub mod rt {
                     return p;
                 }
             }
-            // Oversized wire payload: global bump heap (leaks, as before).
+            // Oversized wire payload: global heap (talc); no dealloc, so it leaks.
             alloc::alloc::alloc(Layout::from_size_align_unchecked(need, 1))
         }
     }
@@ -256,7 +203,7 @@ pub mod rt {
     ///
     /// Uses a fixed-size STACK buffer with a truncating `core::fmt::Write` —
     /// no allocation, because the panic may itself be an allocation failure
-    /// (bump heap exhausted). Truncation lands on a UTF-8 char boundary so the
+    /// (heap exhausted — `memory.grow` refused). Truncation lands on a UTF-8 char boundary so the
     /// host's text decoding never sees a split code point.
     pub fn panic_log(info: &core::panic::PanicInfo) {
         struct StackBuf {
@@ -722,18 +669,18 @@ pub mod canvas {
     /// into `pixels_mut()`, then `present(id, &surface).await`.
     ///
     /// Straight-alpha (non-premultiplied), row-major, stride = `width * 4` — the
-    /// `putImageData` contract the host blit expects. Backed by the guest's
-    /// `BumpAlloc`, which only grows: allocate a Surface ONCE and reuse it across
-    /// frames (a `Surface::new` per frame leaks its buffer for the guest's life).
+    /// `putImageData` contract the host blit expects. Backed by the guest's global
+    /// heap (talc). talc reclaims freed buffers, so a `Surface::new` per frame no
+    /// longer leaks for the guest's life; still, prefer allocating a Surface ONCE
+    /// and reusing it across frames to avoid per-frame allocation churn.
     ///
     /// Double-buffering: `present(id, &surface).await` resolves only AFTER the host
     /// has finished reading these bytes, so with a single Surface it is already
     /// safe to overwrite for the next frame once the await returns (at most one
     /// frame in flight — the ack is the backpressure). A guest that wants to render
     /// frame N+1 while the host still blits frame N can instead allocate TWO
-    /// Surfaces once and alternate them (write A / present B, then swap); the same
-    /// "allocate once, BumpAlloc only grows" rule means the two buffers are made a
-    /// single time and reused forever.
+    /// Surfaces once and alternate them (write A / present B, then swap); allocating
+    /// the two buffers once and reusing them still avoids per-frame churn.
     pub struct Surface {
         width: u32,
         height: u32,
@@ -1640,8 +1587,10 @@ pub mod events {
 #[macro_export]
 macro_rules! rill_guest_main {
     ($main:path) => {
+        // talc, memory.grow-backed and growable: the guest heap grows to fit the
+        // working set then plateaus, reusing freed memory (see the SDK crate root).
         #[global_allocator]
-        static __RILL_GUEST_ALLOC: $crate::BumpAlloc = $crate::BumpAlloc::new();
+        static __RILL_GUEST_ALLOC: $crate::WasmDynamicTalc = $crate::new_wasm_dynamic_allocator();
 
         #[panic_handler]
         fn __rill_guest_panic(info: &core::panic::PanicInfo) -> ! {
@@ -1937,12 +1886,13 @@ mod tests {
         }
     }
 
-    // These tests read/write SHARED statics (WIRE / WIRE_OFF / TURN_DEPTH via
-    // rt::*, and the global HEAP via BumpAlloc). cargo test runs #[test]s on
-    // separate threads, so every assertion for one static group is kept inside a
-    // SINGLE #[test] function — splitting them would race. The two functions
-    // below touch disjoint statics (WIRE vs HEAP), so they don't race each other,
-    // and no other test touches either.
+    // These tests exercise the two leak-mitigation mechanisms. `wire_arena_*`
+    // reads/writes SHARED statics (WIRE / WIRE_OFF / TURN_DEPTH via rt::*); cargo
+    // test runs #[test]s on separate threads, so every assertion for that static
+    // group is kept inside a SINGLE #[test] function — splitting them would race.
+    // `talc_reuses_freed_memory_under_churn` drives a talc allocator over its OWN
+    // local arena (not the shared WIRE statics), so the two functions touch
+    // disjoint memory and don't race each other; no other test touches either.
     mod leak_mitigation {
         use crate::rt;
 
@@ -1974,7 +1924,7 @@ mod tests {
             let f = rt::alloc(16) as usize;
             assert_eq!(f, lo, "outermost turn end must recycle the arena");
 
-            // An oversized request falls back to the global bump heap, OUTSIDE
+            // An oversized request falls back to the global heap (talc), OUTSIDE
             // the arena range.
             let big = rt::alloc(rt::WIRE_SIZE + 1) as usize;
             assert!(
@@ -1983,28 +1933,59 @@ mod tests {
             );
         }
 
+        // Supersedes the retired `bump_dealloc_rolls_back_lifo_top`. That test
+        // pinned BumpAlloc's exact LIFO-top offset rollback — a MECHANISM detail
+        // of an allocator that no longer exists, never a host-observable contract
+        // (the host only ever sees valid buffers through the ABI). talc replaces
+        // that only-grows bump with a real free list, so the invariant that
+        // actually matters now — the guest heap is BOUNDED under alloc/free churn,
+        // reclaiming freed blocks regardless of order — is what this asserts. It
+        // drives talc directly (the same allocator wired as the guest
+        // #[global_allocator]) over a small fixed arena on the host target.
         #[test]
-        fn bump_dealloc_rolls_back_lifo_top() {
+        fn talc_reuses_freed_memory_under_churn() {
+            use alloc::vec::Vec;
             use core::alloc::{GlobalAlloc, Layout};
-            let bump = crate::BumpAlloc::new();
-            let layout = Layout::from_size_align(32, 1).unwrap();
+            use talc::{source::Claim, TalcCell};
+
+            // Deliberately small: far less than the total bytes churned below, so
+            // the test only passes if freed memory is actually reused (a leaking
+            // allocator would exhaust the arena long before the loop ends).
+            const ARENA_SIZE: usize = 64 * 1024;
+            static mut ARENA: [u8; ARENA_SIZE] = [0; ARENA_SIZE];
+            // SAFETY: ARENA is touched only here, only on this single test thread,
+            // and handed exclusively to this talc instance for its lifetime.
+            let talc = TalcCell::new(unsafe { Claim::array(&raw mut ARENA) });
+
+            let layout = Layout::from_size_align(256, 16).unwrap();
             unsafe {
-                let a = bump.alloc(layout) as usize;
-                let b = bump.alloc(layout) as usize;
-                assert!(a != 0 && b != 0);
-                assert!(b > a, "consecutive bump allocs must increase");
+                // Churn far more than the arena holds; each iteration frees before
+                // the next allocates, so a bounded allocator serves every request.
+                for _ in 0..2000 {
+                    let p = talc.alloc(layout);
+                    assert!(!p.is_null(), "talc must reuse freed memory, not exhaust");
+                    p.write_bytes(0xAB, layout.size()); // touch: catch a bogus ptr
+                    talc.dealloc(p, layout);
+                }
 
-                // Free the TOP block (b) then re-alloc: the slot is reused.
-                bump.dealloc(b as *mut u8, layout);
-                let c = bump.alloc(layout) as usize;
-                assert_eq!(c, b, "freeing the top block must roll back the offset");
-
-                // Free a NON-top block (a): the offset is unchanged, so the next
-                // alloc does not reuse a's slot (interleaved lifetimes leak).
-                bump.dealloc(a as *mut u8, layout);
-                let d = bump.alloc(layout) as usize;
-                assert_ne!(d, a, "freeing a non-top block must not roll back");
-                assert!(d > c, "non-top dealloc must leave the offset intact");
+                // Non-LIFO (FIFO) reclamation: hold several blocks live, then free
+                // the OLDEST first — the interleaved-lifetime case the old bump
+                // allocator LEAKED. A real free list makes the room available again.
+                let mut live = Vec::new();
+                for _ in 0..8 {
+                    let p = talc.alloc(layout);
+                    assert!(!p.is_null());
+                    live.push(p);
+                }
+                for p in live.drain(..) {
+                    talc.dealloc(p, layout); // oldest-first
+                }
+                // Everything freed: a full round of allocations succeeds again.
+                for _ in 0..8 {
+                    let p = talc.alloc(layout);
+                    assert!(!p.is_null(), "FIFO-freed blocks must be reclaimable");
+                    talc.dealloc(p, layout);
+                }
             }
         }
     }
