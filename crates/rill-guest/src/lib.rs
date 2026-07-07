@@ -1706,6 +1706,13 @@ macro_rules! rill_guest_main {
 #[cfg(test)]
 extern crate std;
 
+/// Guest-side encoder for the binary op-batch wire protocol
+/// (`contracts/op-batch-wire.json`). WORK IN PROGRESS, gated behind the
+/// `wip-binary-protocol` feature (default OFF) and NOT wired into the live
+/// op-batch emit path — new code only, so the shipped guest is unchanged.
+#[cfg(feature = "wip-binary-protocol")]
+pub mod wire_encode;
+
 /// Shared minimal JSON parser (also `include!`d by build.rs) — test-only here,
 /// for reading the contract back in `conformance`.
 #[cfg(test)]
@@ -1970,7 +1977,10 @@ mod tests {
             // An oversized request falls back to the global bump heap, OUTSIDE
             // the arena range.
             let big = rt::alloc(rt::WIRE_SIZE + 1) as usize;
-            assert!(big < lo || big >= hi, "oversized alloc must fall back off-arena");
+            assert!(
+                big < lo || big >= hi,
+                "oversized alloc must fall back off-arena"
+            );
         }
 
         #[test]

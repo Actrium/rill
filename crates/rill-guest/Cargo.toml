@@ -8,3 +8,9 @@ publish = false
 
 [lib]
 crate-type = ["rlib"]
+
+[features]
+# WORK IN PROGRESS, DEFAULT OFF: the guest-side encoder for the binary op-batch
+# wire protocol (contracts/op-batch-wire.json). Gated so nothing of it compiles
+# into the shipped guest until the protocol is wired into the live emit path.
+wip-binary-protocol = []

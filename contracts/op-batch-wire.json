@@ -1,0 +1,395 @@
+{
+  "$comment": "SINGLE SOURCE OF TRUTH for the guest->host op-batch BINARY wire protocol (the reconciler flush path: guest emits a SerializedOperationBatch, host decodes it into DOM/UI mutations). Every codec MUST generate from or validate against THIS file, never hand-copy from a peer implementation. Authoritative implementations locked to it: the TS encoder src/guest/runtime/reconciler/binary-encoder.ts and the TS decoder src/shared/bridge/binary-protocol.ts (BinaryDecoder). A Rust/native codec generates its opcode + value-tag constants and its limit constants from this file the same way crates/rill-guest/build.rs generates from contracts/graphics-seams.json, and locks its record shapes to it via conformance tests + the golden vectors in op-batch-wire.golden.json. This is DELIBERATELY NOT FlatBuffers (see native/core/src/protocol/rill_protocol.fbs for the rejected eval): the whole point is the cross-batch string INTERN table, which FlatBuffers cannot express. DOM type names and prop names repeat ~80% across a batch, so interning is rill's key size win. Field names below are the exact record field order on the wire; opcode/tag numbers are the exact bytes. All integers are UNSIGNED unless the type says i32. Every multi-byte scalar is LITTLE-ENDIAN.",
+  "version": 1,
+  "endianness": "little",
+
+  "magic": {
+    "$comment": "First 4 bytes of every batch. The u32 value 0x4c4c4952 read little-endian spells the ASCII bytes 52 49 4C 4C = 'RILL'. A decoder MUST read a u32 LE and reject (fail-closed, decode nothing) if it is not exactly this value.",
+    "u32le": 1280067922,
+    "hex": "0x4c4c4952",
+    "asciiBytes": "52 49 4C 4C"
+  },
+
+  "protocolVersion": {
+    "$comment": "u16 immediately after magic. A decoder MUST reject any value it does not implement. This file describes version 1 only.",
+    "value": 1
+  },
+
+  "typeAtoms": {
+    "$comment": "The scalar building blocks referenced by every 'type' field in the layouts below. All are little-endian. 'internRef' is the heart of the format: a u16 index into this batch's intern table (see 'intern'), used everywhere a string would otherwise be inlined.",
+    "u8": "1 byte unsigned",
+    "u16": "2 bytes unsigned, little-endian",
+    "u32": "4 bytes unsigned, little-endian",
+    "i32": "4 bytes signed two's-complement, little-endian",
+    "f64": "8 bytes IEEE-754 double, little-endian",
+    "u64": "8 bytes unsigned little-endian, emitted low-32 then high-32 (only present when the HAS_TIMESTAMPS batch flag is set)",
+    "internRef": "u16 index into the intern table; MUST be < the table's count. A decoder resolving an out-of-range index fails closed.",
+    "utf8": "raw UTF-8 code units, no terminator; always length-prefixed by the field that precedes it"
+  },
+
+  "header": {
+    "$comment": "Fixed 16-byte prefix. Written first-thing, fields in exactly this order. 'reserved' is three zero bytes rounding the header to 16.",
+    "byteLength": 16,
+    "layout": [
+      {
+        "name": "magic",
+        "type": "u32",
+        "value": 1280067922,
+        "note": "0x4c4c4952 = 'RILL'; reject on mismatch."
+      },
+      {
+        "name": "version",
+        "type": "u16",
+        "value": 1,
+        "note": "protocol version; reject if unsupported."
+      },
+      {
+        "name": "batchId",
+        "type": "u32",
+        "note": "monotonic batch sequence id chosen by the guest; opaque to the wire."
+      },
+      {
+        "name": "opCount",
+        "type": "u16",
+        "note": "number of operation records that follow the intern table. Decoder reads exactly this many, never more (see limits.maxOps)."
+      },
+      {
+        "name": "flags",
+        "type": "u8",
+        "note": "bitmask, see batchFlags. Default emission is NONE (0x00)."
+      },
+      {
+        "name": "reserved",
+        "type": "u8[3]",
+        "value": [0, 0, 0],
+        "note": "three zero bytes; MUST be written 0, ignored on read."
+      }
+    ]
+  },
+
+  "batchFlags": {
+    "$comment": "Bit values OR'd into header.flags. NONE is what the reference encoder emits by default. DELTA_INTERN and STRUCTURAL_ONLY are RESERVED bit positions (defined so a decoder can recognise + reject them in v1); the v1 encoder never sets them and always emits the FULL intern table. HAS_TIMESTAMPS, when set, appends a u64 timestamp AFTER every operation record.",
+    "NONE": 0,
+    "DELTA_INTERN": 1,
+    "STRUCTURAL_ONLY": 2,
+    "HAS_TIMESTAMPS": 4
+  },
+
+  "intern": {
+    "$comment": "The cross-batch string dedup table, written immediately after the 16-byte header and BEFORE the operations. Every string on the wire (DOM type names, prop keys, text, string values, method/callId, error/regexp/promise fields, object keys) is emitted ONCE here and referenced elsewhere by a u16 internRef. Indices are 0-based and assigned in FIRST-APPEARANCE order during a pre-pass that walks the operations in array order (CREATE: type, then each prop key then its string value; UPDATE: each prop key then value, then removedProps; TEXT: text; REF_CALL: method, callId, then args). CROSS-BATCH SEMANTICS: a persistent encoder keeps the map alive across batches so a given string keeps a STABLE index for the whole session (indices grow monotonically as new strings appear); however in v1 the FULL current table is re-serialised in each batch (DELTA_INTERN is not emitted), so every batch is independently self-decodable and a decoder MUST rebuild its table fresh from each batch's 'entries'.",
+    "layout": [
+      {
+        "name": "count",
+        "type": "u16",
+        "note": "number of string entries; also the exclusive upper bound for every internRef in this batch. See limits.maxInternStrings."
+      },
+      {
+        "name": "entries",
+        "repeat": "count",
+        "record": [
+          {
+            "name": "byteLen",
+            "type": "u16",
+            "note": "UTF-8 byte length of this string; see limits.maxStringBytes (a length that would not fit u16 MUST be rejected, never wrapped)."
+          },
+          {
+            "name": "bytes",
+            "type": "utf8",
+            "length": "byteLen",
+            "note": "the raw UTF-8 bytes, no terminator."
+          }
+        ]
+      }
+    ]
+  },
+
+  "opcodes": {
+    "$comment": "u8 tag that leads every operation record. Flat map for codegen (name -> byte).",
+    "CREATE": 1,
+    "UPDATE": 2,
+    "DELETE": 3,
+    "APPEND": 4,
+    "INSERT": 5,
+    "REMOVE": 6,
+    "REORDER": 7,
+    "TEXT": 8,
+    "REF_CALL": 9
+  },
+
+  "propsTable": {
+    "$comment": "Reusable sub-structure used by CREATE and UPDATE for a SerializedValueObject of props. A u16 entry count followed by that many (key internRef, value) pairs. The value is encoded per the 'values' section.",
+    "layout": [
+      {
+        "name": "entryCount",
+        "type": "u16",
+        "note": "number of prop key/value pairs; u16-bounded (limits.maxCollectionElements)."
+      },
+      {
+        "name": "entries",
+        "repeat": "entryCount",
+        "record": [
+          { "name": "key", "type": "internRef", "note": "prop name." },
+          { "name": "value", "type": "value", "note": "see 'values'." }
+        ]
+      }
+    ]
+  },
+
+  "ops": {
+    "$comment": "Fixed-order record layout for EVERY operation kind. Each record begins with its u8 opcode, then a u32 'id' (the target node id) for ALL kinds, then kind-specific fields in the order listed. If header.flags has HAS_TIMESTAMPS set, a u64 'timestamp' is appended after the last field of EACH record (the v1 default does not set that flag, so no timestamp is present). An unknown opcode is a fail-closed decode error for the whole batch.",
+    "CREATE": {
+      "opcode": 1,
+      "description": "Create a node of a given host component type with an initial prop set.",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 1 },
+        { "name": "id", "type": "u32", "note": "new node id." },
+        { "name": "type", "type": "internRef", "note": "host component/type name, e.g. 'View'." },
+        { "name": "props", "type": "propsTable" }
+      ]
+    },
+    "UPDATE": {
+      "opcode": 2,
+      "description": "Patch props on an existing node: a set of props to add/change plus a list of prop names to remove.",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 2 },
+        { "name": "id", "type": "u32" },
+        { "name": "props", "type": "propsTable" },
+        { "name": "removedCount", "type": "u16", "note": "0 when removedProps is absent/empty." },
+        {
+          "name": "removed",
+          "type": "internRef",
+          "repeat": "removedCount",
+          "note": "prop names to delete."
+        }
+      ]
+    },
+    "DELETE": {
+      "opcode": 3,
+      "description": "Destroy a node.",
+      "layout": [{ "name": "opcode", "type": "u8", "value": 3 }, { "name": "id", "type": "u32" }]
+    },
+    "APPEND": {
+      "opcode": 4,
+      "description": "Append childId as the last child of parentId. ('id' carries the same node context as the other ops but is not used by the host for APPEND; write the operation's id.)",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 4 },
+        { "name": "id", "type": "u32" },
+        { "name": "parentId", "type": "u32" },
+        { "name": "childId", "type": "u32" }
+      ]
+    },
+    "INSERT": {
+      "opcode": 5,
+      "description": "Insert childId into parentId at a positional index.",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 5 },
+        { "name": "id", "type": "u32" },
+        { "name": "parentId", "type": "u32" },
+        { "name": "childId", "type": "u32" },
+        { "name": "index", "type": "u16", "note": "insertion position among parent's children." }
+      ]
+    },
+    "REMOVE": {
+      "opcode": 6,
+      "description": "Detach childId from parentId (without destroying it; DELETE destroys).",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 6 },
+        { "name": "id", "type": "u32" },
+        { "name": "parentId", "type": "u32" },
+        { "name": "childId", "type": "u32" }
+      ]
+    },
+    "REORDER": {
+      "opcode": 7,
+      "description": "Reorder parentId's children to exactly the given id sequence.",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 7 },
+        { "name": "id", "type": "u32" },
+        { "name": "parentId", "type": "u32" },
+        { "name": "childCount", "type": "u16" },
+        {
+          "name": "childIds",
+          "type": "u32",
+          "repeat": "childCount",
+          "note": "full ordered child id list."
+        }
+      ]
+    },
+    "TEXT": {
+      "opcode": 8,
+      "description": "Set the text content of a text node.",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 8 },
+        { "name": "id", "type": "u32" },
+        { "name": "text", "type": "internRef", "note": "the text string." }
+      ]
+    },
+    "REF_CALL": {
+      "opcode": 9,
+      "description": "Imperative ref method call from guest to a host node (e.g. focus/blur/measure/scrollTo), correlated by callId for the async result. NOTE: the SerializedRefCallOperation also carries refId, but refId is NOT on the wire; the decoder sets refId = id (the u32 above). args are encoded per the 'values' section.",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 9 },
+        {
+          "name": "id",
+          "type": "u32",
+          "note": "the ref target node id; decoder mirrors this into both id and refId."
+        },
+        { "name": "method", "type": "internRef" },
+        { "name": "callId", "type": "internRef" },
+        { "name": "argCount", "type": "u16" },
+        { "name": "args", "type": "value", "repeat": "argCount" }
+      ]
+    }
+  },
+
+  "valueTags": {
+    "$comment": "u8 tag that leads every encoded SerializedValue. Flat map for codegen (name -> byte).",
+    "NULL": 0,
+    "UNDEFINED": 1,
+    "BOOL_FALSE": 2,
+    "BOOL_TRUE": 3,
+    "INT32": 4,
+    "FLOAT64": 5,
+    "STRING": 6,
+    "FUNCTION": 7,
+    "OBJECT": 8,
+    "ARRAY": 9,
+    "DATE": 10,
+    "ERROR": 11,
+    "REGEXP": 12,
+    "MAP": 13,
+    "SET": 14,
+    "PROMISE": 15
+  },
+
+  "values": {
+    "$comment": "Every SerializedValue variant. Each value is a u8 tag followed by the payload below. NUMBER RULE: a JS number that Number.isInteger and fits [-2147483648, 2147483647] is encoded as INT32; every other finite number (fractional, or out of i32 range) is FLOAT64. NaN/Infinity are not legal here. An unknown tag is a fail-closed decode error. NOTE on FUNCTION: the collection pre-pass also interns a function's __name/__sourceFile, but v1 encodes ONLY __fnId on the wire (name/sourceFile are reserved, not serialised).",
+    "NULL": { "tag": 0, "payload": [] },
+    "UNDEFINED": { "tag": 1, "payload": [] },
+    "BOOL_FALSE": {
+      "tag": 2,
+      "payload": [],
+      "note": "the boolean false is the whole value (no payload byte)."
+    },
+    "BOOL_TRUE": {
+      "tag": 3,
+      "payload": [],
+      "note": "the boolean true is the whole value (no payload byte)."
+    },
+    "INT32": { "tag": 4, "payload": [{ "name": "value", "type": "i32" }] },
+    "FLOAT64": { "tag": 5, "payload": [{ "name": "value", "type": "f64" }] },
+    "STRING": { "tag": 6, "payload": [{ "name": "value", "type": "internRef" }] },
+    "FUNCTION": { "tag": 7, "payload": [{ "name": "fnId", "type": "internRef" }] },
+    "OBJECT": {
+      "tag": 8,
+      "payload": [
+        { "name": "entryCount", "type": "u16" },
+        {
+          "name": "entries",
+          "repeat": "entryCount",
+          "record": [{ "name": "key", "type": "internRef" }, { "name": "value", "type": "value" }]
+        }
+      ]
+    },
+    "ARRAY": {
+      "tag": 9,
+      "payload": [
+        { "name": "length", "type": "u16" },
+        { "name": "items", "type": "value", "repeat": "length" }
+      ]
+    },
+    "DATE": {
+      "tag": 10,
+      "payload": [
+        {
+          "name": "epochMs",
+          "type": "f64",
+          "note": "milliseconds since Unix epoch (from Date.getTime()); decoder rebuilds the ISO string."
+        }
+      ]
+    },
+    "ERROR": {
+      "tag": 11,
+      "payload": [
+        { "name": "name", "type": "internRef" },
+        { "name": "message", "type": "internRef" },
+        {
+          "name": "stack",
+          "type": "internRef",
+          "note": "empty-string intern when stack is absent."
+        }
+      ]
+    },
+    "REGEXP": {
+      "tag": 12,
+      "payload": [
+        { "name": "source", "type": "internRef" },
+        { "name": "flags", "type": "internRef" }
+      ]
+    },
+    "MAP": {
+      "tag": 13,
+      "payload": [
+        { "name": "entryCount", "type": "u16" },
+        {
+          "name": "entries",
+          "repeat": "entryCount",
+          "record": [{ "name": "key", "type": "value" }, { "name": "value", "type": "value" }]
+        }
+      ]
+    },
+    "SET": {
+      "tag": 14,
+      "payload": [
+        { "name": "count", "type": "u16" },
+        { "name": "values", "type": "value", "repeat": "count" }
+      ]
+    },
+    "PROMISE": { "tag": 15, "payload": [{ "name": "promiseId", "type": "internRef" }] }
+  },
+
+  "limits": {
+    "$comment": "FAIL-CLOSED caps. 'Fail-closed' means: on any breach the codec MUST abort the whole batch and let NOTHING partial cross the seam — an encoder throws before/without emitting a truncated buffer; a decoder throws and discards the whole batch rather than yielding a partial op list. These are hard structural bounds of the format (mostly u16 field widths), not tunable budgets. A native codec SHOULD generate these as constants (as crates/rill-guest/build.rs does for the graphics budget).",
+    "maxOps": {
+      "value": 65535,
+      "reason": "header.opCount is u16.",
+      "reject": "Encoder MUST NOT start a batch with more ops than this; decoder reads exactly opCount records and treats any opcode/underrun error as a whole-batch reject."
+    },
+    "maxInternStrings": {
+      "value": 65535,
+      "reason": "intern.count is u16 and every internRef is u16, so indices span 0..65534.",
+      "reject": "On interning the 65536th distinct string the encoder throws 'Intern table overflow' and emits nothing (the reference throws at internTable.length >= 65535). A decoder rejects any internRef >= intern.count."
+    },
+    "maxStringBytes": {
+      "value": 65535,
+      "reason": "each intern entry's byteLen is u16.",
+      "reject": "A string whose UTF-8 length exceeds this MUST be rejected (whole-batch, fail-closed) — the u16 length MUST NOT be allowed to wrap/truncate."
+    },
+    "maxCollectionElements": {
+      "value": 65535,
+      "reason": "every count/length field (propsTable.entryCount, UPDATE.removedCount, REORDER.childCount, REF_CALL.argCount, OBJECT.entryCount, ARRAY.length, MAP.entryCount, SET.count) is u16.",
+      "reject": "A collection larger than this cannot be represented and MUST be rejected fail-closed rather than truncated."
+    },
+    "maxBatchBytes": {
+      "value": 16777216,
+      "reason": "reference encoder's default maxBufferSize (16 MiB) — the hard ceiling on one encoded batch buffer.",
+      "reject": "If the growing output would exceed this the encoder throws 'Buffer overflow' and emits nothing."
+    },
+    "maxValueDepth": {
+      "value": 64,
+      "reason": "bounds the recursion/allocation of nested container values (ARRAY/SET/MAP/OBJECT, and any value nested inside them) so a maliciously deep value tree cannot overflow a native decoder's C++ stack or blow up the TS decoder's memory. Depth counts nesting of container values only, starting at 1 for a top-level value; 64 is generous for real RN prop/style trees (which nest only a few levels).",
+      "reject": "A codec MUST reject fail-closed (whole batch) before decoding/encoding a container value whose nesting would exceed this depth — the encoder throws before emitting and the decoder throws and discards the whole batch rather than recursing further."
+    },
+    "maxTotalElements": {
+      "value": 1048576,
+      "definition": "The maximum total number of DECODED ELEMENTS a single batch may contain. An element is: every VALUE NODE (each scalar value AND each container value OBJECT/ARRAY/MAP/SET, counted at every nesting level — a container's children are counted in addition to the container itself), PLUS every REORDER op childId, PLUS every UPDATE op removedProp reference (removedProps/removed internRef), PLUS every intern-table entry. Each of these counts as exactly 1. A codec MUST maintain ONE per-batch running count over all element kinds together and reject fail-closed (abort the whole batch) the moment that single count would exceed this cap, BEFORE allocating the offending element.",
+      "reason": "Without this, a small (<= maxBatchBytes, i.e. <= 16 MiB) buffer inflates into multi-GB of decoded structures on the untrusted guest->host seam. Charging only value nodes left three non-value collections uncharged — REORDER childIds (u32 each), UPDATE removedProps/removed (internRef each), and the intern-table entries — each op is only u16-capped (65535) but the aggregate across maxOps ops was bounded solely by maxBatchBytes, so a legal <= 16 MiB batch packed with them decoded to ~320-395 MB (measured). Folding all element kinds into the one cap bounds ALL decoder allocation to this single limit (~210-220 MB C++ worst case: cap x the heaviest element, an OBJECT entry at ~200 B, plus the u16-capped ops vector and the <=16 MiB input buffer), closing the last non-value footprint path. 1048576 stays ~100x a realistic op-batch (whose intern + childIds + removedProps + values sum to a few thousand). maxBatchBytes remains the outer byte bound; this is the inner element-count bound.",
+      "reject": "A codec MUST maintain ONE running total-element count across the whole batch — spanning every value node, every REORDER childId, every UPDATE removedProp reference, and every intern-table entry — and reject fail-closed (whole batch) the moment that count would exceed this cap, BEFORE allocating the offending element — the encoder throws before emitting and the decoder throws and discards the whole batch rather than materialising the next element."
+    },
+    "maxDateMs": {
+      "value": 8640000000000000,
+      "reason": "A DATE value's epochMs must be finite and within the ECMAScript Date range (+/-8.64e15 ms). Beyond it a JavaScript Date is 'Invalid Date' (toISOString throws), so such a value could not survive a round-trip on the TS host.",
+      "reject": "The encoder MUST reject (throw, emit nothing) and every decoder MUST reject fail-closed (whole batch) a DATE whose epochMs is NaN, +/-Infinity, or whose absolute value exceeds this. All three codecs share this exact domain so the same bytes are valid everywhere (no drift)."
+    }
+  }
+}

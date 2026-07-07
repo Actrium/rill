@@ -10,6 +10,7 @@ void registerTenantManagerIntegrationTests();
 void registerNetworkSandboxTests();
 void registerFileSandboxTests();
 void registerEventBusTests();
+void registerWireDecoderTests();
 
 int main() {
   std::cout << "==========================================" << std::endl;
@@ -26,6 +27,7 @@ int main() {
   registerNetworkSandboxTests();
   registerFileSandboxTests();
   registerEventBusTests();
+  registerWireDecoderTests();
 
   // Run all tests
   return rill::test::TestRunner::instance().run();
