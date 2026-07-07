@@ -24,7 +24,7 @@ use std::boxed::Box;
 use std::collections::BTreeSet;
 use std::format;
 use std::string::{String, ToString};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::MutexGuard;
 use std::vec;
 use std::vec::Vec;
 
@@ -32,8 +32,7 @@ use std::vec::Vec;
 /// SDK's runtime statics (`rt::NEXT_CB` / `rt::RESULTS` / `events::HANDLERS`)
 /// assume the single-threaded wasm world, while libtest runs tests on threads.
 fn wire_lock() -> MutexGuard<'static, ()> {
-    static LOCK: Mutex<()> = Mutex::new(());
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    crate::wire_lock()
 }
 
 fn contract() -> Json {

@@ -29,6 +29,11 @@
  */
 import type { HostModuleDispatchTable } from '../../contract';
 import type { OperationBatch } from '../../shared/types';
+import {
+  decodeRequest as decodeRbs1Request,
+  encodeResult as encodeRbs1Result,
+  isRbs1,
+} from '../wire/store-net-envelope';
 
 /**
  * Guest ABI versions this host understands. A guest may declare its version via
@@ -253,14 +258,18 @@ export class WasmGuestHost {
         await Promise.resolve();
         const moduleId = this.readString(mp, ml);
         const method = this.readString(xp, xl);
-        // Payload framing fork (canvas-wire.DESIGN.md §1.4). A binary canvas wire
-        // frame begins with the 4-byte 'RCNV' magic (52 43 4E 56); such a payload
-        // is handed to the handler as RAW BYTES for a binary-aware capability
-        // (host:canvas.draw) to decode. EVERYTHING else keeps the legacy
-        // JSON.parse path — a JSON body ('{…}') parses as before, and genuinely
-        // malformed input still throws here and fails closed (ok=0) rather than
-        // reaching a handler. The carve-out is exact to the magic, so no existing
-        // caller's boundary is weakened. The decoder re-checks the full u32 magic.
+        // Payload framing fork (canvas-wire.DESIGN.md §1.4 + store-net-bytes
+        // §B.2). Each binary wire has a DISTINCT 4-byte magic, all sharing byte 0
+        // (0x52 'R'), so the fork compares the FULL u32 — never byte 0 alone:
+        //   - 'RCNV' (52 43 4E 56) -> hand RAW BYTES to a binary-aware capability
+        //     (host:canvas.draw) to decode itself.
+        //   - 'RBS1' (52 42 53 31) -> decode the RBS1 envelope here and revive
+        //     each {"$b":N} sentinel into a Uint8Array, then hand the
+        //     contract-agnostic args to dispatch (the codec is self-describing —
+        //     no per-module knowledge). A malformed frame throws and fails closed.
+        //   - anything else -> the legacy JSON.parse path, byte-for-byte
+        //     unchanged (a JSON body '{…}'/'[…]' matches no magic). Genuinely
+        //     malformed input still throws here and fails closed (ok=0).
         let input: unknown;
         if (il > 0) {
           const raw = this.readBytes(ip, il);
@@ -270,7 +279,13 @@ export class WasmGuestHost {
             raw[1] === 0x43 &&
             raw[2] === 0x4e &&
             raw[3] === 0x56;
-          input = isCanvasBinary ? raw : JSON.parse(new TextDecoder().decode(raw));
+          if (isCanvasBinary) {
+            input = raw;
+          } else if (isRbs1(raw)) {
+            input = decodeRbs1Request(raw);
+          } else {
+            input = JSON.parse(new TextDecoder().decode(raw));
+          }
         } else {
           input = undefined;
         }
@@ -297,7 +312,15 @@ export class WasmGuestHost {
     // call resolve() again, throw again, and reject drain(). On failure the cb
     // is simply abandoned (the guest never sees a resolution), staying fail-closed.
     try {
-      const bytes = new TextEncoder().encode(JSON.stringify(result));
+      // Return framing fork (store-net-bytes §B.3), symmetric with the receive
+      // fork. When the handler result carries at least one Uint8Array, encode an
+      // RBS1 envelope (hoisting each byte stream to a segment + a {"$b":N}
+      // sentinel); when it carries none, `encodeRbs1Result` returns null and the
+      // reply is the IDENTICAL JSON.stringify bytes as today — no behaviour
+      // change for any existing (non-binary) capability. Contract-agnostic: the
+      // hoist is driven by the runtime type (Uint8Array), not per-module config.
+      const envelope = encodeRbs1Result(result);
+      const bytes = envelope ?? new TextEncoder().encode(JSON.stringify(result));
       const ptr = this.allocWrite(bytes);
       (
         this.instance.exports.rill_resolve as (

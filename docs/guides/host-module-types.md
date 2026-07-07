@@ -39,6 +39,42 @@ A host may generate this file from its own rpc / subscription descriptors; rill 
 **where the file lives** and **how the compiler finds it** (below). rill does not prescribe how
 the host generates it.
 
+## Binary fields map to `Uint8Array`
+
+A capability may declare that a request or response field is a **byte stream** rather
+than JSON-encoded data (see `binary` on `rpc()` in `src/contract/index.ts`). rill fixes
+the one **mapping rule** the host's generator MUST honour so a declared byte field types
+as bytes on both ends:
+
+> For a capability descriptor, a field name listed in `binary.input` maps to a
+> **`Uint8Array`** parameter/field in the emitted signature, and a field name in
+> `binary.output` maps to a **`Uint8Array`** in the emitted return type. Every other
+> field keeps its JSON-derived type. A descriptor with no `binary` declaration
+> generates exactly as before — no `Uint8Array` appears.
+
+Worked example — the `host:store` byte capabilities
+
+```ts
+// descriptors
+putBytes: rpc<{ key: string; value: Uint8Array }, { version: number }>({ binary: { input: ['value'] } })
+getBytes: rpc<{ key: string }, { value: Uint8Array; version: number } | null>({ binary: { output: ['value'] } })
+```
+
+generate
+
+```ts
+declare module 'host:store' {
+  export function putBytes(key: string, value: Uint8Array): Promise<{ version: number }>
+  export function getBytes(key: string): Promise<{ value: Uint8Array; version: number } | null>
+}
+```
+
+The manifest's `binaryCapabilities` list (emitted only when non-empty) names exactly the
+capabilities carrying such a mapping, so the generator — and any publish gate — knows which
+descriptors to apply the rule to. On the wire these fields cross as raw bytes (the RBS1
+envelope, or the QuickJS `$b64` sidecar), never as a JSON number-array; the type simply
+reflects that. See [`../../contracts/store-net-bytes.CONFORMANCE.md`](../../contracts/store-net-bytes.CONFORMANCE.md).
+
 ## The convention: where it goes, how it is picked up
 
 1. Place the host-provided declaration file at the **guest project root** as

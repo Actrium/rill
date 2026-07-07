@@ -96,8 +96,9 @@ pub mod rt {
     // call). So the arena is recycled when the outermost turn closes. Before the
     // arena existed these came straight from the global heap and were never freed
     // — structural heap exhaustion for long-lived guests. Oversized requests still
-    // fall back to the global heap (talc); that raw buffer has no matching dealloc,
-    // so it leaks — but bounded per turn and rare.
+    // fall back to the global heap (talc); on the RETURN path `resolve` now frees
+    // that fallback buffer after copying it out (see FALLBACK_ALLOCS + resolve),
+    // closing the large-binary-response leak.
     pub(crate) const WIRE_SIZE: usize = 64 * 1024;
     #[repr(C, align(16))]
     struct WireArena([u8; WIRE_SIZE]);
@@ -107,6 +108,20 @@ pub mod rt {
     // callback synchronously emitting an event mid-dispatch) must NOT recycle the
     // arena while an outer turn may still be reading its payload.
     static mut TURN_DEPTH: u32 = 0;
+
+    // Outstanding talc-FALLBACK allocations `(ptr, size)` that `alloc` handed out
+    // for oversized (> WIRE_SIZE) host-written buffers. `resolve` frees a return's
+    // SOURCE buffer by looking it up here — so it frees ONLY buffers the guest
+    // itself allocated, exactly once. This is the load-bearing safety invariant:
+    // `resolve` is a raw ABI entry whose `ptr` is guest-allocated in the real host
+    // (the host always writes via `rill_alloc` first), but a test harness or a
+    // misbehaving host could pass a foreign pointer; matching against this table
+    // means such a pointer is NEVER wild-freed (a bare "off-arena => free" rule
+    // would double-free it). Arena buffers are recycled per turn and never appear
+    // here. Bounded by MAX_FALLBACK_TRACKED so a fallback with no matching resolve
+    // (e.g. an oversized event payload) cannot grow it without limit.
+    static mut FALLBACK_ALLOCS: Vec<(usize, usize)> = Vec::new();
+    const MAX_FALLBACK_TRACKED: usize = 64;
 
     pub(crate) fn begin_wire_turn() {
         unsafe { TURN_DEPTH += 1 };
@@ -129,6 +144,37 @@ pub mod rt {
         (base, base + WIRE_SIZE)
     }
 
+    /// Whether `ptr` points inside the WIRE arena (vs the talc-fallback heap).
+    /// A fast pre-filter for the return-path dealloc: an arena buffer (the common
+    /// case) is recycled per turn and must NEVER be freed, so `resolve` skips the
+    /// FALLBACK_ALLOCS lookup for it. Available in every build, unlike the
+    /// test-only [`wire_range`].
+    pub(crate) fn wire_contains(ptr: *const u8) -> bool {
+        let base = addr_of_mut!(WIRE) as usize;
+        let p = ptr as usize;
+        p >= base && p < base + WIRE_SIZE
+    }
+
+    /// Free the talc-fallback buffer at `ptr` IFF `alloc` handed it out (it is in
+    /// FALLBACK_ALLOCS), using the tracked size. A no-op for an arena pointer or
+    /// any pointer the guest did not allocate — so it can never wild-free a
+    /// foreign buffer. Called by `resolve` after the source has been copied out.
+    ///
+    /// # Safety
+    /// If `ptr` is tracked, it must still be live (not already freed) — upheld
+    /// because a fallback ptr is recorded once by `alloc` and removed on the first
+    /// matching `resolve`.
+    unsafe fn free_fallback_source(ptr: *const u8) {
+        if wire_contains(ptr) {
+            return; // arena buffer: recycled per turn, never freed here
+        }
+        let p = ptr as usize;
+        if let Some(idx) = FALLBACK_ALLOCS.iter().position(|&(fp, _)| fp == p) {
+            let (_, size) = FALLBACK_ALLOCS.remove(idx);
+            alloc::alloc::dealloc(ptr as *mut u8, Layout::from_size_align_unchecked(size, 1));
+        }
+    }
+
     /// `rill_init` body: box the guest's async entry and drive it once.
     pub fn init(future: impl Future<Output = ()> + 'static) {
         begin_wire_turn();
@@ -143,8 +189,10 @@ pub mod rt {
     ///
     /// Host-written wire buffers come from the per-turn WIRE arena (recycled at
     /// each outermost turn boundary); an oversized request falls back to the
-    /// global heap (talc). That fallback buffer has no matching dealloc, so it
-    /// leaks (rare).
+    /// global heap (talc) and is recorded in FALLBACK_ALLOCS so the return path
+    /// (`resolve`) can free it after copying it out. A fallback with no matching
+    /// resolve (e.g. an oversized event payload) still relies on the per-turn
+    /// recycle for its arena-side reads and leaks the buffer bounded per turn.
     pub fn alloc(size: usize) -> *mut u8 {
         unsafe {
             let need = size.max(1);
@@ -155,8 +203,19 @@ pub mod rt {
                     return p;
                 }
             }
-            // Oversized wire payload: global heap (talc); no dealloc, so it leaks.
-            alloc::alloc::alloc(Layout::from_size_align_unchecked(need, 1))
+            // Oversized wire payload: global heap (talc). Record it so a matching
+            // `resolve` can free it (the return-path leak fix). Bound the table:
+            // if a fallback never gets a matching resolve, dropping the oldest
+            // record only forgets our ability to free that one buffer later (it
+            // leaks, exactly as before this fix) — it never frees anything early.
+            let p = alloc::alloc::alloc(Layout::from_size_align_unchecked(need, 1));
+            if !p.is_null() {
+                if FALLBACK_ALLOCS.len() >= MAX_FALLBACK_TRACKED {
+                    FALLBACK_ALLOCS.remove(0);
+                }
+                FALLBACK_ALLOCS.push((p as usize, need));
+            }
+            p
         }
     }
 
@@ -168,7 +227,19 @@ pub mod rt {
     pub unsafe fn resolve(cb: u32, ok: u32, ptr: *const u8, len: usize) {
         begin_wire_turn();
         let bytes = if !ptr.is_null() && len > 0 {
-            core::slice::from_raw_parts(ptr, len).to_vec()
+            let copied = core::slice::from_raw_parts(ptr, len).to_vec();
+            // RETURN-PATH LEAK FIX. The host wrote this response via `rill_alloc`.
+            // A buffer that fit the WIRE arena is recycled by the per-turn reset
+            // and MUST NOT be freed here. But an OVERSIZED (> WIRE_SIZE) return
+            // took the talc fallback in `alloc`, which has no other owner and,
+            // before this, no matching dealloc — so every large binary response
+            // leaked, undoing the R3 bounded heap. Now that the source is copied
+            // out (`to_vec` above), free it IFF it is a fallback buffer WE
+            // allocated (tracked in FALLBACK_ALLOCS) — never a foreign pointer.
+            // The WIRE per-turn semantics and the R3 invariants are untouched;
+            // only the off-arena fallback the guest itself owns is reclaimed.
+            free_fallback_source(ptr);
+            copied
         } else {
             Vec::new()
         };
@@ -331,6 +402,7 @@ pub fn host_call(module: &'static str, method: &'static str, input: Vec<u8>) -> 
 /// [`crate::host_call`] until typed wrappers land.
 pub mod store {
     use crate::json_escape;
+    use crate::store_net_encode::{decode_reply, encode_envelope, Value};
     use alloc::string::String;
     use alloc::vec::Vec;
 
@@ -376,6 +448,178 @@ pub mod store {
         } else {
             Err(bytes)
         }
+    }
+
+    /// `host:store.putBytes(key, value)` — store a RAW byte value under `key`.
+    /// The value rides the RBS1 envelope as a length-prefixed binary SEGMENT;
+    /// the control plane is `{"key":"…","value":{"$b":0}}` — the value bytes
+    /// (incl. `0x00`/`0xFF`) NEVER appear as a JSON number-array (the R2 goal).
+    /// Returns the host's ack body on success (`{"version":n}`), or a small
+    /// `{"error":"…"}` body if the value breaches a codec cap (fail-closed, no
+    /// partial write) or the host fails the call.
+    pub async fn put_bytes(key: &str, value: &[u8]) -> Result<Vec<u8>, Vec<u8>> {
+        let mut json = String::from("{\"key\":");
+        json_escape(&mut json, key);
+        json.push_str(",\"value\":{\"$b\":0}}");
+        // Hoist the value to segment 0; an over-cap value fails closed here
+        // before any host call is issued (nothing partial crosses the seam).
+        let frame = encode_envelope(&json, &[value]).map_err(crate::codec_error)?;
+        let (ok, resp) = super::host_call("host:store", "putBytes", frame).await;
+        if ok == 1 {
+            Ok(resp)
+        } else {
+            Err(resp)
+        }
+    }
+
+    /// `host:store.getBytes(key)` — read a raw byte value. The REQUEST carries no
+    /// bytes, so it is a plain-JSON body (`{"key":"…"}`); the RESPONSE is an RBS1
+    /// envelope `{"value":{"$b":0},"version":n}` whose segment 0 is the value.
+    /// Returns `Ok(Some(value))` when present, `Ok(None)` for an absent key (the
+    /// host replies with a bare `null`), or `Err(body)` on failure.
+    pub async fn get_bytes(key: &str) -> Result<Option<Vec<u8>>, Vec<u8>> {
+        let mut json = String::from("{\"key\":");
+        json_escape(&mut json, key);
+        json.push('}');
+        let (ok, resp) = super::host_call("host:store", "getBytes", json.into_bytes()).await;
+        if ok != 1 {
+            return Err(resp);
+        }
+        match decode_reply(&resp).map_err(crate::codec_error)? {
+            // Absent key: the host replies with a plain-JSON `null`.
+            Value::Null => Ok(None),
+            // Present: pull the revived byte field out of the reply object.
+            Value::Obj(entries) => {
+                for (k, v) in entries {
+                    if k == "value" {
+                        return match v {
+                            Value::Bytes(b) => Ok(Some(b)),
+                            _ => Err(Vec::from(
+                                &b"{\"error\":\"getBytes: value is not a byte stream\"}"[..],
+                            )),
+                        };
+                    }
+                }
+                Err(Vec::from(
+                    &b"{\"error\":\"getBytes: reply missing value field\"}"[..],
+                ))
+            }
+            _ => Err(Vec::from(
+                &b"{\"error\":\"getBytes: unexpected reply shape\"}"[..],
+            )),
+        }
+    }
+}
+
+/// Typed wrapper over the `host:net` capability — a host-mediated HTTP fetch for
+/// native guests, carrying a BINARY request/response body over the RBS1 envelope.
+///
+/// The request body (when present) rides as a length-prefixed binary SEGMENT and
+/// the response body comes back the same way — so arbitrary bytes (incl.
+/// `0x00`/`0xFF`) cross the seam untouched, NEVER as a JSON number-array. The
+/// control plane holds only the url/method/headers and a `{"$b":0}` sentinel for
+/// the body. A `body: None` request has no segment, so it is a plain-JSON control
+/// plane (byte-for-byte the back-compat shape).
+pub mod net {
+    use crate::json_escape;
+    use crate::store_net_encode::{decode_reply, encode_envelope, Value};
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    /// A decoded `host:net.fetchBytes` response: the HTTP status, the response
+    /// headers, and the raw response body (revived from the envelope's segment,
+    /// empty when the response carried none).
+    #[derive(Debug, Clone, PartialEq, Eq, Default)]
+    pub struct Response {
+        /// HTTP status code (e.g. 200).
+        pub status: u16,
+        /// Response headers as `(name, value)` pairs, in the host's order.
+        pub headers: Vec<(String, String)>,
+        /// The raw response body bytes (empty if the response had no body).
+        pub body: Vec<u8>,
+    }
+
+    /// `host:net.fetchBytes(url, method, headers, body?)` — issue an HTTP request
+    /// whose body (when `Some`) rides as a binary segment, and decode the binary
+    /// response body from the reply envelope.
+    ///
+    /// Control plane: `{"url":…,"method":…,"headers":[[k,v],…]}` plus
+    /// `,"body":{"$b":0}` when a body is supplied. Returns the decoded
+    /// [`Response`] on success, or a small `{"error":"…"}` body on a codec cap
+    /// breach (fail-closed) or a host failure.
+    pub async fn fetch_bytes(
+        url: &str,
+        method: &str,
+        headers: &[(&str, &str)],
+        body: Option<&[u8]>,
+    ) -> Result<Response, Vec<u8>> {
+        let mut json = String::from("{\"url\":");
+        json_escape(&mut json, url);
+        json.push_str(",\"method\":");
+        json_escape(&mut json, method);
+        json.push_str(",\"headers\":[");
+        for (i, (name, val)) in headers.iter().enumerate() {
+            if i > 0 {
+                json.push(',');
+            }
+            json.push('[');
+            json_escape(&mut json, name);
+            json.push(',');
+            json_escape(&mut json, val);
+            json.push(']');
+        }
+        json.push(']');
+
+        // Body rides segment 0 when present; otherwise the request stays a plain
+        // JSON control plane (no segment => back-compat shape).
+        let frame = match body {
+            Some(bytes) => {
+                json.push_str(",\"body\":{\"$b\":0}}");
+                encode_envelope(&json, &[bytes]).map_err(crate::codec_error)?
+            }
+            None => {
+                json.push('}');
+                json.into_bytes()
+            }
+        };
+
+        let (ok, resp) = crate::host_call("host:net", "fetchBytes", frame).await;
+        if ok != 1 {
+            return Err(resp);
+        }
+        parse_response(&resp)
+    }
+
+    /// Decode a `fetchBytes` reply (RBS1 envelope, or plain JSON when the response
+    /// had no body) into a [`Response`]. Fail-closed: a malformed frame or a reply
+    /// that is not the expected object surfaces as an `Err(body)`.
+    fn parse_response(resp: &[u8]) -> Result<Response, Vec<u8>> {
+        let entries = match decode_reply(resp).map_err(crate::codec_error)? {
+            Value::Obj(entries) => entries,
+            _ => {
+                return Err(Vec::from(
+                    &b"{\"error\":\"fetchBytes: reply is not an object\"}"[..],
+                ))
+            }
+        };
+        let mut out = Response::default();
+        for (key, value) in entries {
+            match (key.as_str(), value) {
+                ("status", Value::Num(n)) => out.status = n as u16,
+                ("headers", Value::Arr(items)) => {
+                    for item in items {
+                        if let Value::Arr(pair) = item {
+                            if let [Value::Str(name), Value::Str(val)] = &pair[..] {
+                                out.headers.push((name.clone(), val.clone()));
+                            }
+                        }
+                    }
+                }
+                ("body", Value::Bytes(b)) => out.body = b,
+                _ => {}
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -1670,6 +1914,16 @@ fn push_op(ops: &mut alloc::string::String, op: alloc::string::String) {
 /// batch/body, and one raw newline inside a string makes the ENTIRE message
 /// invalid — silently dropped host-side. So this must stay strict, and every
 /// module must use this function rather than growing a local copy.
+/// Format a codec [`store_net_encode::Reason`] as a compact `{"error":"<token>"}`
+/// JSON body, so a byte wrapper can surface a fail-closed cap breach through its
+/// `Err(Vec<u8>)` channel using the schema's stable reason vocabulary.
+pub(crate) fn codec_error(reason: store_net_encode::Reason) -> alloc::vec::Vec<u8> {
+    let mut s = alloc::string::String::from("{\"error\":");
+    json_escape(&mut s, reason.as_str());
+    s.push('}');
+    s.into_bytes()
+}
+
 pub(crate) fn json_escape(out: &mut alloc::string::String, raw: &str) {
     out.push('"');
     for ch in raw.chars() {
@@ -1754,6 +2008,13 @@ pub mod events {
         crate::rt::end_wire_turn();
     }
 }
+
+/// RBS1 binary-value ENVELOPE codec (`contracts/store-net-bytes.json`) — the R2
+/// first-class-bytes wire. ADDITIVE INFRA: compiled into the shipped guest
+/// (unlike the `wip-binary-protocol` encoders), but it changes NO existing
+/// call's default path — a segment-free value stays byte-for-byte identical to
+/// today's raw JSON. See the module docs for the framing + value-walking layers.
+pub mod store_net_encode;
 
 /// Generate the ABI exports (`rill_init` / `rill_alloc` / `rill_resolve`), the
 /// global allocator, and a panic handler in the guest cdylib. `$main` is an
@@ -1854,6 +2115,75 @@ mod mini_json;
 /// `contracts/graphics-seams.json`.
 #[cfg(test)]
 mod conformance;
+
+/// Tests for the RBS1 byte-value SDK wrappers (`store::put_bytes`/`get_bytes`,
+/// `net::fetch_bytes`) — request/response wiretaps against the recording shim.
+#[cfg(test)]
+#[path = "store_net_wrappers_tests.rs"]
+mod store_net_wrappers_tests;
+
+// A net-live-bytes counting global allocator, wired ONLY for the test build
+// (the real guest's allocator is talc, installed by `rill_guest_main!`). It
+// wraps the system allocator and tracks the live heap so the return-path
+// no-leak test can assert that many oversized host->guest returns free their
+// talc-fallback source buffers (the leak the fix closes) rather than accumulate.
+#[cfg(test)]
+mod test_alloc {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::alloc::{GlobalAlloc, Layout, System};
+
+    /// Net live bytes handed out by the global allocator (alloc − dealloc).
+    pub(crate) static LIVE: AtomicUsize = AtomicUsize::new(0);
+
+    pub(crate) struct Counting;
+
+    // SAFETY: pure pass-through to `System`; only bookkeeping is added.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let p = System.alloc(layout);
+            if !p.is_null() {
+                LIVE.fetch_add(layout.size(), Ordering::Relaxed);
+            }
+            p
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            System.dealloc(ptr, layout);
+            LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            let p = System.alloc_zeroed(layout);
+            if !p.is_null() {
+                LIVE.fetch_add(layout.size(), Ordering::Relaxed);
+            }
+            p
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let p = System.realloc(ptr, layout, new_size);
+            if !p.is_null() {
+                // realloc keeps the allocation live; adjust by the size delta.
+                LIVE.fetch_add(new_size, Ordering::Relaxed);
+                LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+            }
+            p
+        }
+    }
+}
+
+#[cfg(test)]
+#[global_allocator]
+static COUNTING_ALLOC: test_alloc::Counting = test_alloc::Counting;
+
+/// Serialize every test that touches the SDK's runtime statics (`rt::RESULTS` /
+/// `rt::NEXT_CB` / `rt::WIRE_OFF` / `rt::TURN_DEPTH` / `events::HANDLERS`). Those
+/// assume the single-threaded wasm world, but libtest runs tests on threads, so
+/// concurrent `resolve`/`alloc` from two tests would corrupt the shared `Vec`
+/// statics. One crate-wide lock (used by `conformance`, the wire-arena test and
+/// the return-path no-leak test) makes them mutually exclusive.
+#[cfg(test)]
+pub(crate) fn wire_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 #[cfg(test)]
 mod test_shims {
@@ -2081,6 +2411,8 @@ mod tests {
 
         #[test]
         fn wire_arena_recycles_per_turn() {
+            // Shares WIRE_OFF/TURN_DEPTH with every other rt-touching test.
+            let _guard = crate::wire_lock();
             let (lo, hi) = rt::wire_range();
 
             // Same turn: consecutive allocs bump upward, all inside the arena.
@@ -2170,6 +2502,65 @@ mod tests {
                     talc.dealloc(p, layout);
                 }
             }
+        }
+
+        // RETURN-PATH no-leak proof (the fix in `rt::resolve`). A host->guest
+        // return larger than the 64 KiB WIRE arena is written into a talc-fallback
+        // buffer by `rill_alloc`; before the fix that buffer had no matching
+        // dealloc, so every large binary RESPONSE leaked. This drives that exact
+        // path many times — allocate an oversized buffer (off-arena), hand it to
+        // `resolve` (which copies it out then frees the fallback), then drain the
+        // copy — and asserts the net live heap returns to baseline. Extends the
+        // plateau discipline of the churn test above: hundreds of MiB flow through
+        // the return path yet the heap stays bounded. Without the fix, live would
+        // grow by iterations*BIG (tens of MiB) and this assertion would fail.
+        //
+        // Uses the test-build counting global allocator (`test_alloc::LIVE`).
+        // Concurrent tests perturb the counter only by small allocations, far
+        // below the multi-MiB threshold, so the delta stays attributable here.
+        #[test]
+        fn return_path_frees_oversized_fallback_no_leak() {
+            use crate::{rt, test_alloc::LIVE};
+            use core::sync::atomic::Ordering;
+
+            // Serialize with every other rt-static-touching test (RESULTS/WIRE_OFF).
+            let _guard = crate::wire_lock();
+
+            // Comfortably larger than WIRE_SIZE so every request takes the
+            // off-arena talc fallback (the only path that could leak).
+            const BIG: usize = rt::WIRE_SIZE + 4096;
+            const ITERS: usize = 64; // 64 × ~68 KiB ≈ 4.3 MiB churned per pass
+            const CB: u32 = 0xB17E_5EED;
+
+            let baseline = LIVE.load(Ordering::Relaxed);
+            for _ in 0..ITERS {
+                let p = rt::alloc(BIG);
+                assert!(!p.is_null(), "fallback alloc must succeed");
+                // Precondition of the fix: the buffer is OUTSIDE the WIRE arena,
+                // so `resolve` is allowed to free it.
+                assert!(
+                    !rt::wire_contains(p),
+                    "an oversized alloc must fall back off-arena"
+                );
+                // The host wrote BIG bytes here (uninitialized-but-owned memory is
+                // fine to copy); `resolve` copies it out and frees the fallback.
+                unsafe { rt::resolve(CB, 1, p, BIG) };
+                // Drain the copy `resolve` stashed so RESULTS stays empty and the
+                // only thing that could grow the heap is a leaked SOURCE buffer.
+                let taken = rt::take_result(CB);
+                assert!(taken.is_some(), "the copied result must be retrievable");
+                drop(taken);
+            }
+            let after = LIVE.load(Ordering::Relaxed);
+
+            // With the fix, net growth is ~0 (bounded by concurrent-test noise);
+            // a leak would be ITERS*BIG ≈ 4.3 MiB. A 1 MiB threshold cleanly
+            // separates the two while tolerating other tests' small churn.
+            let grew = after.saturating_sub(baseline);
+            assert!(
+                grew < 1024 * 1024,
+                "return path leaked: net heap grew {grew} bytes over {ITERS} oversized returns"
+            );
         }
     }
 }

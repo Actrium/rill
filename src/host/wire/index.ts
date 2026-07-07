@@ -21,23 +21,43 @@
  * off, locked to the contracts + golden vectors under contracts/.
  */
 
-// --- op-batch wire (contracts/op-batch-wire.json) ---
-export {
-  decodeBatchStreaming,
-  WireDecodeError,
-  type WireBatchHeader,
-  type ApplyOp,
-} from './wire-decoder';
-
 // --- canvas wire (contracts/canvas-wire.json) ---
 export {
+  type CanvasBatchHeader,
+  CanvasDecodeError,
+  type CanvasDecodeReason,
+  type CanvasOp,
+  type CanvasWireInput,
   decodeCanvasBatch,
   decodeCanvasBatchStreaming,
   decodeCanvasFrame,
   peekCanvasHeader,
-  CanvasDecodeError,
-  type CanvasOp,
-  type CanvasBatchHeader,
-  type CanvasDecodeReason,
-  type CanvasWireInput,
 } from './canvas-wire-decoder';
+// --- store/net binary-value ENVELOPE (contracts/store-net-bytes.json) ---
+// The RBS1 two-plane frame (JSON control plane + length-prefixed binary data
+// plane). Unlike the two decoders above, this codec IS on a live receive path:
+// WasmGuestHost forks on the RBS1 magic to decode a byte-carrying request and
+// encodes a byte-carrying return. It is contract-agnostic (sentinel-driven).
+export {
+  type DecodedEnvelope,
+  decodeEnvelope,
+  decodeRequest as decodeRbs1Request,
+  encodeEnvelope,
+  encodeResult as encodeRbs1Result,
+  type Hoisted,
+  hoistSentinels,
+  isRbs1,
+  LIMITS as STORE_NET_LIMITS,
+  RBS1_MAGIC,
+  reviveSentinels,
+  SENTINEL_KEY,
+  StoreNetEnvelopeError,
+  type StoreNetReason,
+} from './store-net-envelope';
+// --- op-batch wire (contracts/op-batch-wire.json) ---
+export {
+  type ApplyOp,
+  decodeBatchStreaming,
+  type WireBatchHeader,
+  WireDecodeError,
+} from './wire-decoder';
