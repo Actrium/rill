@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <jsi/jsi.h>
 #include <memory>
 #include <mutex>
@@ -22,7 +23,12 @@ using namespace facebook;
  */
 class JSCSandboxContext : public jsi::HostObject {
 public:
-  JSCSandboxContext(jsi::Runtime &hostRuntime, double timeout);
+  // `timeoutMs` is a wall-clock budget per top-level entry into sandbox JS.
+  // It is only enforced when `enableExecutionTimeLimit` is true AND the
+  // private JSC time-limit API could be resolved via dlsym (see .mm);
+  // otherwise it is accepted but ignored.
+  JSCSandboxContext(jsi::Runtime &hostRuntime, double timeoutMs,
+                    bool enableExecutionTimeLimit);
   ~JSCSandboxContext() override;
 
   jsi::Value get(jsi::Runtime &rt, const jsi::PropNameID &name) override;
@@ -39,8 +45,49 @@ public:
   bool isDisposed() const { return disposed_; }
 
 private:
-  void *jsContext_; // JSContext* (opaque)
+  /**
+   * TimeLimitScope - RAII helper arming JSC's execution time limit for one
+   * top-level entry into sandbox JS execution (eval or a host->sandbox
+   * function call).
+   *
+   * - Only arms when the context resolved the private time-limit API
+   *   (timeLimitEnabled_) and timeoutMs_ is a positive finite value that is
+   *   safely representable; timeoutMs <= 0, NaN, Infinity or absurdly large
+   *   budgets mean "no limit".
+   * - Nested entries (host callback re-entering the sandbox during an eval)
+   *   keep the OUTERMOST deadline: only the depth-0 scope arms, so a tenant
+   *   cannot extend its budget by bouncing through host callbacks.
+   */
+  class TimeLimitScope {
+  public:
+    explicit TimeLimitScope(JSCSandboxContext &ctx);
+    ~TimeLimitScope();
+    TimeLimitScope(const TimeLimitScope &) = delete;
+    TimeLimitScope &operator=(const TimeLimitScope &) = delete;
+
+    // True if JSC aborted execution because THIS scope's deadline expired.
+    bool timedOut() const;
+
+  private:
+    JSCSandboxContext &ctx_;
+    bool armedHere_ = false;
+  };
+
+  void *jsContext_;    // JSContext* (opaque)
+  void *contextGroup_; // JSContextGroupRef (opaque), owned by jsContext_'s VM
   jsi::Runtime *hostRuntime_;
+  // Wall-clock execution budget per top-level entry; <= 0 means unlimited.
+  double timeoutMs_;
+  // True only when enableExecutionTimeLimit was requested AND the private
+  // JSC API was resolved via dlsym. When false, timeouts are NOT enforced.
+  bool timeLimitEnabled_;
+  // Re-entrancy depth so nested host<->sandbox bounces keep the outermost
+  // deadline (see TimeLimitScope).
+  int timeLimitDepth_;
+  // Set by the should-terminate callback when JSC aborted execution due to
+  // the armed deadline; used to translate the generic termination exception
+  // into a clear timeout error.
+  std::atomic<bool> timeLimitFired_;
   bool disposed_;
   std::recursive_mutex mutex_;
 
@@ -72,7 +119,8 @@ private:
  */
 class JSCSandboxRuntime : public jsi::HostObject {
 public:
-  JSCSandboxRuntime(jsi::Runtime &hostRuntime, double timeout);
+  JSCSandboxRuntime(jsi::Runtime &hostRuntime, double timeout,
+                    bool enableExecutionTimeLimit);
   ~JSCSandboxRuntime() override;
 
   jsi::Value get(jsi::Runtime &rt, const jsi::PropNameID &name) override;
@@ -86,6 +134,7 @@ public:
 private:
   jsi::Runtime *hostRuntime_;
   double timeout_;
+  bool enableExecutionTimeLimit_;
   bool disposed_;
   std::vector<std::shared_ptr<JSCSandboxContext>> contexts_;
   std::recursive_mutex mutex_;
@@ -95,7 +144,16 @@ private:
  * JSCSandboxModule - Top-level JSI module
  *
  * Installed as global.__JSCSandboxJSI with:
- * - createRuntime(options?: { timeout?: number }): Runtime
+ * - createRuntime(options?: { timeout?: number,
+ *                             enableExecutionTimeLimit?: boolean }): Runtime
+ *   timeout is a wall-clock budget in milliseconds applied to each top-level
+ *   eval (default 30000). By default (enableExecutionTimeLimit false/absent)
+ *   it is NOT enforced: JavaScriptCore's public API cannot interrupt running
+ *   JS. When enableExecutionTimeLimit is explicitly true, the limit is
+ *   enforced through the private JSContextGroupSetExecutionTimeLimit API
+ *   resolved at runtime via dlsym (App Store review caveat — see .mm); a
+ *   script exceeding it throws a timeout error and the context remains
+ *   usable. timeout <= 0 disables the limit.
  * - isAvailable(): boolean
  */
 class JSCSandboxModule : public jsi::HostObject {

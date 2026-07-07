@@ -439,6 +439,70 @@
   assert(ctx.eval('-0') === 0, 'Negative zero'); // Note: -0 === 0 in JS
   assert(ctx.eval("''") === '', 'Empty string literal');
 
+  // 30. Execution timeout (opt-in via enableExecutionTimeLimit)
+  // Enforcement uses JSC's private time-limit API resolved through dlsym;
+  // these cases require macOS/iOS JavaScriptCore and run via run-tests.sh
+  // on macOS only (this whole file is skipped elsewhere).
+  console.log('\n30. Execution Timeout (opt-in)');
+
+  // Default (flag off): timeout is accepted but NOT enforced. A busy loop
+  // longer than the configured timeout must complete normally. (A true
+  // infinite loop would hang the test binary here, by design.)
+  var offRt = sandbox.createRuntime({ timeout: 50 });
+  var offCtx = offRt.createContext();
+  var offResult = offCtx.eval("var t = Date.now(); while (Date.now() - t < 200) {} 'done'");
+  assert(offResult === 'done', 'Flag off: loop past the timeout is NOT interrupted');
+  offRt.dispose();
+
+  // Opt-in (flag on): infinite loop must be terminated with a clear error
+  // and the context must stay usable afterwards.
+  var onRt = sandbox.createRuntime({ timeout: 250, enableExecutionTimeLimit: true });
+  var onCtx = onRt.createContext();
+  var start = Date.now();
+  var threw = false;
+  var errMsg = '';
+  try {
+    onCtx.eval('while (true) {}');
+  } catch (e) {
+    threw = true;
+    errMsg = String(e?.message || e);
+  }
+  var elapsed = Date.now() - start;
+  assert(threw, 'Flag on: infinite loop eval throws instead of hanging');
+  assert(errMsg.indexOf('timed out') !== -1, 'Timeout error message is explicit', `got: ${errMsg}`);
+  assert(elapsed < 5000, 'Interrupt fires promptly after the deadline', `elapsed: ${elapsed}`);
+  assert(onCtx.eval('1 + 1') === 2, 'Context stays usable after a timeout');
+
+  // The tenant must not be able to swallow the termination with try/catch.
+  var swallowThrew = false;
+  try {
+    onCtx.eval('try { while (true) {} } catch (e) {} "survived"');
+  } catch (_e) {
+    swallowThrew = true;
+  }
+  assert(swallowThrew, 'Tenant try/catch cannot swallow the termination');
+  assert(onCtx.eval('6 * 7') === 42, 'Context usable after swallowed-catch attempt');
+  onRt.dispose();
+
+  // Flag on + timeout: 0 means unlimited — nothing is armed.
+  var unlimitedRt = sandbox.createRuntime({ timeout: 0, enableExecutionTimeLimit: true });
+  var unlimitedCtx = unlimitedRt.createContext();
+  assert(
+    unlimitedCtx.eval('var s = 0; for (var i = 0; i < 100000; i++) s += i; s') === 4999950000,
+    'Flag on + timeout 0: unlimited (long loop completes)'
+  );
+  unlimitedRt.dispose();
+
+  // Flag on + timeout: Infinity must mean "no limit", not a garbage value
+  // handed to the native API.
+  var infinityRt = sandbox.createRuntime({ timeout: Infinity, enableExecutionTimeLimit: true });
+  var infinityCtx = infinityRt.createContext();
+  assert(
+    infinityCtx.eval('var s = 0; for (var i = 0; i < 100000; i++) s += i; s') === 4999950000,
+    'Flag on + timeout Infinity: unlimited (long loop completes)'
+  );
+  infinityRt.dispose();
+
   // Summary
   console.log('\n=== Test Summary ===');
   console.log(`Total: ${testsRun}`);
