@@ -46,6 +46,7 @@ export interface WasmGuestEngine extends EngineViewEngine {
   /** Guest-declared ABI version; null when the guest predates the export. */
   readonly guestAbiVersion: number | null;
   /** Named host->guest event channel (rill_on_event). */
+  // Reason: an event payload is any JSON-serializable value, forwarded as-is.
   sendEvent(name: string, payload?: unknown): void;
   destroy(): void;
 }
