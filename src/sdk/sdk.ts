@@ -198,18 +198,33 @@ function readDimensions(dimension: 'window' | 'screen'): {
   };
 }
 
-/**
- * Throw for a capability no host has provided.
- *
- * Deliberately synchronous and loud — a silent no-op would let guest code
- * believe the action happened. Promise-returning APIs also throw synchronously
- * so the failure surfaces even when the caller forgets to await/catch.
- */
-function unavailable(api: string): never {
-  throw new Error(
+function unavailableError(api: string): Error {
+  return new Error(
     `[rill] ${api} is not available: the host has not provided this capability. ` +
       'Register it as a host:* module.'
   );
+}
+
+/**
+ * Throw for a synchronous capability no host has provided.
+ *
+ * Deliberately synchronous and loud — a silent no-op would let guest code
+ * believe the action happened.
+ */
+function unavailable(api: string): never {
+  throw unavailableError(api);
+}
+
+/**
+ * Reject for a Promise-returning capability no host has provided.
+ *
+ * Still fails loud (an unhandled rejection surfaces), but as a rejection rather
+ * than a synchronous throw — so idiomatic `.catch()` / `await` error handling
+ * actually catches it. A synchronous throw here would fire before the caller's
+ * `.catch()` is attached, defeating correct async handling.
+ */
+function unavailableAsync<T = never>(api: string): Promise<T> {
+  return Promise.reject(unavailableError(api));
 }
 
 /**
@@ -342,9 +357,9 @@ function getAPIs() {
       prompt: (): void => unavailable('Alert.prompt'),
     },
     Linking: {
-      openURL: (_url: string): Promise<void> => unavailable('Linking.openURL'),
-      canOpenURL: (_url: string): Promise<boolean> => unavailable('Linking.canOpenURL'),
-      getInitialURL: (): Promise<string | null> => unavailable('Linking.getInitialURL'),
+      openURL: (_url: string): Promise<void> => unavailableAsync('Linking.openURL'),
+      canOpenURL: (_url: string): Promise<boolean> => unavailableAsync('Linking.canOpenURL'),
+      getInitialURL: (): Promise<string | null> => unavailableAsync('Linking.getInitialURL'),
       addEventListener: (): { remove(): void } => unavailable('Linking.addEventListener'),
     },
     Share: {
@@ -352,7 +367,7 @@ function getAPIs() {
         message?: string;
         url?: string;
         title?: string;
-      }): Promise<{ action: string }> => unavailable('Share.share'),
+      }): Promise<{ action: string }> => unavailableAsync('Share.share'),
     },
     Vibration: {
       vibrate: (): void => unavailable('Vibration.vibrate'),

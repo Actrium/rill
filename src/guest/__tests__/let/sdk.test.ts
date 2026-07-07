@@ -739,19 +739,21 @@ describe('React Native APIs', () => {
   });
 
   describe('Linking', () => {
-    it('all methods should throw synchronously (capability not provided)', async () => {
+    it('promise methods reject; addEventListener throws (capability not provided)', async () => {
       const { Linking } = await sdkImport;
-      expect(() => Linking.openURL('https://example.com')).toThrow(/Linking\.openURL is not available/);
-      expect(() => Linking.canOpenURL('https://example.com')).toThrow(/not available/);
-      expect(() => Linking.getInitialURL()).toThrow(/not available/);
+      // Promise-returning APIs reject (catchable) rather than throw synchronously.
+      await expect(Linking.openURL('https://example.com')).rejects.toThrow(/Linking\.openURL is not available/);
+      await expect(Linking.canOpenURL('https://example.com')).rejects.toThrow(/not available/);
+      await expect(Linking.getInitialURL()).rejects.toThrow(/not available/);
+      // Synchronous API still throws synchronously.
       expect(() => Linking.addEventListener()).toThrow(/not available/);
     });
   });
 
   describe('Share', () => {
-    it('share should throw synchronously (capability not provided)', async () => {
+    it('share rejects (capability not provided)', async () => {
       const { Share } = await sdkImport;
-      expect(() => Share.share({ message: 'test' })).toThrow(/Share\.share is not available/);
+      await expect(Share.share({ message: 'test' })).rejects.toThrow(/Share\.share is not available/);
     });
   });
 
