@@ -14,6 +14,8 @@ Rill 是一个轻量级、无头的、沙箱化的动态 UI 渲染引擎,专为 
 
 5. **沙箱隔离** -- guest 代码在专用的 JavaScript 引擎实例中运行(JavaScriptCore、QuickJS、Hermes、WASM 或 Node `vm`)。host 注入一组精心控制的全局变量;除非明确 polyfill,否则不提供环境 API(网络、文件系统、计时器)。
 
+6. **每环境一个引擎** -- 每个宿主 JavaScript 环境里,一个 rill 引擎驱动一个 guest。组合*多个*应用靠隔离,而非共享环境:web 上每个应用跑在各自的 iframe(独立源、存储、CSP),原生侧每个租户跑在各自的 `TenantThread` 与独立 JS 运行时上。rill **不**追求多个独立应用引擎共存于同一个共享 JS 上下文,因此环境作用域内的模块级单例(如安装在 `globalThis` 上的 guest 回调注册表)是合理的,而非局限。在单个应用*内部*开多个 `<Canvas>` 画布是另一回事,完全支持。
+
 ## 四层架构
 
 ```

@@ -7,7 +7,7 @@ Rill is a lightweight, headless, sandboxed dynamic UI rendering engine for React
 | Section | Contents |
 |---------|----------|
 | [Getting Started](./getting-started/) | [Quick Start](./getting-started/) / [Host Integration](./getting-started/host-integration.md) / [Guest Development](./getting-started/guest-development.md) |
-| [Guides](./guides/) | [CLI](./guides/cli.md) / [Sandbox Providers](./guides/sandbox-providers.md) / [Native Integration](./guides/native-integration.md) / [Multi-Tenant](./guides/multi-tenant.md) / [Production](./guides/production.md) |
+| [Guides](./guides/) | [CLI](./guides/cli.md) / [Sandbox Providers](./guides/sandbox-providers.md) / [Native Integration](./guides/native-integration.md) / [Multi-Tenant](./guides/multi-tenant.md) / [Production](./guides/production.md) / [Host Module Types](./guides/host-module-types.md) |
 | [API](./api/) | [API Overview](./api/) / [Host API](./api/host.md) / [Guest SDK](./api/sdk.md) / [TenantManager API](./api/tenant-manager.md) |
 | [Architecture](./architecture/) | [Overview](./architecture/) / [Guest-Host Interaction](./architecture/guest-host-interaction.md) / [Guest Runtime](./architecture/guest-runtime.md) / [Bridge Serialization](./architecture/bridge-serialization.md) / [Native TenantManager](./architecture/native-tenant-manager.md) / [Binary Protocol](./architecture/binary-protocol.md) / [Security](./architecture/security.md) / [Event Bus](./architecture/event-bus.md) / [CDP Debugging](./architecture/cdp-debugging.md) |
 | [Reference](./reference/) | [Sandbox Comparison](./reference/sandbox-comparison.md) |
