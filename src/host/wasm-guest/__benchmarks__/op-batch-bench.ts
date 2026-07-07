@@ -288,6 +288,7 @@ function bench(
   };
 }
 
+// Reason: a benchmark sink for an arbitrary decoded value; prevents dead-code elimination.
 function consume(v: unknown): number {
   if (typeof v === 'number') return v & 1;
   if (Array.isArray(v)) return v.length & 1;

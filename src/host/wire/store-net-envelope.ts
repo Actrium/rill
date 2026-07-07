@@ -219,6 +219,7 @@ export function decodeEnvelope(buf: Uint8Array): DecodedEnvelope {
 
 /** The result of hoisting: a JSON-serializable control value + its segments. */
 export interface Hoisted {
+  // Reason: the control plane is arbitrary JSON-serializable data, walked structurally.
   control: unknown;
   segments: Uint8Array[];
 }
@@ -229,6 +230,7 @@ export interface Hoisted {
  * JSON-serializable control value. Non-`Uint8Array` data passes through
  * structurally unchanged. Byte-stream caps are enforced here (fail-closed).
  */
+// Reason: walks arbitrary caller data; Uint8Array leaves hoist to segments, other values pass through.
 export function hoistSentinels(value: unknown): Hoisted {
   const segments: Uint8Array[] = [];
   const walk = (v: unknown): unknown => {
@@ -266,6 +268,7 @@ export function hoistSentinels(value: unknown): Hoisted {
  * `segments[N]` (a `Uint8Array` view). Fail-closed on a malformed sentinel shape
  * (`bad-sentinel`) or an out-of-range index (`bad-segment-ref`).
  */
+// Reason: revives a parsed control value; {"$b":N} sentinels become Uint8Array segment views.
 export function reviveSentinels(value: unknown, segments: Uint8Array[]): unknown {
   const walk = (v: unknown): unknown => {
     if (Array.isArray(v)) {
@@ -306,6 +309,7 @@ export function reviveSentinels(value: unknown, segments: Uint8Array[]): unknown
  * `StoreNetEnvelopeError` (fail-closed) on any malformed frame — the caller turns
  * that into an `ok=0` result. Only call this once `isRbs1(raw)` matched.
  */
+// Reason: returns contract-agnostic args parsed from the RBS1 control-plane JSON.
 export function decodeRequest(raw: Uint8Array): unknown {
   const { json, segments } = decodeEnvelope(raw);
   let parsed: unknown;
@@ -324,6 +328,7 @@ export function decodeRequest(raw: Uint8Array): unknown {
  * behaviour change for a non-binary result). Throws `StoreNetEnvelopeError`
  * (fail-closed) if a binary result breaches a cap.
  */
+// Reason: hoists any Uint8Array in an arbitrary host result into an RBS1 frame.
 export function encodeResult(result: unknown): Uint8Array | null {
   const { control, segments } = hoistSentinels(result);
   if (segments.length === 0) {

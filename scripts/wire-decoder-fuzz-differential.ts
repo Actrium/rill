@@ -95,24 +95,24 @@ function cvValue(v: SerializedValue): string {
   if (typeof v === 'boolean') return v ? 'b1' : 'b0';
   // All JS numbers are IEEE doubles; canonicalise by bits (INT32 and integral
   // FLOAT64 collapse to the same value on the JS host — that is not a drift).
-  if (typeof v === 'number') return '#' + bitsHexOfDouble(v);
-  if (typeof v === 'string') return 's' + hexOfString(v);
+  if (typeof v === 'number') return `#${bitsHexOfDouble(v)}`;
+  if (typeof v === 'string') return `s${hexOfString(v)}`;
   if (Array.isArray(v)) {
-    return 'a[' + v.map((x) => cvValue(x as SerializedValue)).join(',') + ']';
+    return `a[${v.map((x) => cvValue(x as SerializedValue)).join(',')}]`;
   }
   if (typeof v === 'object') {
     if (isTagged(v)) {
       const t = (v as { __type: string }).__type;
       switch (t) {
         case 'function':
-          return 'fn' + hexOfString((v as { __fnId: string }).__fnId);
+          return `fn${hexOfString((v as { __fnId: string }).__fnId)}`;
         case 'promise':
-          return 'pr' + hexOfString((v as { __promiseId: string }).__promiseId);
+          return `pr${hexOfString((v as { __promiseId: string }).__promiseId)}`;
         case 'date': {
           // Match C++: TimeClipped integral ms. Date.parse of the ISO string the
           // decoder produced returns exactly that integer.
           const ms = Date.parse((v as { __value: string }).__value);
-          return 'd' + Math.trunc(ms).toString();
+          return `d${Math.trunc(ms).toString()}`;
         }
         case 'error': {
           const e = v as { __name: string; __message: string; __stack?: string };
@@ -124,18 +124,18 @@ function cvValue(v: SerializedValue): string {
         }
         case 'map': {
           const m = v as { __entries: [SerializedValue, SerializedValue][] };
-          return 'm[' + m.__entries.map(([k, val]) => `(${cvValue(k)}~${cvValue(val)})`).join(',') + ']';
+          return `m[${m.__entries.map(([k, val]) => `(${cvValue(k)}~${cvValue(val)})`).join(',')}]`;
         }
         case 'set': {
           const s = v as { __values: SerializedValue[] };
-          return 'S[' + s.__values.map((x) => cvValue(x)).join(',') + ']';
+          return `S[${s.__values.map((x) => cvValue(x)).join(',')}]`;
         }
         default:
           // Unknown tagged shape: fall through to plain-object handling.
           break;
       }
     }
-    return 'o{' + keyedInner(v as Record<string, SerializedValue>) + '}';
+    return `o{${keyedInner(v as Record<string, SerializedValue>)}}`;
   }
   return '?';
 }
@@ -217,7 +217,9 @@ function decodeTs(input: Uint8Array): TsResult {
 
 // ---- C++ results reader ----
 
-function readCppResults(path: string): Array<{ accept: boolean; canonical?: string; reason?: string }> {
+function readCppResults(
+  path: string
+): Array<{ accept: boolean; canonical?: string; reason?: string }> {
   const text = readFileSync(path, 'latin1'); // bytes 1:1 (canonical is ASCII hex-safe)
   const out: Array<{ accept: boolean; canonical?: string; reason?: string }> = [];
   let i = 0;
@@ -230,7 +232,8 @@ function readCppResults(path: string): Array<{ accept: boolean; canonical?: stri
     if (line.length === 0) continue;
     const tab = line.indexOf('\t');
     if (line[0] === 'R') out.push({ accept: false, reason: tab >= 0 ? line.slice(tab + 1) : '' });
-    else if (line[0] === 'A') out.push({ accept: true, canonical: tab >= 0 ? line.slice(tab + 1) : '' });
+    else if (line[0] === 'A')
+      out.push({ accept: true, canonical: tab >= 0 ? line.slice(tab + 1) : '' });
   }
   return out;
 }
@@ -317,12 +320,7 @@ function main(): void {
     if (ts.accept && c.accept) {
       bothAccept++;
       if (ts.canonical !== c.canonical) {
-        pushBug(
-          'divergence-value-mismatch',
-          i,
-          input,
-          `ts=<${ts.canonical}> cpp=<${c.canonical}>`
-        );
+        pushBug('divergence-value-mismatch', i, input, `ts=<${ts.canonical}> cpp=<${c.canonical}>`);
       }
     }
   }

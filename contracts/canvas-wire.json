@@ -75,21 +75,43 @@
   "canvasId": {
     "$comment": "The target <Canvas> identifier for this whole frame, written IMMEDIATELY AFTER the 16-byte header and BEFORE the intern table. It is INLINE (u16 byte length + UTF-8), NOT interned: exactly one canvasId occurs per frame, so interning would only waste a table slot and a u16 ref. Placing it before the intern table lets the host resolve/short-circuit an unknown-canvas frame early. A frame targets exactly ONE canvas (a guest with multiple <Canvas> surfaces sends one frame per canvas).",
     "layout": [
-      { "name": "byteLen", "type": "u16", "note": "UTF-8 byte length of the canvasId; bounded by limits.maxStringBytes (a length that would not fit u16 MUST be rejected, never wrapped)." },
-      { "name": "bytes", "type": "utf8", "length": "byteLen", "note": "raw UTF-8 canvasId, no terminator." }
+      {
+        "name": "byteLen",
+        "type": "u16",
+        "note": "UTF-8 byte length of the canvasId; bounded by limits.maxStringBytes (a length that would not fit u16 MUST be rejected, never wrapped)."
+      },
+      {
+        "name": "bytes",
+        "type": "utf8",
+        "length": "byteLen",
+        "note": "raw UTF-8 canvasId, no terminator."
+      }
     ]
   },
 
   "intern": {
     "$comment": "The per-frame color-string dedup table, written immediately after the canvasId and BEFORE the ops. ONLY setFillStyle/setStrokeStyle COLOR strings are interned here (they repeat heavily within a frame — a chart re-uses '#fff'/'red'/'rgba(0,0,0,.5)' across dozens of ops). fillText TEXT is deliberately NOT interned (high cardinality; inline instead — see ops.fillText). Indices are 0-based and assigned in FIRST-APPEARANCE order during a pre-pass that walks the ops in array order (each setFillStyle/setStrokeStyle contributes its color). PER-FRAME SEMANTICS: unlike op-batch's cross-batch persistent table, a canvas frame is fully self-contained — the table starts empty every frame and every internRef resolves within the same frame (frames are independent; no cross-frame index stability is promised or needed).",
     "layout": [
-      { "name": "count", "type": "u16", "note": "number of interned color strings; also the exclusive upper bound for every internRef in this frame. See limits.maxInternStrings." },
+      {
+        "name": "count",
+        "type": "u16",
+        "note": "number of interned color strings; also the exclusive upper bound for every internRef in this frame. See limits.maxInternStrings."
+      },
       {
         "name": "entries",
         "repeat": "count",
         "record": [
-          { "name": "byteLen", "type": "u16", "note": "UTF-8 byte length of this color string; see limits.maxStringBytes (a length that would not fit u16, or would exceed the cap, MUST be rejected — never wrapped)." },
-          { "name": "bytes", "type": "utf8", "length": "byteLen", "note": "raw UTF-8 color bytes, no terminator." }
+          {
+            "name": "byteLen",
+            "type": "u16",
+            "note": "UTF-8 byte length of this color string; see limits.maxStringBytes (a length that would not fit u16, or would exceed the cap, MUST be rejected — never wrapped)."
+          },
+          {
+            "name": "bytes",
+            "type": "utf8",
+            "length": "byteLen",
+            "note": "raw UTF-8 color bytes, no terminator."
+          }
         ]
       }
     ]
@@ -171,7 +193,11 @@
         { "name": "r", "type": "f64" },
         { "name": "start", "type": "f64" },
         { "name": "end", "type": "f64" },
-        { "name": "ccw", "type": "u8", "note": "boolean: 0 = clockwise (false), 1 = counter-clockwise (true). Any other byte is a malformed record and a fail-closed whole-frame reject." }
+        {
+          "name": "ccw",
+          "type": "u8",
+          "note": "boolean: 0 = clockwise (false), 1 = counter-clockwise (true). Any other byte is a malformed record and a fail-closed whole-frame reject."
+        }
       ]
     },
     "fill": {
@@ -222,7 +248,11 @@
       "description": "ctx.fillStyle = color (CSS color STRING only — never a gradient/pattern). Color is INTERNED.",
       "layout": [
         { "name": "opcode", "type": "u8", "value": 12 },
-        { "name": "color", "type": "internRef", "note": "index into the intern table; the CSS color string." }
+        {
+          "name": "color",
+          "type": "internRef",
+          "note": "index into the intern table; the CSS color string."
+        }
       ]
     },
     "setStrokeStyle": {
@@ -230,16 +260,17 @@
       "description": "ctx.strokeStyle = color (CSS color STRING only). Color is INTERNED.",
       "layout": [
         { "name": "opcode", "type": "u8", "value": 13 },
-        { "name": "color", "type": "internRef", "note": "index into the intern table; the CSS color string." }
+        {
+          "name": "color",
+          "type": "internRef",
+          "note": "index into the intern table; the CSS color string."
+        }
       ]
     },
     "setLineWidth": {
       "opcode": 14,
       "description": "ctx.lineWidth = w.",
-      "layout": [
-        { "name": "opcode", "type": "u8", "value": 14 },
-        { "name": "w", "type": "f64" }
-      ]
+      "layout": [{ "name": "opcode", "type": "u8", "value": 14 }, { "name": "w", "type": "f64" }]
     },
     "fillText": {
       "opcode": 15,
@@ -248,8 +279,17 @@
         { "name": "opcode", "type": "u8", "value": 15 },
         { "name": "x", "type": "f64" },
         { "name": "y", "type": "f64" },
-        { "name": "textLen", "type": "u32", "note": "UTF-8 byte length of the text; bounded by limits.maxTextBytes (a length exceeding the cap is a fail-closed 'text-too-big' reject — never wrapped/truncated)." },
-        { "name": "text", "type": "utf8", "length": "textLen", "note": "raw UTF-8 text bytes, no terminator; inline, not interned." }
+        {
+          "name": "textLen",
+          "type": "u32",
+          "note": "UTF-8 byte length of the text; bounded by limits.maxTextBytes (a length exceeding the cap is a fail-closed 'text-too-big' reject — never wrapped/truncated)."
+        },
+        {
+          "name": "text",
+          "type": "utf8",
+          "length": "textLen",
+          "note": "raw UTF-8 text bytes, no terminator; inline, not interned."
+        }
       ]
     },
     "save": {

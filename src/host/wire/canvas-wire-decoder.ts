@@ -121,7 +121,9 @@ export class CanvasDecodeError extends Error {
   readonly offset?: number;
 
   constructor(reason: CanvasDecodeReason, message: string, offset?: number) {
-    super(offset === undefined ? `${reason}: ${message}` : `${reason}: ${message} (at byte ${offset})`);
+    super(
+      offset === undefined ? `${reason}: ${message}` : `${reason}: ${message} (at byte ${offset})`
+    );
     this.name = 'CanvasDecodeError';
     this.reason = reason;
     this.offset = offset;
@@ -343,7 +345,11 @@ class CanvasDecoder {
   private readCanvasId(header: CanvasBatchHeader): void {
     const byteLen = this.readU16();
     if (byteLen > MAX_STRING_BYTES) {
-      throw new CanvasDecodeError('string-too-big', `canvasId ${byteLen} > ${MAX_STRING_BYTES}`, this.pos - 2);
+      throw new CanvasDecodeError(
+        'string-too-big',
+        `canvasId ${byteLen} > ${MAX_STRING_BYTES}`,
+        this.pos - 2
+      );
     }
     header.canvasId = this.readUtf8(byteLen, 'canvasId');
   }
@@ -352,7 +358,11 @@ class CanvasDecoder {
     const count = this.readU16();
     // intern-overflow: table count must not exceed maxInternStrings.
     if (count > MAX_INTERN_STRINGS) {
-      throw new CanvasDecodeError('intern-overflow', `${count} > ${MAX_INTERN_STRINGS}`, this.pos - 2);
+      throw new CanvasDecodeError(
+        'intern-overflow',
+        `${count} > ${MAX_INTERN_STRINGS}`,
+        this.pos - 2
+      );
     }
     // Grow lazily (push), never `new Array(count)`: each entry costs >=2 wire
     // bytes so the allocation is bounded by bytes actually consumed.
@@ -360,7 +370,11 @@ class CanvasDecoder {
     for (let i = 0; i < count; i++) {
       const byteLen = this.readU16();
       if (byteLen > MAX_STRING_BYTES) {
-        throw new CanvasDecodeError('string-too-big', `color ${byteLen} > ${MAX_STRING_BYTES}`, this.pos - 2);
+        throw new CanvasDecodeError(
+          'string-too-big',
+          `color ${byteLen} > ${MAX_STRING_BYTES}`,
+          this.pos - 2
+        );
       }
       table.push(this.readUtf8(byteLen, 'intern color'));
     }
@@ -382,7 +396,11 @@ class CanvasDecoder {
    */
   finish(): void {
     if (this.pos !== this.len) {
-      throw new CanvasDecodeError('truncated', `trailing bytes after ${this.header.opCount} ops`, this.pos);
+      throw new CanvasDecodeError(
+        'truncated',
+        `trailing bytes after ${this.header.opCount} ops`,
+        this.pos
+      );
     }
   }
 
@@ -399,7 +417,13 @@ class CanvasDecoder {
       case Op.lineTo:
         return { op: 'lineTo', x: this.readF64(), y: this.readF64() };
       case Op.rect:
-        return { op: 'rect', x: this.readF64(), y: this.readF64(), w: this.readF64(), h: this.readF64() };
+        return {
+          op: 'rect',
+          x: this.readF64(),
+          y: this.readF64(),
+          w: this.readF64(),
+          h: this.readF64(),
+        };
       case Op.arc: {
         const x = this.readF64();
         const y = this.readF64();
@@ -414,11 +438,29 @@ class CanvasDecoder {
       case Op.stroke:
         return { op: 'stroke' };
       case Op.fillRect:
-        return { op: 'fillRect', x: this.readF64(), y: this.readF64(), w: this.readF64(), h: this.readF64() };
+        return {
+          op: 'fillRect',
+          x: this.readF64(),
+          y: this.readF64(),
+          w: this.readF64(),
+          h: this.readF64(),
+        };
       case Op.strokeRect:
-        return { op: 'strokeRect', x: this.readF64(), y: this.readF64(), w: this.readF64(), h: this.readF64() };
+        return {
+          op: 'strokeRect',
+          x: this.readF64(),
+          y: this.readF64(),
+          w: this.readF64(),
+          h: this.readF64(),
+        };
       case Op.clearRect:
-        return { op: 'clearRect', x: this.readF64(), y: this.readF64(), w: this.readF64(), h: this.readF64() };
+        return {
+          op: 'clearRect',
+          x: this.readF64(),
+          y: this.readF64(),
+          w: this.readF64(),
+          h: this.readF64(),
+        };
       case Op.setFillStyle:
         return { op: 'setFillStyle', color: this.internRef() };
       case Op.setStrokeStyle:
@@ -430,7 +472,11 @@ class CanvasDecoder {
         const y = this.readF64();
         const textLen = this.readU32();
         if (textLen > MAX_TEXT_BYTES) {
-          throw new CanvasDecodeError('text-too-big', `${textLen} > ${MAX_TEXT_BYTES}`, this.pos - 4);
+          throw new CanvasDecodeError(
+            'text-too-big',
+            `${textLen} > ${MAX_TEXT_BYTES}`,
+            this.pos - 4
+          );
         }
         const text = this.readUtf8(textLen, 'fillText text');
         return { op: 'fillText', x, y, text };
@@ -465,7 +511,11 @@ class CanvasDecoder {
   private internRef(): string {
     const idx = this.readU16();
     if (idx >= this.intern.length) {
-      throw new CanvasDecodeError('bad-intern-ref', `${idx} >= ${this.intern.length}`, this.pos - 2);
+      throw new CanvasDecodeError(
+        'bad-intern-ref',
+        `${idx} >= ${this.intern.length}`,
+        this.pos - 2
+      );
     }
     return this.intern[idx]!;
   }
@@ -475,7 +525,11 @@ class CanvasDecoder {
   /** Throw unless `n` more bytes are available from the current position. */
   private require(n: number, what: string): void {
     if (this.pos + n > this.len) {
-      throw new CanvasDecodeError('truncated', `${what}: need ${n}, ${this.len - this.pos} remaining`, this.pos);
+      throw new CanvasDecodeError(
+        'truncated',
+        `${what}: need ${n}, ${this.len - this.pos} remaining`,
+        this.pos
+      );
     }
   }
 

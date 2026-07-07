@@ -487,6 +487,7 @@ function validateDescriptor(
  * object whose `input`/`output` (each optional) are arrays of non-empty
  * field-name strings. Purely additive — an absent `binary` is always valid.
  */
+// Reason: validates a descriptor's optional `binary` field, whose shape is unverified until checked here.
 function validateBinaryFields(value: unknown, label: string): void {
   if (value === undefined) {
     return;
@@ -496,6 +497,7 @@ function validateBinaryFields(value: unknown, label: string): void {
     throw new Error(`[rill/contract] Descriptor "${label}" binary must be an object.`);
   }
 
+  // Reason: narrowing the validated object; input/output are re-checked per direction below.
   const binary = value as { input?: unknown; output?: unknown };
 
   for (const direction of ['input', 'output'] as const) {
@@ -579,6 +581,7 @@ function wrapRpcDispatch(
 
     // Boundary: parse (and/or binary-check) the host impl's output before it crosses
     // back to the Guest. parseOutput narrows first, then the binary backstop runs.
+    // Reason: the host impl's output crosses the boundary untyped until parseOutput/binary checks run.
     const finalize = (value: unknown): unknown => {
       const parsed = parseOutput
         ? runBoundary(parseOutput, value, moduleId, exportName, 'output', options)
@@ -610,10 +613,12 @@ function wrapRpcDispatch(
  * can be run through {@link runBoundary}. Throws a short message the boundary
  * wrapper decorates with the capability + phase context.
  */
+// Reason: a fail-closed backstop over an untyped boundary value; returns it unchanged for runBoundary.
 function assertBinaryFields(
   value: unknown,
   fields: readonly string[],
   phase: HostModuleBoundaryPhase
+  // Reason: returns the value unchanged so runBoundary can thread it through the boundary.
 ): unknown {
   for (const field of fields) {
     const fieldValue = (value as Record<string, unknown> | null | undefined)?.[field];

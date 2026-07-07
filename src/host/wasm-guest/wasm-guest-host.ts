@@ -270,6 +270,7 @@ export class WasmGuestHost {
         //   - anything else -> the legacy JSON.parse path, byte-for-byte
         //     unchanged (a JSON body '{…}'/'[…]' matches no magic). Genuinely
         //     malformed input still throws here and fails closed (ok=0).
+        // Reason: the guest-supplied call input is untrusted bytes until a magic fork decodes it.
         let input: unknown;
         if (il > 0) {
           const raw = this.readBytes(ip, il);
