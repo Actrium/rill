@@ -22,6 +22,7 @@ export type {
   LayoutEvent,
   ReactNode,
   RillErrorBoundaryProps,
+  RillPlatformInfo,
   ScrollEvent,
   ScrollViewProps,
   StyleObject,
@@ -43,14 +44,12 @@ export type {
 // APIs - Platform Info
 // APIs - Event Subscription
 // APIs - Host Capability
-// APIs - Animation
 // Hooks - React Native
 // Hooks - Rill
 // Error Boundary
 export {
   ActivityIndicator,
   Alert,
-  Animated,
   Appearance,
   AppState,
   Button,
