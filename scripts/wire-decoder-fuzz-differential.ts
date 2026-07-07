@@ -26,7 +26,7 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { decodeBatchStreaming, WireDecodeError } from '../src/host/wasm-guest/wire-decoder';
+import { decodeBatchStreaming, WireDecodeError } from '../src/host/wire/wire-decoder';
 import type { SerializedOperation, SerializedValue } from '../src/shared/types';
 
 // ---- corpus.bin reader ("RFZC" magic + u32 count + [u32 len, bytes]...) ----

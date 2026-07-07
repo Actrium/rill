@@ -21,6 +21,13 @@ export CARGO_TARGET_DIR=target/fixtures
 
 RUSTFLAGS="--remap-path-prefix=$(pwd)=." cargo build -p kv-guest -p ui-guest -p seq-guest -p event-guest -p heap-churn-guest -p canvas-guest -p canvas-present-guest -p canvas-gpu-guest -p canvas-escape-guest -p asset-guest --target "$TARGET" --release
 
+# canvas-binary-guest is built in a SEPARATE cargo invocation on purpose: it
+# turns ON rill-guest's `wip-binary-protocol` feature, and cargo unifies features
+# across all packages in a single build. Building it apart keeps the WIP feature
+# out of the default JSON fixtures above (their rill-guest stays feature-clean),
+# so the DEFAULT shipped guests provably still emit JSON.
+RUSTFLAGS="--remap-path-prefix=$(pwd)=." cargo build -p canvas-binary-guest --target "$TARGET" --release
+
 stage() { # <crate-lib-name> <fixture-name>
   cp "$CARGO_TARGET_DIR/$TARGET/release/$1.wasm" "$FIXTURES/$2"
   echo "staged: $FIXTURES/$2 ($(wc -c < "$FIXTURES/$2") bytes)"
@@ -31,6 +38,7 @@ stage ui_guest ui-guest.wasm
 stage event_guest event-guest.wasm
 stage heap_churn_guest heap-churn-guest.wasm
 stage canvas_guest canvas-guest.wasm
+stage canvas_binary_guest canvas-binary-guest.wasm
 stage canvas_present_guest canvas-present-guest.wasm
 stage canvas_gpu_guest canvas-gpu-guest.wasm
 stage canvas_escape_guest canvas-escape-guest.wasm

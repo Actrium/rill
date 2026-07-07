@@ -44,7 +44,7 @@ import type {
 } from '../../../shared/types';
 import { ComponentRegistry, type ComponentType } from '../../registry';
 import { Receiver } from '../../receiver';
-import { decodeBatchStreaming } from '../wire-decoder';
+import { decodeBatchStreaming } from '../../wire/wire-decoder';
 
 // ============================================================
 // Representative batch construction

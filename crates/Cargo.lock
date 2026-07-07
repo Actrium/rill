@@ -16,6 +16,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "canvas-binary-guest"
+version = "0.0.0"
+dependencies = [
+ "rill-guest",
+]
+
+[[package]]
 name = "canvas-escape-guest"
 version = "0.0.0"
 dependencies = [

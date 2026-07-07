@@ -253,7 +253,27 @@ export class WasmGuestHost {
         await Promise.resolve();
         const moduleId = this.readString(mp, ml);
         const method = this.readString(xp, xl);
-        const input = il > 0 ? JSON.parse(this.readString(ip, il)) : undefined;
+        // Payload framing fork (canvas-wire.DESIGN.md §1.4). A binary canvas wire
+        // frame begins with the 4-byte 'RCNV' magic (52 43 4E 56); such a payload
+        // is handed to the handler as RAW BYTES for a binary-aware capability
+        // (host:canvas.draw) to decode. EVERYTHING else keeps the legacy
+        // JSON.parse path — a JSON body ('{…}') parses as before, and genuinely
+        // malformed input still throws here and fails closed (ok=0) rather than
+        // reaching a handler. The carve-out is exact to the magic, so no existing
+        // caller's boundary is weakened. The decoder re-checks the full u32 magic.
+        let input: unknown;
+        if (il > 0) {
+          const raw = this.readBytes(ip, il);
+          const isCanvasBinary =
+            raw.length >= 4 &&
+            raw[0] === 0x52 &&
+            raw[1] === 0x43 &&
+            raw[2] === 0x4e &&
+            raw[3] === 0x56;
+          input = isCanvasBinary ? raw : JSON.parse(new TextDecoder().decode(raw));
+        } else {
+          input = undefined;
+        }
         const handler = this.dispatch[moduleId]?.[method];
         if (typeof handler !== 'function') {
           throw new Error(`host module not registered: ${moduleId}.${method}`);

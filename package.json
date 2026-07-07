@@ -38,7 +38,8 @@
     "./host/web": "./src/host/web/index.ts",
     "./devtools": "./src/devtools/index.ts",
     "./contract": "./src/contract/index.ts",
-    "./cli": "./src/cli/index.ts"
+    "./cli": "./src/cli/index.ts",
+    "./wire": "./src/host/wire/index.ts"
   },
   "bin": {
     "rill": "./src/cli/bin.ts"

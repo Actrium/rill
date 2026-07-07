@@ -415,6 +415,13 @@ pub mod canvas {
         // batch unparseable host-side and the entire frame would be dropped
         // with no reason. Instead: skip the op, latch, and fail loud in draw().
         non_finite: bool,
+        // Parallel typed op log for the WORK-IN-PROGRESS binary canvas wire
+        // (`canvas_encode`). Recorded only for ops that actually pass the
+        // `finite` guard and are pushed to `ops`, so the binary and JSON emit
+        // paths carry the IDENTICAL op sequence. Gated OFF by default: the live
+        // `draw` path never touches it and the shipped guest never builds it.
+        #[cfg(feature = "wip-binary-protocol")]
+        bin_ops: alloc::vec::Vec<crate::canvas_encode::CanvasOp>,
     }
 
     impl DrawList {
@@ -429,6 +436,15 @@ pub mod canvas {
             }
             self.ops.push_str(&op);
             self.count += 1;
+        }
+
+        /// Record the typed op for the WIP binary wire (no-op when the feature
+        /// is off). Called right after `push`, so it mirrors the JSON path's op
+        /// sequence exactly (only finite, actually-emitted ops are recorded).
+        #[cfg(feature = "wip-binary-protocol")]
+        #[inline]
+        fn rec(&mut self, op: crate::canvas_encode::CanvasOp) {
+            self.bin_ops.push(op);
         }
 
         // Guard for every float-taking op: non-finite input skips the op and
@@ -461,11 +477,15 @@ pub mod canvas {
         /// `beginPath()`.
         pub fn begin_path(&mut self) -> &mut Self {
             self.push(String::from("{\"op\":\"beginPath\"}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::BeginPath);
             self
         }
         /// `closePath()`.
         pub fn close_path(&mut self) -> &mut Self {
             self.push(String::from("{\"op\":\"closePath\"}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::ClosePath);
             self
         }
         /// `moveTo(x, y)`.
@@ -474,6 +494,8 @@ pub mod canvas {
                 return self;
             }
             self.push(format!("{{\"op\":\"moveTo\",\"x\":{x},\"y\":{y}}}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::MoveTo { x, y });
             self
         }
         /// `lineTo(x, y)`.
@@ -482,6 +504,8 @@ pub mod canvas {
                 return self;
             }
             self.push(format!("{{\"op\":\"lineTo\",\"x\":{x},\"y\":{y}}}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::LineTo { x, y });
             self
         }
         /// `rect(x, y, w, h)` (adds a rectangle sub-path).
@@ -492,6 +516,8 @@ pub mod canvas {
             self.push(format!(
                 "{{\"op\":\"rect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}}}"
             ));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::Rect { x, y, w, h });
             self
         }
         /// `arc(x, y, r, start, end)` counter-clockwise=false.
@@ -502,16 +528,29 @@ pub mod canvas {
             self.push(format!(
                 "{{\"op\":\"arc\",\"x\":{x},\"y\":{y},\"r\":{r},\"start\":{start},\"end\":{end},\"ccw\":false}}"
             ));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::Arc {
+                x,
+                y,
+                r,
+                start,
+                end,
+                ccw: false,
+            });
             self
         }
         /// `fill()` the current path.
         pub fn fill(&mut self) -> &mut Self {
             self.push(String::from("{\"op\":\"fill\"}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::Fill);
             self
         }
         /// `stroke()` the current path.
         pub fn stroke(&mut self) -> &mut Self {
             self.push(String::from("{\"op\":\"stroke\"}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::Stroke);
             self
         }
 
@@ -524,6 +563,8 @@ pub mod canvas {
             self.push(format!(
                 "{{\"op\":\"fillRect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}}}"
             ));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::FillRect { x, y, w, h });
             self
         }
         /// `strokeRect(x, y, w, h)`.
@@ -534,6 +575,8 @@ pub mod canvas {
             self.push(format!(
                 "{{\"op\":\"strokeRect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}}}"
             ));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::StrokeRect { x, y, w, h });
             self
         }
         /// `clearRect(x, y, w, h)`.
@@ -544,6 +587,8 @@ pub mod canvas {
             self.push(format!(
                 "{{\"op\":\"clearRect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}}}"
             ));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::ClearRect { x, y, w, h });
             self
         }
 
@@ -554,6 +599,10 @@ pub mod canvas {
             json_escape(&mut s, color);
             s.push('}');
             self.push(s);
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::SetFillStyle {
+                color: alloc::string::String::from(color),
+            });
             self
         }
         /// `strokeStyle = color` (CSS color string).
@@ -562,6 +611,10 @@ pub mod canvas {
             json_escape(&mut s, color);
             s.push('}');
             self.push(s);
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::SetStrokeStyle {
+                color: alloc::string::String::from(color),
+            });
             self
         }
         /// `lineWidth = w`.
@@ -570,6 +623,8 @@ pub mod canvas {
                 return self;
             }
             self.push(format!("{{\"op\":\"setLineWidth\",\"w\":{w}}}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::SetLineWidth { w });
             self
         }
 
@@ -583,6 +638,12 @@ pub mod canvas {
             json_escape(&mut s, text);
             s.push('}');
             self.push(s);
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::FillText {
+                x,
+                y,
+                text: alloc::string::String::from(text),
+            });
             self
         }
 
@@ -590,11 +651,15 @@ pub mod canvas {
         /// `save()` the drawing state.
         pub fn save(&mut self) -> &mut Self {
             self.push(String::from("{\"op\":\"save\"}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::Save);
             self
         }
         /// `restore()` the drawing state.
         pub fn restore(&mut self) -> &mut Self {
             self.push(String::from("{\"op\":\"restore\"}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::Restore);
             self
         }
         /// `translate(x, y)`.
@@ -603,6 +668,8 @@ pub mod canvas {
                 return self;
             }
             self.push(format!("{{\"op\":\"translate\",\"x\":{x},\"y\":{y}}}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::Translate { x, y });
             self
         }
         /// `scale(x, y)`.
@@ -611,6 +678,8 @@ pub mod canvas {
                 return self;
             }
             self.push(format!("{{\"op\":\"scale\",\"x\":{x},\"y\":{y}}}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::Scale { x, y });
             self
         }
         /// `rotate(angle)` (radians).
@@ -619,6 +688,8 @@ pub mod canvas {
                 return self;
             }
             self.push(format!("{{\"op\":\"rotate\",\"angle\":{angle}}}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::Rotate { angle });
             self
         }
         /// `setTransform(a, b, c, d, e, f)`.
@@ -637,13 +708,100 @@ pub mod canvas {
             self.push(format!(
                 "{{\"op\":\"setTransform\",\"a\":{a},\"b\":{b},\"c\":{c},\"d\":{d},\"e\":{e},\"f\":{f}}}"
             ));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::SetTransform { a, b, c, d, e, f });
             self
         }
+
+        /// Encode this frame's ops to the binary CANVAS wire
+        /// (`contracts/canvas-wire.json`) targeting `<Canvas>` `canvas_id` with
+        /// diagnostic `frame_id`. WORK IN PROGRESS: the encoded bytes are an
+        /// alternative to the JSON `draw` payload, but the live `draw` path does
+        /// NOT use them yet — the capability-driven binary-vs-JSON selection is a
+        /// later phase. Fails closed on the same caps the encoder enforces.
+        #[cfg(feature = "wip-binary-protocol")]
+        pub fn encode_binary(
+            &self,
+            canvas_id: &str,
+            frame_id: u32,
+        ) -> Result<Vec<u8>, crate::canvas_encode::EncodeError> {
+            crate::canvas_encode::Encoder::new().encode_frame(canvas_id, frame_id, &self.bin_ops)
+        }
+    }
+
+    // ---- capability handshake (WIP binary canvas wire) ----
+    //
+    // Cache for the one-shot `host:canvas.getInfo` probe (see
+    // `host_supports_binary`). `None` = not probed yet; `Some(b)` = the host's
+    // answer, fixed for the guest's lifetime (a host's capability set is fixed
+    // per load, so the probe never repeats). Single-task guest, no threads.
+    #[cfg(feature = "wip-binary-protocol")]
+    static mut BINARY_SUPPORTED: Option<bool> = None;
+    // Monotonic diagnostic frame counter stamped into each binary frame header.
+    // Only the frame BYTES carry it; the replayed op array does not, so it never
+    // affects rendering — it is purely for host-side tracing.
+    #[cfg(feature = "wip-binary-protocol")]
+    static mut FRAME_ID: u32 = 0;
+
+    #[cfg(feature = "wip-binary-protocol")]
+    fn next_frame_id() -> u32 {
+        unsafe {
+            let f = FRAME_ID;
+            FRAME_ID = FRAME_ID.wrapping_add(1);
+            f
+        }
+    }
+
+    /// Naive substring search (`no_std`, no regex/JSON parser available). The
+    /// host's `getInfo` response is compact machine JSON (`JSON.stringify`, no
+    /// insignificant whitespace), so an exact-substring probe is deterministic.
+    #[cfg(feature = "wip-binary-protocol")]
+    fn contains(hay: &[u8], needle: &[u8]) -> bool {
+        if needle.is_empty() {
+            return true;
+        }
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// Capability handshake (`canvas-wire.DESIGN.md` §1.3): probe
+    /// `host:canvas.getInfo` EXACTLY ONCE and cache the answer. The host is
+    /// binary-capable only if it (a) resolves `ok=1` — an old host that never
+    /// registered `getInfo` fails closed with `ok=0` — and advertises both
+    /// (b) `binaryDraw:true` and (c) a `wireVersion` this encoder can produce.
+    /// Any non-affirmative answer ⇒ JSON, so a new guest degrades gracefully on
+    /// an old host with zero old-host code (no flag-day).
+    #[cfg(feature = "wip-binary-protocol")]
+    async fn host_supports_binary() -> bool {
+        unsafe {
+            if let Some(v) = BINARY_SUPPORTED {
+                return v;
+            }
+        }
+        let (ok, resp) = crate::host_call("host:canvas", "getInfo", Vec::from(&b"{}"[..])).await;
+        let mut supported = false;
+        if ok == 1 {
+            let has_flag = contains(&resp, b"\"binaryDraw\":true");
+            let ver_needle = format!("\"wireVersion\":{}", crate::canvas_encode::WIRE_VERSION);
+            let has_version = contains(&resp, ver_needle.as_bytes());
+            supported = has_flag && has_version;
+        }
+        unsafe {
+            BINARY_SUPPORTED = Some(supported);
+        }
+        supported
     }
 
     /// `host:canvas.draw` — replay `list` onto the `<Canvas>` named `canvas_id`.
     /// Returns `Ok(response)` (`{"ok":true,"dropped":n}`) or `Err(response)` if
     /// the host fails closed (e.g. unknown/unmounted canvas id).
+    ///
+    /// Encoding selection (`canvas-wire.DESIGN.md` §1): when the crate is built
+    /// with `wip-binary-protocol` AND the host advertised `binaryDraw` for a
+    /// `wireVersion` this encoder produces, the frame goes out as the binary
+    /// `RCNV` wire; otherwise (default shipped guest, old host, over-cap frame)
+    /// it goes out as the legacy JSON op-list. Both paths hit the SAME `draw`
+    /// method and render the identical picture — the host forks on the payload's
+    /// first byte (`R` binary vs `{` JSON).
     pub async fn draw(canvas_id: &str, list: &DrawList) -> Result<Vec<u8>, Vec<u8>> {
         if !list.is_valid() {
             // Fail loud guest-side: a non-finite op would have produced invalid
@@ -652,6 +810,22 @@ pub mod canvas {
                 &b"{\"error\":\"non-finite number in draw list\"}"[..],
             ));
         }
+
+        // WIP binary path: only taken when the feature is compiled in AND the
+        // host advertised support. A failed encode (over-cap frame) falls
+        // through to JSON so the guest never drops a frame just because binary
+        // could not represent it.
+        #[cfg(feature = "wip-binary-protocol")]
+        {
+            if host_supports_binary().await {
+                if let Ok(frame) = list.encode_binary(canvas_id, next_frame_id()) {
+                    let (ok, bytes) = crate::host_call("host:canvas", "draw", frame).await;
+                    return if ok == 1 { Ok(bytes) } else { Err(bytes) };
+                }
+            }
+        }
+
+        // Default / fallback: the legacy JSON op-list (unchanged).
         let mut body = String::from("{\"canvasId\":");
         json_escape(&mut body, canvas_id);
         body.push_str(",\"ops\":[");
@@ -1661,6 +1835,15 @@ extern crate std;
 /// op-batch emit path — new code only, so the shipped guest is unchanged.
 #[cfg(feature = "wip-binary-protocol")]
 pub mod wire_encode;
+
+/// Guest-side encoder for the binary CANVAS wire protocol
+/// (`contracts/canvas-wire.json`) — a per-frame flat 2D display list, sister to
+/// `wire_encode` (distinct magic `RCNV`). WORK IN PROGRESS, gated behind the
+/// `wip-binary-protocol` feature (default OFF) and NOT wired into the live
+/// `canvas::draw` emit path (which still ships JSON) — new code only, so the
+/// shipped guest is unchanged.
+#[cfg(feature = "wip-binary-protocol")]
+pub mod canvas_encode;
 
 /// Shared minimal JSON parser (also `include!`d by build.rs) — test-only here,
 /// for reading the contract back in `conformance`.

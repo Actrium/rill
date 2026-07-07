@@ -314,6 +314,14 @@ fn canvas_draw_wire_matches_contract() {
         .set_transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0);
     assert!(list.is_valid());
 
+    // Under the WIP binary feature, `canvas::draw` first probes
+    // `host:canvas.getInfo` (the capability handshake). Answer "binary
+    // unsupported" so the guest falls back to the JSON op-list THIS test
+    // validates against the contract; without the feature the JSON call is the
+    // first and only one.
+    #[cfg(feature = "wip-binary-protocol")]
+    let issued = draw_after_handshake(canvas::draw("scene", &list));
+    #[cfg(not(feature = "wip-binary-protocol"))]
     let issued = issue(canvas::draw("scene", &list));
     assert_eq!(issued.method, "draw");
     check_method(&root, "host:canvas", &issued);
@@ -324,6 +332,50 @@ fn canvas_draw_wire_matches_contract() {
     );
     let out = issued.resolve(1, r#"{"ok":true,"dropped":0}"#);
     assert!(out.is_ok(), "draw must surface the host's ok response");
+}
+
+/// Under the WIP binary feature, `canvas::draw` probes `host:canvas.getInfo`
+/// before it emits. Drive that probe, answer "binary unsupported" (so the guest
+/// falls back to the JSON op-list), and return the `Issued` positioned at the
+/// follow-up JSON `draw` call so the existing contract checks apply unchanged.
+#[cfg(feature = "wip-binary-protocol")]
+fn draw_after_handshake<F: Future>(f: F) -> Issued<F> {
+    CALLS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    let mut fut = Box::pin(f);
+    assert!(
+        poll_once(fut.as_mut()).is_pending(),
+        "getInfo probe must park on first poll"
+    );
+    let (module, method, _in, cb) = {
+        let mut calls = CALLS.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(calls.len(), 1, "expected exactly the getInfo probe");
+        calls.pop().expect("len checked")
+    };
+    assert_eq!(module, "host:canvas", "handshake module");
+    assert_eq!(method, "getInfo", "draw must probe getInfo first under wip");
+    // Answer the probe as unsupported -> the guest emits the JSON op-list.
+    CALLS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    let resp = r#"{"binaryDraw":false,"wireVersion":1}"#;
+    unsafe { crate::rt::resolve(cb, 1, resp.as_ptr(), resp.len()) };
+    assert!(
+        poll_once(fut.as_mut()).is_pending(),
+        "the JSON draw call must park after the handshake"
+    );
+    let (module2, method2, input2, cb2) = {
+        let mut calls = CALLS.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(calls.len(), 1, "expected exactly the JSON draw call");
+        calls.pop().expect("len checked")
+    };
+    let text = core::str::from_utf8(&input2).expect("request body must be UTF-8");
+    let body = Json::parse(text)
+        .unwrap_or_else(|e| panic!("{module2}.{method2}: body not JSON ({e}): {text}"));
+    Issued {
+        fut,
+        module: module2,
+        method: method2,
+        body,
+        cb: cb2,
+    }
 }
 
 #[test]
