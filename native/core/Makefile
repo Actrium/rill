@@ -13,10 +13,7 @@ SRC_FLAT = \
 	$(SRC_DIR)/ThreadPool.cpp \
 	$(SRC_DIR)/TenantContext.cpp \
 	$(SRC_DIR)/TenantRegistry.cpp \
-	$(SRC_DIR)/EventBus.cpp \
-	$(SRC_DIR)/InstructionDecoder.cpp \
-	$(SRC_DIR)/InstructionEncoder.cpp \
-	$(SRC_DIR)/InstructionCodec.cpp
+	$(SRC_DIR)/EventBus.cpp
 
 # Source files under test (security subdirectory)
 SRC_SECURITY = \
@@ -45,7 +42,6 @@ TEST_SOURCES = \
 	$(TEST_DIR)/test_network_sandbox.cpp \
 	$(TEST_DIR)/test_file_sandbox.cpp \
 	$(TEST_DIR)/test_event_bus.cpp \
-	$(TEST_DIR)/test_instruction_codec.cpp \
 	$(TEST_DIR)/test_cdp_server.cpp \
 	$(TEST_DIR)/test_cdp_adapters.cpp
 

@@ -59,9 +59,19 @@ Pod::Spec.new do |s|
       "native/quickjs/src/*.{h,cpp}",
       "native/quickjs/vendor/*.{h,c}"
     ]
+    # Full jsi::Runtime hosts kept only as the test host for native sandbox unit/
+    # leak tests (native/{quickjs,jsc}/Makefile); excluded from the shipped pod -
+    # production installs the *SandboxJSI HostObject into the app's own runtime and
+    # never links these. See each file's header for details.
     s.exclude_files = [
-      "native/quickjs/src/EmscriptenBindings.cpp",
-      "native/quickjs/src/wasm_bindings.c"
+      "native/quickjs/src/wasm_bindings.c",
+      "native/quickjs/src/QuickJSRuntime.{h,cpp}",
+      "native/quickjs/src/QuickJSRuntimeFactory.{h,cpp}",
+      "native/quickjs/src/HostProxy.{h,cpp}",
+      "native/quickjs/src/JSIValueConverter.{h,cpp}",
+      "native/quickjs/src/QuickJSPointerValue.{h,cpp}",
+      "native/quickjs/src/ScopedJSValue.h",
+      "native/quickjs/src/QuickJSInstrumentation.{h,cpp}"
     ]
     s.public_header_files = [
       "native/core/src/SandboxEngineConfig.h",
@@ -88,6 +98,13 @@ Pod::Spec.new do |s|
     # Default: JSC sandbox
     s.source_files = common_sources + [
       "native/jsc/src/**/*.{h,mm}"
+    ]
+    # Full jsi::Runtime hosts kept only as the test host for native sandbox unit/
+    # leak tests (native/{quickjs,jsc}/Makefile); excluded from the shipped pod -
+    # production installs the *SandboxJSI HostObject into the app's own runtime and
+    # never links these. See each file's header for details.
+    s.exclude_files = [
+      "native/jsc/src/JSCRuntime.{h,mm}"
     ]
     s.public_header_files = [
       "native/core/src/SandboxEngineConfig.h",
