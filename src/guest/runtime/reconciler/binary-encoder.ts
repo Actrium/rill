@@ -1,6 +1,20 @@
 /**
  * binary-encoder.ts
  *
+ * LEGACY / DORMANT op-batch codec (encoder half; decoder is
+ * src/shared/bridge/binary-protocol.ts). This is the SAME guest→host op-batch
+ * BINARY wire format described by contracts/op-batch-wire.json, but it is NOT on
+ * the live path — JSON is the real transport (see BinaryProtocolConfig, default
+ * 'json'); this pair exists only for tests/benchmarks. It is kept BYTE-ALIGNED
+ * with contracts/op-batch-wire.json and is superseded by the authoritative
+ * implementations locked to that schema: the Rust encoder
+ * (crates/rill-guest/src/wire_encode.rs, the byte oracle) plus the streaming
+ * decoders (src/host/wire/wire-decoder.ts, native WireDecoder.cpp), all
+ * conformance-tested against the golden/matrix vectors. Per the maturity
+ * roadmap this pair is to be REPLACED by a wire_encode.rs port when the web
+ * op-batch route is promoted — do not extend it with new features; only keep it
+ * from drifting off the schema.
+ *
  * P3-X.3: Guest-side Binary Instruction Encoder
  *
  * Encodes SerializedOperationBatch into compact binary format
@@ -559,10 +573,29 @@ export class BinaryEncoder {
 
   private writeSpecialValue(value: { __type: string; [key: string]: ReviewedUnknown }): void {
     switch (value.__type) {
-      case 'function':
+      case 'function': {
+        // Byte layout locked to contracts/op-batch-wire.json values.FUNCTION:
+        // fnId (internRef u16), then a u8 flags byte, then ONLY the present
+        // optional fields IN ORDER — name (internRef u16, bit0), sourceFile
+        // (internRef u16, bit1), sourceLine (u32 inline, NOT interned, bit2).
+        // flags=0 => no metadata, one extra byte over a bare fnId. name/
+        // sourceFile were interned in the collect pre-pass; here they are
+        // REFERENCED via the flags (no longer orphan-interned).
         this.writeU8(ValueType.FUNCTION);
         this.writeU16(this.getInternIndex(value.__fnId as string));
+        const fnName = value.__name as string | undefined;
+        const fnSourceFile = value.__sourceFile as string | undefined;
+        const fnSourceLine = value.__sourceLine as number | undefined;
+        let fnFlags = 0x00;
+        if (fnName) fnFlags |= 0x01;
+        if (fnSourceFile) fnFlags |= 0x02;
+        if (typeof fnSourceLine === 'number') fnFlags |= 0x04;
+        this.writeU8(fnFlags);
+        if (fnName) this.writeU16(this.getInternIndex(fnName));
+        if (fnSourceFile) this.writeU16(this.getInternIndex(fnSourceFile));
+        if (typeof fnSourceLine === 'number') this.writeU32(fnSourceLine);
         break;
+      }
 
       case 'date': {
         this.writeU8(ValueType.DATE);
