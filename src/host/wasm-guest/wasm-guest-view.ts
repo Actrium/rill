@@ -16,6 +16,7 @@ import { createHostModuleDispatch } from '../../contract';
 import { Receiver } from '../receiver';
 import type { ComponentType } from '../registry';
 import { ComponentRegistry } from '../registry';
+import type { EngineViewEngine } from '../use-engine-view';
 import { WasmGuestHost } from './wasm-guest-host';
 
 export interface WasmGuestViewOptions {
@@ -31,10 +32,28 @@ export interface WasmGuestViewOptions {
   onLog?: (message: string) => void;
 }
 
+/**
+ * The complete surface the platform mounts a native guest against: the shared
+ * {@link EngineViewEngine} (so `useEngineView` drives it exactly like the JS
+ * `Engine`) PLUS the wasm-specific members a native guest exposes. This was
+ * previously only an implicit duck type; making it explicit ends the guessing.
+ */
+export interface WasmGuestEngine extends EngineViewEngine {
+  /** Bounds-checked slice-copy reader over the guest's linear memory (host:canvas.present late-binding). */
+  readonly readGuestMemory: (ptr: number, len: number) => Uint8Array;
+  /** Bounds-checked writer into the guest's linear memory (host:asset.blit late-binding). */
+  readonly writeGuestMemory: (ptr: number, bytes: Uint8Array) => void;
+  /** Guest-declared ABI version; null when the guest predates the export. */
+  readonly guestAbiVersion: number | null;
+  /** Named host->guest event channel (rill_on_event). */
+  sendEvent(name: string, payload?: unknown): void;
+  destroy(): void;
+}
+
 type Listener = () => void;
 type ErrorListener = (error: Error) => void;
 
-export class WasmGuestView {
+export class WasmGuestView implements WasmGuestEngine {
   private readonly host: WasmGuestHost;
   private readonly wasmBytes: BufferSource;
   private readonly registry: ComponentRegistry;
@@ -76,6 +95,11 @@ export class WasmGuestView {
   readonly writeGuestMemory = (ptr: number, bytes: Uint8Array): void =>
     this.host.writeBytes(ptr, bytes);
 
+  /** Guest-declared ABI version; null before `loadBundle` or when the guest predates the export. */
+  get guestAbiVersion(): number | null {
+    return this.host.guestAbiVersion;
+  }
+
   constructor(options: WasmGuestViewOptions) {
     this.wasmBytes = options.wasmBytes;
     this.registry = new ComponentRegistry();
@@ -115,15 +139,24 @@ export class WasmGuestView {
     return this.receiver;
   }
 
-  // Signature matches EngineViewEngine.loadBundle; the wasm bytes are provided at
-  // construction, so the JS-guest `source`/props/options are not used here.
+  // Signature matches EngineViewEngine.loadBundle. The wasm bytes are provided at
+  // construction, so `_source` (the JS-guest bundle URL/code) and `_options` (JS
+  // bytecode asset path) are deliberately unused — a native guest's bytes are
+  // already fixed. `initialProps` IS used: it reaches the guest over the named
+  // event channel (see below), matching the JS Engine's props delivery.
   async loadBundle(
     _source?: string,
-    _initialProps?: Record<string, unknown>,
+    initialProps?: Record<string, unknown>,
     _options?: { bytecodeAssetPath?: string }
   ): Promise<void> {
     try {
-      await this.host.load(this.wasmBytes); // rill_init -> render batch -> receiver
+      await this.host.load(this.wasmBytes); // rill_init registers event handlers
+      if (initialProps !== undefined) {
+        // JS-parity: a native guest takes initial props over the NAMED event
+        // channel (events::on('props')). Delivered before drain so a guest that
+        // renders from props sees them in its first settled state.
+        this.host.emitEvent('props', initialProps);
+      }
       await this.host.drain();
       this.loaded = true;
     } catch (error) {
@@ -160,7 +193,10 @@ export class WasmGuestView {
   }
 }
 
-/** Construct a native WASM guest as an `EngineViewEngine` (+ `sendEvent` / `destroy`). */
+/**
+ * Construct a native WASM guest engine (a `WasmGuestEngine`, i.e.
+ * EngineViewEngine + the wasm-specific surface).
+ */
 export function createWasmGuestEngine(options: WasmGuestViewOptions): WasmGuestView {
   return new WasmGuestView(options);
 }

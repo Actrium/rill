@@ -22,11 +22,21 @@
  *   host  -> guest imports:  env.rill_host_call(mod_ptr,mod_len, method_ptr,method_len, in_ptr,in_len, cb_id)
  *                            env.rill_log(ptr,len)
  *   guest -> host  exports:  memory, rill_alloc(size)->ptr, rill_resolve(cb,ok,ptr,len), rill_init()
+ *   guest -> host  exports (optional): rill_abi_version() -> u32
  *   wire: request/response bytes are UTF-8 JSON in the guest's linear memory,
- *         addressed by (ptr,len); the host reads guest memory zero-copy.
+ *         addressed by (ptr,len); the host reads guest memory bounds-checked
+ *         (results are copied out).
  */
 import type { HostModuleDispatchTable } from '../../contract';
 import type { OperationBatch } from '../../shared/types';
+
+/**
+ * Guest ABI versions this host understands. A guest may declare its version via
+ * the optional `rill_abi_version()` export; the host rejects any version outside
+ * this set at load (fail-closed) and tolerates a guest that omits the export
+ * (pre-versioning — the ABI v0/v1 wire is identical).
+ */
+export const SUPPORTED_GUEST_ABI_VERSIONS: ReadonlySet<number> = new Set([1]);
 
 export interface WasmGuestHostOptions {
   /** Capability dispatch table from `createHostModuleDispatch(contract, impl)`. */
@@ -49,11 +59,21 @@ export class WasmGuestHost {
   private readonly onLog?: (message: string) => void;
   private readonly onRenderBatch?: (batch: OperationBatch) => void;
   private readonly inflight = new Set<Promise<void>>();
+  private abiVersion: number | null = null;
 
   constructor(options: WasmGuestHostOptions) {
     this.dispatch = options.dispatch;
     this.onLog = options.onLog;
     this.onRenderBatch = options.onRenderBatch;
+  }
+
+  /**
+   * The ABI version the loaded guest declared via `rill_abi_version()`, or
+   * `null` when the guest predates the export (tolerated). Undefined until
+   * `load()` runs.
+   */
+  get guestAbiVersion(): number | null {
+    return this.abiVersion;
   }
 
   /** Instantiate the guest `.wasm`, wire host imports, and run its entry. */
@@ -76,6 +96,25 @@ export class WasmGuestHost {
     const { instance } = await WebAssembly.instantiate(wasmBytes, importObject);
     this.instance = instance;
     this.memory = instance.exports.memory as WebAssembly.Memory;
+
+    // ABI version gate BEFORE rill_init: a guest that declares an unsupported
+    // version must not run its entry (fail-closed). A guest that omits the
+    // export is a pre-versioning guest and is tolerated.
+    const versionExport = instance.exports.rill_abi_version;
+    if (typeof versionExport === 'function') {
+      // May trap (guest code): let it propagate — a guest whose version probe
+      // traps must not run (same fail-closed posture as a failed instantiate).
+      const version = (versionExport as () => number)() >>> 0;
+      if (!SUPPORTED_GUEST_ABI_VERSIONS.has(version)) {
+        throw new Error(
+          `unsupported guest ABI version: ${version} (host supports: ${[...SUPPORTED_GUEST_ABI_VERSIONS].join(', ')})`
+        );
+      }
+      this.abiVersion = version;
+    } else {
+      this.abiVersion = null; // pre-versioning guest (ABI v0/v1 wire is identical): tolerated
+    }
+
     (instance.exports.rill_init as (() => void) | undefined)?.();
   }
 

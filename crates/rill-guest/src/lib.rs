@@ -47,6 +47,12 @@ extern "C" {
     fn rill_log(msg_ptr: *const u8, msg_len: usize);
 }
 
+/// ABI version this SDK speaks. The generated `rill_abi_version` export hands
+/// it to the host, which rejects versions it does not support (fail-closed)
+/// and tolerates guests that predate the export. Bump ONLY on a breaking
+/// wire/export change; additive changes keep the number.
+pub const RILL_ABI_VERSION: u32 = 1;
+
 /// Send a UTF-8 diagnostic message to the host (`env.rill_log` → the host's
 /// `onLog` sink). Fire-and-forget: the host may drop or ignore it, so use it
 /// for observability, never as a data channel. This is a native guest's ONLY
@@ -111,7 +117,18 @@ unsafe impl GlobalAlloc for BumpAlloc {
         *off = end;
         aligned_addr as *mut u8
     }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // LIFO rollback: reclaim iff this block is the TOP of the bump heap.
+        // Promptly-dropped allocations (the SDK's own per-turn copies) are
+        // recycled; interleaved lifetimes still leak, as before. Never frees
+        // anything that is not provably the top block (conservative, safe).
+        let off = &mut *self.offset.get();
+        let base = addr_of_mut!(HEAP) as usize;
+        let p = ptr as usize;
+        if p >= base && p.wrapping_add(layout.size()) == base + *off {
+            *off = p - base;
+        }
+    }
 }
 
 /// Runtime the generated ABI exports call into. Not part of the public API.
@@ -127,17 +144,73 @@ pub mod rt {
     // that leak is bounded rather than unbounded.
     const MAX_ORPHAN_RESULTS: usize = 64;
 
+    // ---- wire arena: buffers the HOST writes via rill_alloc ----
+    // Invariant (load-bearing): a host-written wire buffer is fully consumed
+    // before the host->guest entry that delivers it returns (resolve copies at
+    // entry via to_vec; dispatch hands handlers a &[u8] that must not escape the
+    // call). So the arena is recycled when the outermost turn closes. Previously
+    // these came from the global bump heap and leaked permanently — structural
+    // heap exhaustion for long-lived guests. Oversized requests fall back to the
+    // global bump heap (leaks, as before; rare).
+    pub(crate) const WIRE_SIZE: usize = 64 * 1024;
+    #[repr(C, align(16))]
+    struct WireArena([u8; WIRE_SIZE]);
+    static mut WIRE: WireArena = WireArena([0; WIRE_SIZE]);
+    static mut WIRE_OFF: usize = 0;
+    // Depth of nested host->guest entries. A nested entry (e.g. the host's onLog
+    // callback synchronously emitting an event mid-dispatch) must NOT recycle the
+    // arena while an outer turn may still be reading its payload.
+    static mut TURN_DEPTH: u32 = 0;
+
+    pub(crate) fn begin_wire_turn() {
+        unsafe { TURN_DEPTH += 1 };
+    }
+    pub(crate) fn end_wire_turn() {
+        unsafe {
+            TURN_DEPTH = TURN_DEPTH.saturating_sub(1);
+            if TURN_DEPTH == 0 {
+                WIRE_OFF = 0;
+            }
+        }
+    }
+
+    /// Test-only accessor for the wire arena's address range, so unit tests can
+    /// assert whether a returned pointer landed inside the arena or fell back to
+    /// the global bump heap.
+    #[cfg(test)]
+    pub(crate) fn wire_range() -> (usize, usize) {
+        let base = addr_of_mut!(WIRE) as usize;
+        (base, base + WIRE_SIZE)
+    }
+
     /// `rill_init` body: box the guest's async entry and drive it once.
     pub fn init(future: impl Future<Output = ()> + 'static) {
+        begin_wire_turn();
         unsafe {
             TASK = Some(alloc::boxed::Box::pin(future));
             poll();
         }
+        end_wire_turn();
     }
 
     /// `rill_alloc` body: hand the host a buffer from the guest heap.
+    ///
+    /// Host-written wire buffers come from the per-turn WIRE arena (recycled at
+    /// each outermost turn boundary); an oversized request falls back to the
+    /// global bump heap (leaks, as before; rare).
     pub fn alloc(size: usize) -> *mut u8 {
-        unsafe { alloc::alloc::alloc(Layout::from_size_align_unchecked(size.max(1), 1)) }
+        unsafe {
+            let need = size.max(1);
+            if let Some(end) = WIRE_OFF.checked_add(need) {
+                if end <= WIRE_SIZE {
+                    let p = (addr_of_mut!(WIRE) as *mut u8).add(WIRE_OFF);
+                    WIRE_OFF = end;
+                    return p;
+                }
+            }
+            // Oversized wire payload: global bump heap (leaks, as before).
+            alloc::alloc::alloc(Layout::from_size_align_unchecked(need, 1))
+        }
     }
 
     /// `rill_resolve` body: stash the result for `cb` and re-drive the task.
@@ -146,6 +219,7 @@ pub mod rt {
     /// `ptr`/`len` must describe a valid buffer in guest memory — upheld by the
     /// host, which wrote the result there via `rill_alloc` before calling.
     pub unsafe fn resolve(cb: u32, ok: u32, ptr: *const u8, len: usize) {
+        begin_wire_turn();
         let bytes = if !ptr.is_null() && len > 0 {
             core::slice::from_raw_parts(ptr, len).to_vec()
         } else {
@@ -158,6 +232,7 @@ pub mod rt {
         while RESULTS.len() > MAX_ORPHAN_RESULTS {
             RESULTS.remove(0);
         }
+        end_wire_turn();
     }
 
     /// Re-drive the guest task from OUTSIDE a host-call resolution.
@@ -1554,6 +1629,7 @@ pub mod events {
         payload_ptr: *const u8,
         payload_len: usize,
     ) {
+        crate::rt::begin_wire_turn();
         let name =
             core::str::from_utf8(core::slice::from_raw_parts(name_ptr, name_len)).unwrap_or("");
         let payload = core::slice::from_raw_parts(payload_ptr, payload_len);
@@ -1567,6 +1643,7 @@ pub mod events {
         for handler in &matched {
             handler(payload);
         }
+        crate::rt::end_wire_turn();
     }
 }
 
@@ -1597,6 +1674,11 @@ macro_rules! rill_guest_main {
         #[no_mangle]
         pub extern "C" fn rill_init() {
             $crate::rt::init($main());
+        }
+
+        #[no_mangle]
+        pub extern "C" fn rill_abi_version() -> u32 {
+            $crate::RILL_ABI_VERSION
         }
 
         #[no_mangle]
@@ -1818,6 +1900,75 @@ mod tests {
             cb.set_viewport(0.0, 0.0, 100.0, 100.0);
             cb.draw_instanced(6, 2); // 2 tris x 2 instances = 4 primitives
             assert_eq!(cb.cost().pixels, 100 * 100 * 4);
+        }
+    }
+
+    // These tests read/write SHARED statics (WIRE / WIRE_OFF / TURN_DEPTH via
+    // rt::*, and the global HEAP via BumpAlloc). cargo test runs #[test]s on
+    // separate threads, so every assertion for one static group is kept inside a
+    // SINGLE #[test] function — splitting them would race. The two functions
+    // below touch disjoint statics (WIRE vs HEAP), so they don't race each other,
+    // and no other test touches either.
+    mod leak_mitigation {
+        use crate::rt;
+
+        #[test]
+        fn wire_arena_recycles_per_turn() {
+            let (lo, hi) = rt::wire_range();
+
+            // Same turn: consecutive allocs bump upward, all inside the arena.
+            let a = rt::alloc(16) as usize;
+            let b = rt::alloc(16) as usize;
+            assert!(b > a, "consecutive wire allocs must increase");
+            assert!(a >= lo && b < hi, "wire allocs must land in the arena");
+
+            // A closed turn (depth 1 -> 0) recycles the arena to its start.
+            rt::begin_wire_turn();
+            rt::end_wire_turn();
+            let c = rt::alloc(16) as usize;
+            assert_eq!(c, lo, "a closed turn must recycle the arena to its start");
+
+            // Nested turns: the INNER end must NOT recycle (an outer turn may
+            // still be reading its payload); only the OUTERMOST end recycles.
+            rt::begin_wire_turn(); // depth 1
+            let d = rt::alloc(16) as usize;
+            rt::begin_wire_turn(); // depth 2
+            rt::end_wire_turn(); // depth 1 — no recycle
+            let e = rt::alloc(16) as usize;
+            assert!(e > d, "inner turn end must not rewind the arena");
+            rt::end_wire_turn(); // depth 0 — recycle
+            let f = rt::alloc(16) as usize;
+            assert_eq!(f, lo, "outermost turn end must recycle the arena");
+
+            // An oversized request falls back to the global bump heap, OUTSIDE
+            // the arena range.
+            let big = rt::alloc(rt::WIRE_SIZE + 1) as usize;
+            assert!(big < lo || big >= hi, "oversized alloc must fall back off-arena");
+        }
+
+        #[test]
+        fn bump_dealloc_rolls_back_lifo_top() {
+            use core::alloc::{GlobalAlloc, Layout};
+            let bump = crate::BumpAlloc::new();
+            let layout = Layout::from_size_align(32, 1).unwrap();
+            unsafe {
+                let a = bump.alloc(layout) as usize;
+                let b = bump.alloc(layout) as usize;
+                assert!(a != 0 && b != 0);
+                assert!(b > a, "consecutive bump allocs must increase");
+
+                // Free the TOP block (b) then re-alloc: the slot is reused.
+                bump.dealloc(b as *mut u8, layout);
+                let c = bump.alloc(layout) as usize;
+                assert_eq!(c, b, "freeing the top block must roll back the offset");
+
+                // Free a NON-top block (a): the offset is unchanged, so the next
+                // alloc does not reuse a's slot (interleaved lifetimes leak).
+                bump.dealloc(a as *mut u8, layout);
+                let d = bump.alloc(layout) as usize;
+                assert_ne!(d, a, "freeing a non-top block must not roll back");
+                assert!(d > c, "non-top dealloc must leave the offset intact");
+            }
         }
     }
 }
