@@ -16,7 +16,7 @@
       "direction": "both",
       "kind": "envelope",
       "controlPlane": "{\"key\":\"k\",\"value\":{\"$b\":0}}",
-      "segments": [{ "hex": "deadbeef" }],
+      "segments": [{"hex": "deadbeef"}],
       "envelopeLen": 48,
       "envelopeHex": "524253311c0000007b226b6579223a226b222c2276616c7565223a7b222462223a307d7d0100000004000000deadbeef"
     },
@@ -26,7 +26,7 @@
       "direction": "both",
       "kind": "envelope",
       "controlPlane": "{\"value\":{\"$b\":0}}",
-      "segments": [{ "hex": "" }],
+      "segments": [{"hex": ""}],
       "envelopeLen": 34,
       "envelopeHex": "52425331120000007b2276616c7565223a7b222462223a307d7d0100000000000000"
     },
@@ -36,7 +36,7 @@
       "direction": "both",
       "kind": "envelope",
       "controlPlane": "{\"value\":{\"$b\":0}}",
-      "segments": [{ "hex": "00ff00ff" }],
+      "segments": [{"hex": "00ff00ff"}],
       "envelopeLen": 38,
       "envelopeHex": "52425331120000007b2276616c7565223a7b222462223a307d7d010000000400000000ff00ff"
     },
@@ -46,7 +46,7 @@
       "direction": "both",
       "kind": "envelope",
       "controlPlane": "{\"a\":{\"$b\":0},\"b\":[{\"$b\":1},{\"$b\":2}]}",
-      "segments": [{ "hex": "aa" }, { "hex": "bbbb" }, { "hex": "" }],
+      "segments": [{"hex": "aa"}, {"hex": "bbbb"}, {"hex": ""}],
       "envelopeLen": 65,
       "envelopeHex": "52425331260000007b2261223a7b222462223a307d2c2262223a5b7b222462223a317d2c7b222462223a327d5d7d0300000001000000aa02000000bbbb00000000"
     },
@@ -56,7 +56,7 @@
       "direction": "both",
       "kind": "envelope",
       "controlPlane": "{\"value\":{\"$b\":0}}",
-      "segments": [{ "fill": "ab", "len": 1048576 }],
+      "segments": [{"fill": "ab", "len": 1048576}],
       "envelopeLen": 1048610,
       "envelopeHexOmitted": "length 1048610 exceeds inline cap; length + structure locked by the Rust suite"
     }

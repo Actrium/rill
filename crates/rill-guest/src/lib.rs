@@ -155,6 +155,15 @@ pub mod rt {
         p >= base && p < base + WIRE_SIZE
     }
 
+    /// Number of still-tracked talc-fallback allocations. A deterministic,
+    /// noise-free no-leak signal for tests: after every fallback has been
+    /// resolved (copied out + freed), this is 0 regardless of what other
+    /// concurrently-running tests allocate on the shared global heap.
+    #[cfg(test)]
+    pub(crate) fn fallback_count() -> usize {
+        unsafe { (*addr_of_mut!(FALLBACK_ALLOCS)).len() }
+    }
+
     /// Free the talc-fallback buffer at `ptr` IFF `alloc` handed it out (it is in
     /// FALLBACK_ALLOCS), using the tracked size. A no-op for an arena pointer or
     /// any pointer the guest did not allocate — so it can never wild-free a
@@ -2520,8 +2529,7 @@ mod tests {
         // below the multi-MiB threshold, so the delta stays attributable here.
         #[test]
         fn return_path_frees_oversized_fallback_no_leak() {
-            use crate::{rt, test_alloc::LIVE};
-            use core::sync::atomic::Ordering;
+            use crate::rt;
 
             // Serialize with every other rt-static-touching test (RESULTS/WIRE_OFF).
             let _guard = crate::wire_lock();
@@ -2532,7 +2540,12 @@ mod tests {
             const ITERS: usize = 64; // 64 × ~68 KiB ≈ 4.3 MiB churned per pass
             const CB: u32 = 0xB17E_5EED;
 
-            let baseline = LIVE.load(Ordering::Relaxed);
+            // The fallback table is a process-global static, so a prior test may
+            // have left dangling entries. We hold `wire_lock`, so no other
+            // rt-touching test runs concurrently — the table's NET change across
+            // this loop must therefore be zero (every fallback we make is freed by
+            // `resolve`). Prior leftovers are present at both snapshots.
+            let fb_baseline = rt::fallback_count();
             for _ in 0..ITERS {
                 let p = rt::alloc(BIG);
                 assert!(!p.is_null(), "fallback alloc must succeed");
@@ -2551,15 +2564,17 @@ mod tests {
                 assert!(taken.is_some(), "the copied result must be retrievable");
                 drop(taken);
             }
-            let after = LIVE.load(Ordering::Relaxed);
-
-            // With the fix, net growth is ~0 (bounded by concurrent-test noise);
-            // a leak would be ITERS*BIG ≈ 4.3 MiB. A 1 MiB threshold cleanly
-            // separates the two while tolerating other tests' small churn.
-            let grew = after.saturating_sub(baseline);
-            assert!(
-                grew < 1024 * 1024,
-                "return path leaked: net heap grew {grew} bytes over {ITERS} oversized returns"
+            // DETERMINISTIC proof the fix works: the fallback table returned to
+            // its baseline — every off-arena buffer THIS test made was freed by
+            // `resolve` (a leak would leave up to ITERS tracked entries). Taken as
+            // a delta so a prior test's leftover entries don't matter and — key for
+            // a parallel run — the check is immune to concurrent global-heap noise.
+            // That talc actually reclaims the freed bytes is proven separately by
+            // the R3 churn/plateau test.
+            assert_eq!(
+                rt::fallback_count(),
+                fb_baseline,
+                "every oversized fallback must be freed (table back to baseline)"
             );
         }
     }
