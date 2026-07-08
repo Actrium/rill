@@ -2,6 +2,10 @@
 #include <stdexcept>
 #import <Foundation/Foundation.h>
 
+#if RILL_WIP_CDP_DEVTOOLS
+#include "devtools/CDPTransportApple.h"
+#endif
+
 namespace rill::tenant_manager {
 
 // Singleton instance
@@ -11,7 +15,19 @@ RillTenantManager::RillTenantManager(
     facebook::jsi::Runtime& hostRuntime,
     std::shared_ptr<facebook::react::CallInvoker> callInvoker)
     : hostRuntime_(&hostRuntime),
-      callInvoker_(std::move(callInvoker)) {}
+      callInvoker_(std::move(callInvoker)) {
+#if RILL_WIP_CDP_DEVTOOLS
+  // Stand up the loopback CDP server once, up front. Per-tenant targets attach
+  // as tenants are created.
+  devTools_ = std::make_unique<rill::devtools::DevToolsService>(
+      std::make_shared<rill::devtools::CDPTransportApple>());
+  if (!devTools_->start()) {
+    NSLog(@"[RillTenantManager] CDP DevTools server failed to start (dev-only)");
+  } else {
+    NSLog(@"[RillTenantManager] CDP DevTools server listening on 127.0.0.1:9229 (dev-only)");
+  }
+#endif
+}
 
 void RillTenantManager::install(
     facebook::jsi::Runtime& hostRuntime,
@@ -743,6 +759,13 @@ TenantId RillTenantManager::createTenant(facebook::jsi::Runtime& rt,
     throw;
   }
 
+#if RILL_WIP_CDP_DEVTOOLS
+  if (devTools_) {
+    devTools_->onTenantCreated(
+        id, tc.appId.empty() ? ("rill guest " + std::to_string(id)) : tc.appId);
+  }
+#endif
+
   return id;
 }
 
@@ -764,6 +787,10 @@ void RillTenantManager::destroyTenant(TenantId id) {
   it->second->dispose();
   tenants_.erase(it);
   registry_.unregisterTenant(id);
+
+#if RILL_WIP_CDP_DEVTOOLS
+  if (devTools_) devTools_->onTenantDestroyed(id);
+#endif
 }
 
 void RillTenantManager::pauseTenant(TenantId id) {
