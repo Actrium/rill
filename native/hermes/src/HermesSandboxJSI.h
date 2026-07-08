@@ -14,6 +14,12 @@
 #include <string>
 #include <unordered_map>
 
+namespace facebook {
+namespace hermes {
+class HermesRuntime;  // fwd-decl: keep the concrete runtime type off this header
+}
+}  // namespace facebook
+
 namespace hermes_sandbox {
 
 using namespace facebook;
@@ -47,7 +53,11 @@ public:
   bool isDisposed() const { return disposed_; }
 
 private:
-  std::unique_ptr<jsi::Runtime> sandboxRuntime_;
+  // Stored as its concrete Hermes type (not sliced to jsi::Runtime) so the CDP
+  // debug layer can hand it to CDPDebugAPI::create(HermesRuntime&). HermesRuntime
+  // IS-A jsi::Runtime, so every existing jsi:: use of *sandboxRuntime_ is
+  // unaffected.
+  std::unique_ptr<facebook::hermes::HermesRuntime> sandboxRuntime_;
   jsi::Runtime *hostRuntime_;
   bool disposed_;
   std::recursive_mutex mutex_;
