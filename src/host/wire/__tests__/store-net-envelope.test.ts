@@ -143,6 +143,84 @@ describe('store-net-envelope — hoist / revive', () => {
 });
 
 // ============================================================
+// random-structure round-trip property (R2 acceptance)
+// ============================================================
+
+describe('store-net-envelope — random round-trip property', () => {
+  // mulberry32: a seeded, deterministic PRNG (no Math.random — a failure is a
+  // fixed, replayable counter-example). Returns a float in [0, 1).
+  const makeRng = (seed: number) => {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  };
+
+  // Random JSON-ish value with Uint8Array leaves. Keys are `k0..` (never the
+  // reserved `$b`); numbers are small integers (exact JSON round-trip); byte
+  // streams draw the full 0x00..0xFF range and may be empty. Random NESTING and
+  // segment placement is the structural coverage the fixed vectors cannot give.
+  const gen = (rng: () => number, depth: number): unknown => {
+    const below = (n: number) => Math.floor(rng() * n);
+    switch (depth === 0 ? below(5) : below(7)) {
+      case 0:
+        return null;
+      case 1:
+        return rng() < 0.5;
+      case 2:
+        return below(1_000_000) - 500_000;
+      case 3: {
+        let s = '';
+        for (let i = below(8); i > 0; i--) s += String.fromCharCode(97 + below(26));
+        return s;
+      }
+      case 4: {
+        const b = new Uint8Array(below(24));
+        for (let i = 0; i < b.length; i++) b[i] = below(256);
+        return b;
+      }
+      case 5:
+        return Array.from({ length: below(5) }, () => gen(rng, depth - 1));
+      default: {
+        const o: Record<string, unknown> = {};
+        for (let i = below(5); i > 0; i--) o[`k${i}`] = gen(rng, depth - 1);
+        return o;
+      }
+    }
+  };
+
+  // Normalize Uint8Array leaves to tagged number arrays so a structural
+  // `toEqual` compares byte CONTENT (not view identity/offset) at any depth.
+  const norm = (v: unknown): unknown => {
+    if (v instanceof Uint8Array) return { __b: [...v] };
+    if (Array.isArray(v)) return v.map(norm);
+    if (v !== null && typeof v === 'object') {
+      const o: Record<string, unknown> = {};
+      for (const [k, val] of Object.entries(v as Record<string, unknown>)) o[k] = norm(val);
+      return o;
+    }
+    return v;
+  };
+
+  it('encode → decode is the identity for random nested byte-carrying values', () => {
+    const rng = makeRng(0x1234_5678);
+    for (let iter = 0; iter < 1000; iter++) {
+      // Root is always an object (store/net values are structured), values random.
+      const root: Record<string, unknown> = {};
+      for (let i = (Math.floor(rng() * 5) as number) + 1; i > 0; i--) root[`k${i}`] = gen(rng, 4);
+      // Full host path: hoist any bytes into an RBS1 frame, else plain JSON; then
+      // decode back. `encodeResult` returns null when there are no byte streams.
+      const frame = encodeRbs1Result(root);
+      const decoded = frame === null ? JSON.parse(JSON.stringify(root)) : decodeRbs1Request(frame);
+      expect(norm(decoded)).toEqual(norm(root));
+    }
+  });
+});
+
+// ============================================================
 // fail-closed cap negatives (every reason token)
 // ============================================================
 
@@ -223,6 +301,52 @@ describe('store-net-envelope — fail-closed', () => {
   it('bad-json when the control plane is not JSON', () => {
     const frame = encodeEnvelope('{not json', []);
     expectReason(() => decodeRbs1Request(frame), 'bad-json');
+  });
+
+  it('envelope-too-big on the ENCODE side when segments aggregate past the cap', () => {
+    // The decode-side aggregate check is above; this locks the matching encode
+    // guard (four at-cap 1 MiB segments already exceed the 4 MiB envelope cap).
+    const segs = Array.from(
+      { length: 4 },
+      () => new Uint8Array(LIMITS.maxSegmentBytes)
+    );
+    expectReason(() => encodeEnvelope('{}', segs), 'envelope-too-big');
+  });
+});
+
+// ============================================================
+// at-cap acceptance (strict `>` caps: exactly-at-limit succeeds)
+// ============================================================
+
+describe('store-net-envelope — at-cap acceptance', () => {
+  it('exactly MAX_SEGMENTS segments round-trips', () => {
+    const segs = Array.from({ length: LIMITS.maxSegments }, () => new Uint8Array([0x5a]));
+    const frame = encodeEnvelope('{}', segs);
+    expect(decodeEnvelope(frame).segments).toHaveLength(LIMITS.maxSegments);
+  });
+
+  it('a json of exactly maxJsonBytes is accepted', () => {
+    const json = ' '.repeat(LIMITS.maxJsonBytes);
+    const frame = encodeEnvelope(json, [new Uint8Array([1])]);
+    expect(decodeEnvelope(frame).json).toHaveLength(LIMITS.maxJsonBytes);
+  });
+
+  it('a frame whose total length is exactly maxEnvelopeBytes is accepted', () => {
+    // Layout = 12 (magic+jsonLen+segCount) + jsonLen + Σ(4 + segLen). Size four
+    // segments to land the total exactly on the cap; frame.length self-checks.
+    const segCount = 4;
+    const header = 12 + '{}'.length;
+    const body = LIMITS.maxEnvelopeBytes - header - segCount * 4;
+    const per = Math.floor(body / segCount);
+    const rem = body % segCount;
+    expect(per + rem).toBeLessThanOrEqual(LIMITS.maxSegmentBytes);
+    const segs = Array.from(
+      { length: segCount },
+      (_, i) => new Uint8Array(per + (i === 0 ? rem : 0))
+    );
+    const frame = encodeEnvelope('{}', segs);
+    expect(frame.length).toBe(LIMITS.maxEnvelopeBytes);
+    expect(() => decodeEnvelope(frame)).not.toThrow();
   });
 });
 

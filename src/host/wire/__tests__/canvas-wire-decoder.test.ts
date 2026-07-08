@@ -161,6 +161,16 @@ describe('canvas decoder — fail-closed negatives', () => {
     expectReason(() => decodeCanvasBatch(mutate(empty, 14, [0x01])), 'reserved-flag');
   });
 
+  it('reserved header byte (offset 15) is IGNORED for forward-compat', () => {
+    // Byte 15 is header padding, not a flag: the schema mandates a decoder MUST
+    // NOT reject a nonzero reserved byte (contrast the reserved FLAG at byte 14
+    // above, which IS rejected). A frame with an op proves the whole decode still
+    // succeeds and yields the identical ops.
+    const tampered = mutate(beginPath, 15, [0xff]);
+    expect(() => decodeCanvasBatch(tampered)).not.toThrow();
+    expect(decodeCanvasBatch(tampered)).toEqual(decodeCanvasBatch(fromHex(beginPath)));
+  });
+
   it('op-budget: header opCount exceeds maxOps (checked BEFORE the loop)', () => {
     // opCount u32 at byte 10 -> 20001 (0x4e21), one over maxOps=20000.
     expectReason(() => decodeCanvasBatch(mutate(empty, 10, [0x21, 0x4e, 0x00, 0x00])), 'op-budget');

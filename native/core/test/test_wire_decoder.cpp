@@ -777,6 +777,76 @@ TestSuite createWireDecoderTests() {
     assertTrue(dec.lastError() == WireError::InvalidUtf8, "InvalidUtf8");
   }});
 
+  // --- Fail-closed: the UTF-8 validator's SPECIFIC rejection branches ---------
+  // A one-intern-entry batch (opCount=0) whose sole intern string is the given
+  // bytes; every intern string is validated, so a malformed one rejects before
+  // any op. Covers the overlong / surrogate / >U+10FFFF / truncated arms a lone
+  // 0xFF (above) never reaches.
+  auto internFrame = [](std::vector<uint8_t> s) -> std::vector<uint8_t> {
+    std::vector<uint8_t> b = {
+        0x52, 0x49, 0x4c, 0x4c,             // magic
+        0x01, 0x00,                         // version
+        0x00, 0x00, 0x00, 0x00,             // batchId
+        0x00, 0x00,                         // opCount = 0
+        0x00,                               // flags
+        0x00, 0x00, 0x00,                   // reserved
+        0x01, 0x00,                         // intern count = 1
+    };
+    b.push_back(static_cast<uint8_t>(s.size() & 0xff));
+    b.push_back(static_cast<uint8_t>((s.size() >> 8) & 0xff));
+    b.insert(b.end(), s.begin(), s.end());
+    return b;
+  };
+  struct Utf8Case {
+    const char* name;
+    std::vector<uint8_t> bytes;
+  };
+  for (const auto& c : std::vector<Utf8Case>{
+           {"utf8: overlong 2-byte (C0 80)", {0xC0, 0x80}},
+           {"utf8: overlong 3-byte (E0 80 80)", {0xE0, 0x80, 0x80}},
+           {"utf8: surrogate (ED A0 80)", {0xED, 0xA0, 0x80}},
+           {"utf8: above U+10FFFF (F4 90 80 80)", {0xF4, 0x90, 0x80, 0x80}},
+           {"utf8: truncated multibyte (C2 with no continuation)", {0xC2}},
+       }) {
+    suite.cases.push_back({c.name, [internFrame, c]() {
+                             auto bytes = internFrame(c.bytes);
+                             WireDecoder dec;
+                             auto r = dec.decode(bytes.data(), bytes.size());
+                             assertFalse(r.has_value(), "malformed UTF-8 intern should reject");
+                             assertTrue(dec.lastError() == WireError::InvalidUtf8, "InvalidUtf8");
+                           }});
+  }
+
+  // --- Positive: a VALID 2/3/4-byte multibyte intern string decodes -----------
+  // All matrix intern strings are ASCII; this is the only vector proving the
+  // validator ACCEPTS valid multibyte and round-trips it. Intern string bytes
+  // 61 / C3A9 / E4B8AD / F09F9880 = 'a' + U+00E9 (2B) + U+4E2D (3B) + U+1F600
+  // (4B), used as a CREATE type.
+  suite.cases.push_back({"utf8: valid 2/3/4-byte multibyte intern decodes", []() {
+    std::vector<uint8_t> bytes = {
+        0x52, 0x49, 0x4c, 0x4c,             // magic
+        0x01, 0x00,                         // version
+        0x00, 0x00, 0x00, 0x00,             // batchId
+        0x01, 0x00,                         // opCount = 1
+        0x00,                               // flags
+        0x00, 0x00, 0x00,                   // reserved
+        0x01, 0x00,                         // intern count = 1
+        0x0a, 0x00,                         // entry[0] byteLen = 10
+        0x61, 0xc3, 0xa9, 0xe4, 0xb8, 0xad, 0xf0, 0x9f, 0x98, 0x80, // 'a' e-acute CJK emoji
+        0x01,                               // opcode CREATE
+        0x01, 0x00, 0x00, 0x00,             // id = 1
+        0x00, 0x00,                         // type internRef 0
+        0x00, 0x00,                         // propsCount 0
+    };
+    WireDecoder dec;
+    auto r = dec.decode(bytes.data(), bytes.size());
+    assertTrue(r.has_value(), "valid multibyte UTF-8 must decode");
+    assertEqual<std::string_view>(
+        r->ops[0].type,
+        std::string_view("\x61\xc3\xa9\xe4\xb8\xad\xf0\x9f\x98\x80", 10),
+        "multibyte type round-trips");
+  }});
+
   // --- Fail-closed: trailing bytes after the last op ---
   suite.cases.push_back({"fail-closed: trailing bytes", []() {
     auto bytes = hexToBytes(kEmptyBatch);
@@ -909,6 +979,55 @@ TestSuite createWireDecoderTests() {
     assertEqual(v->arrayItems.size(), size_t{1}, "innermost single child");
     assertTrue(v->arrayItems[0].tag == ValueTag::Null, "leaf is NULL");
   }});
+
+  // The same depth guard must fire through the OTHER container arms, not just
+  // ARRAY: `containerDepth` nested OBJECT / MAP / SET ending in a NULL leaf.
+  auto buildNestedBatch = [](ValueTag container, uint32_t containerDepth) -> std::vector<uint8_t> {
+    std::vector<uint8_t> b;
+    auto u16le = [&](uint16_t v) {
+      b.push_back(static_cast<uint8_t>(v & 0xff));
+      b.push_back(static_cast<uint8_t>((v >> 8) & 0xff));
+    };
+    auto u32le = [&](uint32_t v) {
+      for (int i = 0; i < 4; ++i) b.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff));
+    };
+    b.insert(b.end(), {0x52, 0x49, 0x4c, 0x4c}); // magic
+    u16le(1);                                    // version
+    u32le(0);                                    // batchId
+    u16le(1);                                    // opCount = 1
+    b.push_back(0x00);                           // flags
+    b.insert(b.end(), {0x00, 0x00, 0x00});       // reserved
+    u16le(2);                                    // intern: [0]="View", [1]="k"
+    u16le(4);
+    b.insert(b.end(), {'V', 'i', 'e', 'w'});
+    u16le(1);
+    b.push_back('k');
+    b.push_back(0x01);                           // CREATE
+    u32le(1);                                    // id
+    u16le(0);                                    // type internRef 0
+    u16le(1);                                    // props count 1
+    u16le(1);                                    // key internRef 1 ("k")
+    for (uint32_t i = 0; i < containerDepth; ++i) {
+      b.push_back(static_cast<uint8_t>(container));
+      u16le(1); // count / length = 1
+      if (container == ValueTag::Object) u16le(1); // key internRef 1 ("k")
+      if (container == ValueTag::Map)
+        b.push_back(static_cast<uint8_t>(ValueTag::Null)); // MAP key = null
+    }
+    b.push_back(static_cast<uint8_t>(ValueTag::Null)); // innermost leaf
+    return b;
+  };
+
+  for (ValueTag container : {ValueTag::Object, ValueTag::Map, ValueTag::Set}) {
+    suite.cases.push_back(
+        {"fail-closed: OBJECT/MAP/SET nested past maxValueDepth", [buildNestedBatch, container]() {
+           auto bytes = buildNestedBatch(container, kMaxValueDepth + 1);
+           WireDecoder dec;
+           auto r = dec.decode(bytes.data(), bytes.size());
+           assertFalse(r.has_value(), "over-deep non-array container should reject");
+           assertTrue(dec.lastError() == WireError::NestingTooDeep, "NestingTooDeep");
+         }});
+  }
 
   // --- Fail-closed: DATE domain (limits.maxDateMs) ---------------------------
   // A CREATE whose single prop `k` is a DATE with the given epochMs (f64 LE).

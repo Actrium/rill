@@ -204,9 +204,11 @@ describe('wire-decoder FUNCTION flag combinations', () => {
     expect(decodeFn(buf)).toEqual({ __type: 'function', __fnId: 'View', __sourceFile: 'k' });
   });
 
-  it('decodes sourceLine-only (flags 0x04)', () => {
-    const buf = batchWithValue((w) => w.u8(0x07).u16(0).u8(0x04).u32(123));
-    expect(decodeFn(buf)).toEqual({ __type: 'function', __fnId: 'View', __sourceLine: 123 });
+  it('decodes sourceLine-only (flags 0x04) as a full u32, not a u16', () => {
+    // 300000 > u16 max (65535): a decoder that read the line as a u16 (or stopped
+    // at 2 bytes) would mis-decode it, so this distinguishes the u32 width.
+    const buf = batchWithValue((w) => w.u8(0x07).u16(0).u8(0x04).u32(300000));
+    expect(decodeFn(buf)).toEqual({ __type: 'function', __fnId: 'View', __sourceLine: 300000 });
   });
 
   it('decodes name+sourceLine with sourceFile absent (flags 0x05) in field order', () => {
@@ -437,6 +439,29 @@ describe('wire-decoder depth-cap boundary (parity with Rust/C++)', () => {
     });
     expect(() => decodeBatchStreaming(buf, () => {})).toThrow(WireDecodeError);
     expect(() => decodeBatchStreaming(buf, () => {})).toThrow(/nesting exceeds 64/i);
+  });
+
+  it('rejects OBJECT / MAP / SET nested one past maxValueDepth (not just ARRAY)', () => {
+    // Same depth guard, exercised through the OTHER container arms — a regression
+    // in any one of them would slip past a suite that only nests ARRAY.
+    // OBJECT: 64 × {k: …} then innermost {} = 65 containers (key internRef 1='k').
+    const obj = batchWithValue((w) => {
+      for (let i = 0; i < 64; i++) w.u8(0x08).u16(1).u16(1);
+      w.u8(0x08).u16(0);
+    });
+    expect(() => decodeBatchStreaming(obj, () => {})).toThrow(/nesting exceeds 64/i);
+    // SET: 64 × Set(1 elem) then innermost Set(0).
+    const set = batchWithValue((w) => {
+      for (let i = 0; i < 64; i++) w.u8(0x0e).u16(1);
+      w.u8(0x0e).u16(0);
+    });
+    expect(() => decodeBatchStreaming(set, () => {})).toThrow(/nesting exceeds 64/i);
+    // MAP: 64 × Map(1 entry: key=null, value=next) then innermost Map(0).
+    const map = batchWithValue((w) => {
+      for (let i = 0; i < 64; i++) w.u8(0x0d).u16(1).u8(0x00);
+      w.u8(0x0d).u16(0);
+    });
+    expect(() => decodeBatchStreaming(map, () => {})).toThrow(/nesting exceeds 64/i);
   });
 });
 

@@ -121,7 +121,7 @@ pub mod rt {
     // here. Bounded by MAX_FALLBACK_TRACKED so a fallback with no matching resolve
     // (e.g. an oversized event payload) cannot grow it without limit.
     static mut FALLBACK_ALLOCS: Vec<(usize, usize)> = Vec::new();
-    const MAX_FALLBACK_TRACKED: usize = 64;
+    pub(crate) const MAX_FALLBACK_TRACKED: usize = 64;
 
     pub(crate) fn begin_wire_turn() {
         unsafe { TURN_DEPTH += 1 };
@@ -162,6 +162,16 @@ pub mod rt {
     #[cfg(test)]
     pub(crate) fn fallback_count() -> usize {
         unsafe { (*addr_of_mut!(FALLBACK_ALLOCS)).len() }
+    }
+
+    /// Test-only: drop all fallback TRACKING (the buffers themselves are left as
+    /// they are — an untracked fallback simply leaks, which is exactly what the
+    /// bounded table tolerates). Lets a test that deliberately fills the table
+    /// give itself a clean baseline and tidy up after, so it does not perturb the
+    /// shared static that other rt-touching tests observe. Call under `wire_lock`.
+    #[cfg(test)]
+    pub(crate) fn clear_fallback() {
+        unsafe { (*addr_of_mut!(FALLBACK_ALLOCS)).clear() }
     }
 
     /// Free the talc-fallback buffer at `ptr` IFF `alloc` handed it out (it is in
@@ -2594,6 +2604,46 @@ mod tests {
                  returns (reclamation would keep them clustered)",
                 max - min
             );
+        }
+
+        // The other half of the FALLBACK_ALLOCS contract: an oversized fallback
+        // with NO matching resolve (e.g. an oversized event payload the guest
+        // never returns) must not grow the tracking table without bound. When the
+        // table is full a new alloc evicts the oldest record (`remove(0)`), so the
+        // count plateaus at MAX_FALLBACK_TRACKED — the evicted buffers simply leak,
+        // bounded, rather than the table itself growing unbounded.
+        #[test]
+        fn fallback_table_eviction_bounds_unresolved_leaks() {
+            use crate::rt;
+
+            let _guard = crate::wire_lock();
+
+            const BIG: usize = rt::WIRE_SIZE + 4096;
+
+            // Clean baseline so the assertion is absolute — we hold `wire_lock`, so
+            // no other rt-touching test races the shared static.
+            rt::clear_fallback();
+
+            // Allocate more oversized fallbacks than the table can hold, NEVER
+            // resolving them. Without the eviction branch the table would reach
+            // MAX + 10; with it, it plateaus at MAX.
+            for _ in 0..(rt::MAX_FALLBACK_TRACKED + 10) {
+                let p = rt::alloc(BIG);
+                assert!(!p.is_null(), "fallback alloc must succeed");
+                assert!(
+                    !rt::wire_contains(p),
+                    "an oversized alloc must fall back off-arena"
+                );
+            }
+            assert_eq!(
+                rt::fallback_count(),
+                rt::MAX_FALLBACK_TRACKED,
+                "eviction must cap the tracking table at MAX_FALLBACK_TRACKED"
+            );
+
+            // Tidy up: a left-full table would perturb other rt tests' fallback
+            // deltas (they hold the same lock, so ordering is otherwise serialized).
+            rt::clear_fallback();
         }
     }
 }

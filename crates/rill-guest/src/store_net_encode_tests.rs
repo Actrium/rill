@@ -175,6 +175,97 @@ fn nested_sentinels_in_object_and_array() {
     assert_eq!(decode_value(&frame).unwrap(), v);
 }
 
+// Seeded xorshift64 — a deterministic PRNG (no `rand` dep, reproducible across
+// runs and machines) so a failure is a fixed, replayable counter-example.
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+// Build a random JSON-ish value with byte-stream leaves, bounded by `depth`.
+// Keys are `k0..` (never the reserved `$b`); numbers stay small integers so the
+// JSON round-trip is exact; byte streams draw the FULL 0x00..=0xFF range and may
+// be empty. Exercises random NESTING/segment-count/placement — the structural
+// coverage the fixed vectors above cannot give.
+fn gen_value(rng: &mut Rng, depth: u32) -> Value {
+    match if depth == 0 {
+        rng.below(5)
+    } else {
+        rng.below(7)
+    } {
+        0 => Value::Null,
+        1 => Value::Bool(rng.next() & 1 == 0),
+        2 => Value::Num((rng.next() as i64 % 1_000_000) as f64),
+        3 => {
+            let len = rng.below(8);
+            let s: StdString = (0..len)
+                .map(|_| (b'a' + rng.below(26) as u8) as char)
+                .collect();
+            Value::Str(s)
+        }
+        4 => {
+            let len = rng.below(24);
+            Value::Bytes((0..len).map(|_| rng.next() as u8).collect())
+        }
+        5 => {
+            let n = rng.below(5);
+            Value::Arr((0..n).map(|_| gen_value(rng, depth - 1)).collect())
+        }
+        _ => {
+            let n = rng.below(5);
+            Value::Obj(
+                (0..n)
+                    .map(|i| {
+                        let mut k = StdString::from("k");
+                        let _ = std::fmt::Write::write_fmt(&mut k, format_args!("{i}"));
+                        (k, gen_value(rng, depth - 1))
+                    })
+                    .collect(),
+            )
+        }
+    }
+}
+
+// PROPERTY: for any value, encode → decode is the identity. Covers the R2
+// acceptance's "random bytes round-trip" with random STRUCTURE (the exhaustive
+// 0x00..=0xFF byte-VALUE coverage lives in `zero_and_ff_bytes_ride_untouched`).
+// The root is always an object (store/net values are structured, and it keeps
+// `decode_reply`'s plain-JSON arm parsing a top-level object).
+#[test]
+fn random_values_round_trip_is_the_identity() {
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    for _ in 0..1000 {
+        let n = rng.below(5) + 1;
+        let root = Value::Obj(
+            (0..n)
+                .map(|i| {
+                    let mut k = StdString::from("k");
+                    let _ = std::fmt::Write::write_fmt(&mut k, format_args!("{i}"));
+                    (k, gen_value(&mut rng, 4))
+                })
+                .collect(),
+        );
+        // `decode_reply` handles BOTH arms: a byte-carrying value frames as an
+        // RBS1 envelope (revived back), a byte-free value is plain JSON.
+        let bytes = match encode_value(&root).unwrap() {
+            Encoded::Plain(b) => b,
+            Encoded::Envelope(b) => b,
+        };
+        let decoded = decode_reply(&bytes).unwrap();
+        assert_eq!(decoded, root, "round-trip mismatch");
+    }
+}
+
 #[test]
 fn both_directions_use_one_symmetric_codec() {
     // The framing is direction-agnostic: the same value encodes to the same
@@ -339,6 +430,56 @@ fn at_cap_1mib_segment_round_trips() {
     assert_eq!(dec.segments[0].len(), MAX_SEGMENT_BYTES);
     assert_eq!(dec.segments[0][0], 0xab);
     assert_eq!(dec.segments[0][MAX_SEGMENT_BYTES - 1], 0xab);
+}
+
+// Every cap is a strict `>` reject, so EXACTLY-at-cap must be accepted. The
+// over-cap negatives are covered above; these lock the matching acceptance edge
+// for the other three limits (maxSegmentBytes's edge is the test above).
+#[test]
+fn at_cap_boundaries_are_accepted() {
+    let one = [0x5au8];
+
+    // maxSegments: exactly MAX_SEGMENTS small segments encode + decode.
+    let refs: StdVec<&[u8]> = (0..MAX_SEGMENTS).map(|_| &one[..]).collect();
+    let frame = encode_envelope("{}", &refs).unwrap();
+    assert_eq!(
+        decode_envelope(&frame).unwrap().segments.len(),
+        MAX_SEGMENTS
+    );
+
+    // maxJsonBytes: a json of exactly MAX_JSON_BYTES bytes is accepted (one tiny
+    // segment so the framed path — which enforces the cap — applies).
+    let json = StdString::from_utf8(std::vec![b' '; MAX_JSON_BYTES]).unwrap();
+    let frame = encode_envelope(&json, &[&one[..]]).unwrap();
+    assert_eq!(decode_envelope(&frame).unwrap().json.len(), MAX_JSON_BYTES);
+
+    // maxEnvelopeBytes: a frame whose TOTAL length is exactly MAX_ENVELOPE_BYTES.
+    // Layout = 12 (magic+jsonLen+segCount) + jsonLen + Σ(4 + segLen). Size four
+    // equal-ish segments to land the total exactly on the cap; the frame.len()
+    // assertion below self-checks the arithmetic.
+    let seg_count = 4usize;
+    let header = 12 + "{}".len();
+    let body = MAX_ENVELOPE_BYTES - header - seg_count * 4; // total segment bytes
+    let per = body / seg_count;
+    let rem = body % seg_count;
+    assert!(
+        per + rem <= MAX_SEGMENT_BYTES,
+        "each segment must be within its cap"
+    );
+    let segs: StdVec<StdVec<u8>> = (0..seg_count)
+        .map(|i| std::vec![0xabu8; per + if i == 0 { rem } else { 0 }])
+        .collect();
+    let refs: StdVec<&[u8]> = segs.iter().map(|s| s.as_slice()).collect();
+    let frame = encode_envelope("{}", &refs).unwrap();
+    assert_eq!(
+        frame.len(),
+        MAX_ENVELOPE_BYTES,
+        "frame lands exactly on the cap"
+    );
+    assert!(
+        decode_envelope(&frame).is_ok(),
+        "at-cap envelope must decode"
+    );
 }
 
 // ============================================================

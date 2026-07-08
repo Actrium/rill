@@ -936,6 +936,99 @@ mod tests {
         assert_eq!(enc.encode_batch(&batch), Err(EncodeError::StringTooLong));
     }
 
+    /// One more op than MAX_OPS fails closed before any op is emitted.
+    #[test]
+    fn too_many_ops_is_rejected() {
+        let ops: Vec<Op> = (0..=contract::limits::MAX_OPS as u32)
+            .map(|i| Op::Delete { id: i })
+            .collect();
+        let batch = Batch { batch_id: 0, ops };
+        let mut enc = Encoder::new();
+        assert_eq!(enc.encode_batch(&batch), Err(EncodeError::TooManyOps));
+    }
+
+    /// A single collection with one element past MAX_COLLECTION_ELEMENTS fails
+    /// closed (here an ARRAY value; the same guard covers props/args/object/map/
+    /// set/removed/children).
+    #[test]
+    fn oversized_collection_is_rejected() {
+        let arr = Value::Array(
+            (0..=contract::limits::MAX_COLLECTION_ELEMENTS)
+                .map(|_| Value::Null)
+                .collect(),
+        );
+        let batch = Batch {
+            batch_id: 0,
+            ops: std::vec![Op::Create {
+                id: 1,
+                ty: "T",
+                props: std::vec![("k", arr)]
+            }],
+        };
+        let mut enc = Encoder::new();
+        assert_eq!(
+            enc.encode_batch(&batch),
+            Err(EncodeError::CollectionTooLarge)
+        );
+    }
+
+    /// More than MAX_INTERN_STRINGS DISTINCT strings fails closed — packed into a
+    /// single CREATE whose prop count stays under the collection cap, so it is the
+    /// intern table (not TooManyOps / CollectionTooLarge) that overflows.
+    #[test]
+    fn intern_table_overflow_is_rejected() {
+        let half = contract::limits::MAX_INTERN_STRINGS / 2 + 1; // 32768
+        let keys: Vec<String> = (0..half).map(|i| format!("k{i}")).collect();
+        let vals: Vec<String> = (0..half).map(|i| format!("v{i}")).collect();
+        // half distinct keys + half distinct values + the type "T" = 65537 > 65535.
+        let props: Vec<(&str, Value)> = (0..half)
+            .map(|i| (keys[i].as_str(), Value::Str(vals[i].as_str())))
+            .collect();
+        let batch = Batch {
+            batch_id: 0,
+            ops: std::vec![Op::Create {
+                id: 1,
+                ty: "T",
+                props
+            }],
+        };
+        let mut enc = Encoder::new();
+        assert_eq!(
+            enc.encode_batch(&batch),
+            Err(EncodeError::InternTableOverflow)
+        );
+    }
+
+    /// A batch whose emitted wire exceeds MAX_BATCH_BYTES (16 MiB) fails closed.
+    /// ~258 DISTINCT max-length (65535-byte) string values overrun the byte cap
+    /// while every element/intern/collection cap stays satisfied.
+    #[test]
+    fn oversized_batch_is_rejected() {
+        let n = contract::limits::MAX_BATCH_BYTES / contract::limits::MAX_STRING_BYTES + 2;
+        // Distinct via an index prefix, padded to exactly MAX_STRING_BYTES so none
+        // is itself over-long and interning cannot dedup them.
+        let vals: Vec<String> = (0..n)
+            .map(|i| {
+                let mut s = format!("{i}:");
+                s.push_str(&"x".repeat(contract::limits::MAX_STRING_BYTES - s.len()));
+                s
+            })
+            .collect();
+        // A shared key ("k") is fine — only the distinct VALUES drive the size.
+        let props: Vec<(&str, Value)> =
+            vals.iter().map(|v| ("k", Value::Str(v.as_str()))).collect();
+        let batch = Batch {
+            batch_id: 0,
+            ops: std::vec![Op::Create {
+                id: 1,
+                ty: "T",
+                props
+            }],
+        };
+        let mut enc = Encoder::new();
+        assert_eq!(enc.encode_batch(&batch), Err(EncodeError::BatchTooLarge));
+    }
+
     /// Build a value that is `container_depth` nested arrays deep: the outermost
     /// array sits at depth 1, the innermost (empty) array at depth
     /// `container_depth`.

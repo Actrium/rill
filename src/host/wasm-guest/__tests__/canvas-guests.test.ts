@@ -351,8 +351,12 @@ describe('canvas guests — guest->host JSON escaping', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 type DrawRecord = { encoding: 'binary' | 'json'; canvasId: string; ops: CanvasOp[] };
 
-function binaryCanvasDispatch(options: { advertise?: boolean } = {}) {
+function binaryCanvasDispatch(
+  options: { advertise?: boolean; binaryDraw?: boolean; wireVersion?: number } = {}
+) {
   const advertise = options.advertise ?? true;
+  const advBinaryDraw = options.binaryDraw ?? true;
+  const advWireVersion = options.wireVersion ?? 1;
   const draws: DrawRecord[] = [];
   const probes: Array<Record<string, unknown>> = [];
   // The draw method accepts BOTH encodings; pass-through parseInput so the
@@ -407,7 +411,7 @@ function binaryCanvasDispatch(options: { advertise?: boolean } = {}) {
   if (advertise) {
     hostModules.getInfo = async (input: Record<string, unknown>) => {
       probes.push(input);
-      return { binaryDraw: true, wireVersion: 1 };
+      return { binaryDraw: advBinaryDraw, wireVersion: advWireVersion };
     };
   }
   const impl = implementHostModules(contract, { 'host:canvas': hostModules });
@@ -457,6 +461,40 @@ describe('canvas guests — capability handshake (WIP binary wire)', () => {
     expect(draws[0].canvasId).toBe('scene');
     // The JSON path carries the identical op sequence (same picture).
     expect(draws[0].ops).toEqual(EXPECTED_BINARY_OPS);
+  });
+
+  it('declines: an advertised host answering binaryDraw:false gets JSON (probe says no)', async () => {
+    // Distinct from an OLD host (getInfo unregistered): here getInfo IS present
+    // and the guest DOES probe — but the host declines, so `supported =
+    // has_flag && has_version` is false on the has_flag half and the guest emits
+    // JSON. This is the declining branch a hardcoded {binaryDraw:true} never hit.
+    const { table, draws, probes } = binaryCanvasDispatch({ advertise: true, binaryDraw: false });
+    const host = new WasmGuestHost({ dispatch: table });
+    await host.load(CANVAS_BINARY_GUEST);
+    await host.drain();
+
+    expect(probes).toHaveLength(1); // it DID probe (unlike the old-host case)
+    expect(draws).toHaveLength(1);
+    expect(draws[0].encoding).toBe('json'); // ...but the host declined binary
+    expect(draws[0].ops).toEqual(EXPECTED_BINARY_OPS);
+  });
+
+  it('declines: an advertised host with a wireVersion this encoder cannot produce gets JSON', async () => {
+    // The has_version half of the gate: binaryDraw:true but wireVersion 0 (not the
+    // encoder's version) also declines to JSON — a host on a future/unknown wire
+    // must not receive a frame this guest cannot speak.
+    const { table, draws, probes } = binaryCanvasDispatch({
+      advertise: true,
+      binaryDraw: true,
+      wireVersion: 0,
+    });
+    const host = new WasmGuestHost({ dispatch: table });
+    await host.load(CANVAS_BINARY_GUEST);
+    await host.drain();
+
+    expect(probes).toHaveLength(1);
+    expect(draws).toHaveLength(1);
+    expect(draws[0].encoding).toBe('json');
   });
 
   it('DEFAULT guest (wip OFF) stays JSON EVEN when the host advertises binary', async () => {
