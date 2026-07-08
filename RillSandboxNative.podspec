@@ -116,6 +116,12 @@ Pod::Spec.new do |s|
     preprocessor_defs += ' RILL_SANDBOX_ENGINE=1'
   end
 
+  # Dev-only: opt JSC sandbox contexts into Apple's Remote Inspector (Safari Web
+  # Inspector) when explicitly requested via ENV. The code path is ALSO gated on
+  # !NDEBUG, so a Release archive strips it even if this define leaks in — never
+  # ship an inspectable sandbox. Only meaningful for sandbox_engine == 'jsc'.
+  preprocessor_defs += ' RILL_WIP_JSC_INSPECTOR=1' if ENV['RILL_WIP_JSC_INSPECTOR'] == '1'
+
   s.pod_target_xcconfig = {
     'GCC_PREPROCESSOR_DEFINITIONS' => preprocessor_defs,
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++17',
