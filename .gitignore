@@ -91,3 +91,6 @@ tests/wasm-sandbox/wasm/
 
 # Rust guest SDK build output
 crates/target/
+# DWARF-carrying debug guests (RILL_GUEST_DEBUG=1 crates/build.sh); dev-only,
+# never committed (they carry debug info + real source paths).
+crates/debug-artifacts/

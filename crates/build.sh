@@ -8,6 +8,26 @@ cd "$(dirname "$0")"
 
 TARGET=wasm32-unknown-unknown
 FIXTURES=../src/host/wasm-guest/__tests__/fixtures
+GUESTS="kv-guest ui-guest seq-guest event-guest heap-exhaust-guest canvas-guest canvas-present-guest canvas-gpu-guest canvas-escape-guest asset-guest"
+
+# Optional debug build: DWARF-carrying guests for source-level debugging inside
+# V8's wasm debugger (Chrome DevTools "C/C++ DevTools Support (DWARF)"). Output
+# goes to a SEPARATE dir and NEVER overwrites the shipped, DWARF-free release
+# fixtures; real source paths are preserved (no --remap-path-prefix here). See
+# docs/native-guest-debugging.zh.md.
+if [ "${RILL_GUEST_DEBUG:-}" = "1" ]; then
+  DEBUG_OUT=debug-artifacts
+  mkdir -p "$DEBUG_OUT"
+  # shellcheck disable=SC2086
+  RUSTFLAGS=" " cargo build $(printf -- '-p %s ' $GUESTS) --target "$TARGET" --profile debug-wasm
+  for lib in $GUESTS; do
+    crate="${lib//-/_}"
+    cp "target/$TARGET/debug-wasm/$crate.wasm" "$DEBUG_OUT/$lib.wasm"
+    echo "debug (DWARF): $DEBUG_OUT/$lib.wasm ($(wc -c < "$DEBUG_OUT/$lib.wasm") bytes)"
+  done
+  echo "NOTE: debug guests carry DWARF + real source paths; do NOT commit them."
+  exit 0
+fi
 
 RUSTFLAGS=" " cargo build -p kv-guest -p ui-guest -p seq-guest -p event-guest -p heap-exhaust-guest -p canvas-guest -p canvas-present-guest -p canvas-gpu-guest -p canvas-escape-guest -p asset-guest --target "$TARGET" --release
 
