@@ -27,6 +27,27 @@ struct MockTransport : public CDPTransport {
   void close(ConnectionId) override {}
   void simulateConnect(ConnectionId c, const std::string& path = "") { if (onConnect_) onConnect_(c, path); }
   void simulateMessage(ConnectionId c, const std::string& m) { if (onMessage_) onMessage_(c, m); }
+  void simulateDisconnect(ConnectionId c) { if (onDisconnect_) onDisconnect_(c); }
+};
+
+// Owns the Debugger domain but, unlike RecordingTarget, does NOT reply inside
+// dispatch — it stashes the persistent sink and lets the test emit out of band
+// (modelling a CDP agent whose responses/events arrive asynchronously). Also
+// counts connect/disconnect so tests can assert the once-per-connection contract.
+struct AsyncFakeTarget : public IEngineDebugTarget {
+  std::unordered_map<ConnectionId, CdpOutboundFn> sinks;
+  std::vector<std::pair<ConnectionId, std::string>> dispatched;
+  int connectCount = 0;
+  int disconnectCount = 0;
+  DomainSet ownedDomains() const override { DomainSet d; d.debugger = true; return d; }
+  void onClientConnect(ConnectionId c, CdpOutboundFn s) override { sinks[c] = std::move(s); ++connectCount; }
+  void onClientDisconnect(ConnectionId c) override { sinks.erase(c); ++disconnectCount; }
+  void dispatch(ConnectionId c, const RawCdpMessage& req) override { dispatched.push_back({c, req}); }
+  // Out-of-band emit through the connection's persistent sink (no-op if gone).
+  void emit(ConnectionId c, const std::string& msg) {
+    auto it = sinks.find(c);
+    if (it != sinks.end()) it->second(msg);
+  }
 };
 
 // Records what it received; owns the Debugger domain. Emits via the persistent
@@ -106,6 +127,108 @@ TestSuite createDevToolsServiceTests() {
     transport->simulateConnect(710, "/tenant/5");
     transport->simulateMessage(710, R"({"id":1,"method":"Debugger.enable"})");
     assertEqual(target->received.size(), size_t(1), "tenant 5 target received the request");
+    svc.stop();
+  }});
+
+  // --- async / persistent-sink contract (Phase-3 T2.1 seam evolution) ---
+
+  suite.cases.push_back({"async out-of-band emit reaches the client via the persistent sink", []() {
+    auto transport = std::make_shared<MockTransport>();
+    auto target = std::make_shared<AsyncFakeTarget>();
+    DevToolsService svc(transport);
+    svc.start();
+    svc.onTenantCreated(0, "App");
+    svc.registerDebugTarget(0, target);
+    transport->simulateConnect(700);
+    transport->simulateMessage(700, R"({"id":1,"method":"Debugger.enable"})");
+    assertEqual(target->dispatched.size(), size_t(1), "request dispatched");
+    assertEqual(transport->sent.size(), size_t(0), "target replied nothing inside dispatch");
+    // Later, out of band (as a real agent would), the target emits an event.
+    target->emit(700, R"({"method":"Debugger.paused","params":{}})");
+    assertEqual(transport->sent.size(), size_t(1), "out-of-band event forwarded to the client");
+    assertTrue(transport->sent[0].second.find("Debugger.paused") != std::string::npos, "the event");
+    svc.stop();
+  }});
+
+  suite.cases.push_back({"onClientConnect fires once per connection", []() {
+    auto transport = std::make_shared<MockTransport>();
+    auto target = std::make_shared<AsyncFakeTarget>();
+    DevToolsService svc(transport);
+    svc.start();
+    svc.onTenantCreated(0, "App");
+    svc.registerDebugTarget(0, target);
+    transport->simulateConnect(700);
+    transport->simulateMessage(700, R"({"id":1,"method":"Debugger.enable"})");
+    transport->simulateMessage(700, R"({"id":2,"method":"Debugger.resume"})");
+    assertEqual(target->connectCount, 1, "onClientConnect only once");
+    assertEqual(target->dispatched.size(), size_t(2), "both requests dispatched");
+    svc.stop();
+  }});
+
+  suite.cases.push_back({"disconnect tears down the sink; a later emit is dropped", []() {
+    auto transport = std::make_shared<MockTransport>();
+    auto target = std::make_shared<AsyncFakeTarget>();
+    DevToolsService svc(transport);
+    svc.start();
+    svc.onTenantCreated(0, "App");
+    svc.registerDebugTarget(0, target);
+    transport->simulateConnect(700);
+    transport->simulateMessage(700, R"({"id":1,"method":"Debugger.enable"})");
+    transport->simulateDisconnect(700);
+    assertEqual(target->disconnectCount, 1, "onClientDisconnect fired");
+    const size_t before = transport->sent.size();
+    target->emit(700, R"({"method":"Debugger.paused","params":{}})");
+    assertEqual(transport->sent.size(), before, "emit after disconnect is dropped");
+    svc.stop();
+  }});
+
+  suite.cases.push_back({"two connections to one tenant get independent sinks", []() {
+    auto transport = std::make_shared<MockTransport>();
+    auto target = std::make_shared<AsyncFakeTarget>();
+    DevToolsService svc(transport);
+    svc.start();
+    svc.onTenantCreated(0, "App");
+    svc.registerDebugTarget(0, target);
+    transport->simulateConnect(700);
+    transport->simulateConnect(701);
+    transport->simulateMessage(700, R"({"id":1,"method":"Debugger.enable"})");
+    transport->simulateMessage(701, R"({"id":1,"method":"Debugger.enable"})");
+    assertEqual(target->connectCount, 2, "one onClientConnect per connection");
+    target->emit(700, R"({"method":"Debugger.paused","params":{}})");
+    assertEqual(transport->sent.size(), size_t(1), "only conn 700's sink fired");
+    assertEqual(transport->sent[0].first, ConnectionId(700), "routed to conn 700");
+    svc.stop();
+  }});
+
+  suite.cases.push_back({"the persistent sink routes to its exact connection", []() {
+    auto transport = std::make_shared<MockTransport>();
+    auto target = std::make_shared<AsyncFakeTarget>();
+    DevToolsService svc(transport);
+    svc.start();
+    svc.onTenantCreated(0, "App");
+    svc.registerDebugTarget(0, target);
+    transport->simulateConnect(700);
+    transport->simulateConnect(701);
+    transport->simulateMessage(700, R"({"id":1,"method":"Debugger.enable"})");
+    transport->simulateMessage(701, R"({"id":1,"method":"Debugger.enable"})");
+    target->emit(701, R"({"method":"Debugger.resumed","params":{}})");
+    assertEqual(transport->sent.size(), size_t(1), "one message");
+    assertEqual(transport->sent[0].first, ConnectionId(701), "routed to conn 701");
+    svc.stop();
+  }});
+
+  suite.cases.push_back({"unregisterDebugTarget disconnects its bound clients", []() {
+    auto transport = std::make_shared<MockTransport>();
+    auto target = std::make_shared<AsyncFakeTarget>();
+    DevToolsService svc(transport);
+    svc.start();
+    svc.onTenantCreated(0, "App");
+    svc.registerDebugTarget(0, target);
+    transport->simulateConnect(700);
+    transport->simulateMessage(700, R"({"id":1,"method":"Debugger.enable"})");
+    assertEqual(target->connectCount, 1, "client bound");
+    svc.server().unregisterDebugTarget(0);
+    assertEqual(target->disconnectCount, 1, "unregister disconnected the bound client");
     svc.stop();
   }});
 
