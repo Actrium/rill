@@ -233,6 +233,15 @@ export interface Hoisted {
 // Reason: walks arbitrary caller data; Uint8Array leaves hoist to segments, other values pass through.
 export function hoistSentinels(value: unknown): Hoisted {
   const segments: Uint8Array[] = [];
+  // `$b` is the RESERVED sentinel key. An app object `{"$b":N}` is byte-identical
+  // on the wire to a Bytes sentinel, so the peer's revive could not tell them
+  // apart. But that only matters when an envelope is actually framed (segments
+  // present); a segment-free result takes the plain-JSON path, is never revived,
+  // and MUST ride through unchanged (the back-compat invariant). So record use of
+  // the key during the walk and reject AFTER, only if bytes were also hoisted.
+  let sawReservedKey = false;
+  // Reason: walks arbitrary caller data structurally; Uint8Array leaves hoist to
+  // segments, other values pass through unchanged.
   const walk = (v: unknown): unknown => {
     if (v instanceof Uint8Array) {
       if (segments.length >= LIMITS.maxSegments) {
@@ -252,14 +261,10 @@ export function hoistSentinels(value: unknown): Hoisted {
       return v.map(walk);
     }
     if (v !== null && typeof v === 'object') {
-      // `$b` is the RESERVED sentinel key. Application data may not use it: an app
-      // object `{"$b":N}` is byte-identical on the wire to a Bytes sentinel, so
-      // the peer's revive would silently turn it back into bytes (or fail-closed).
-      // Reject at the source — the ONLY breakable point, since revive cannot tell
-      // the two apart. Our own sentinels are the returned `{[SENTINEL_KEY]:n}`
-      // objects above; they are never re-walked, so this only catches caller data.
+      // Our own sentinels are the returned `{[SENTINEL_KEY]:n}` objects above;
+      // they are never re-walked, so this only ever sees caller data.
       if (Object.hasOwn(v as Record<string, unknown>, SENTINEL_KEY)) {
-        throw new StoreNetEnvelopeError('bad-sentinel', `reserved key ${SENTINEL_KEY} in input`);
+        sawReservedKey = true;
       }
       const out: Record<string, unknown> = {};
       for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
@@ -269,7 +274,14 @@ export function hoistSentinels(value: unknown): Hoisted {
     }
     return v;
   };
-  return { control: walk(value), segments };
+  const control = walk(value);
+  if (segments.length > 0 && sawReservedKey) {
+    throw new StoreNetEnvelopeError(
+      'bad-sentinel',
+      `reserved key ${SENTINEL_KEY} in a byte-carrying value`
+    );
+  }
+  return { control, segments };
 }
 
 /**

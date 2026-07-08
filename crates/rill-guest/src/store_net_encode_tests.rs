@@ -113,19 +113,29 @@ fn bytes_value_hoists_to_envelope_and_revives() {
     assert_eq!(decode_value(&frame).unwrap(), v);
 }
 
-// `$b` is the reserved sentinel key; application data using it as an object key
-// would be byte-identical on the wire to a Bytes sentinel and get silently
-// revived into bytes by the peer. The encoder rejects it at the source — the
-// only place the ambiguity is breakable, since decode cannot tell them apart.
+// `$b` is the reserved sentinel key. It is only DANGEROUS when the value also
+// carries bytes: then an envelope is framed and the peer's `revive` cannot tell
+// an app `{"$b":N}` from a Bytes sentinel. Reject exactly that case. A `$b` key
+// in a segment-free value is HARMLESS — it takes the plain-JSON path, is never
+// revived, and MUST still encode (byte-for-byte back-compat with today's wire).
 #[test]
-fn app_data_using_reserved_b_key_is_rejected_on_encode() {
-    // Standalone (would otherwise take the segment-free Plain path).
+fn reserved_b_key_is_rejected_only_when_the_value_also_carries_bytes() {
+    // Harmless: standalone `$b`, no byte streams -> plain JSON, rides through.
     let plain = Value::Obj(std::vec![("$b".into(), Value::Num(0.0))]);
-    assert_eq!(encode_value(&plain).unwrap_err(), Reason::BadSentinel);
+    match encode_value(&plain).unwrap() {
+        Encoded::Plain(bytes) => assert_eq!(bytes, b"{\"$b\":0}"),
+        Encoded::Envelope(_) => panic!("a segment-free value must not be an envelope"),
+    }
 
-    // Mixed with a real Bytes field (the envelope path): the collision is most
-    // dangerous here, because segment 0 exists so the app `{"$b":0}` would revive
-    // to real bytes rather than fail-closed on an out-of-range index.
+    // Harmless nested inside an array, too (still no bytes).
+    let in_arr = Value::Arr(std::vec![Value::Obj(std::vec![(
+        "$b".into(),
+        Value::Num(1.0)
+    )])]);
+    assert!(matches!(encode_value(&in_arr).unwrap(), Encoded::Plain(_)));
+
+    // Dangerous: mixed with a real Bytes field (the envelope path). Segment 0
+    // exists, so the app `{"$b":0}` would revive to real bytes — reject it.
     let mixed = Value::Obj(std::vec![
         ("payload".into(), Value::Bytes(std::vec![9, 9, 9])),
         (
@@ -134,13 +144,6 @@ fn app_data_using_reserved_b_key_is_rejected_on_encode() {
         ),
     ]);
     assert_eq!(encode_value(&mixed).unwrap_err(), Reason::BadSentinel);
-
-    // Nested inside an array, too.
-    let in_arr = Value::Arr(std::vec![Value::Obj(std::vec![(
-        "$b".into(),
-        Value::Num(1.0)
-    )])]);
-    assert_eq!(encode_value(&in_arr).unwrap_err(), Reason::BadSentinel);
 }
 
 #[test]

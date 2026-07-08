@@ -67,8 +67,10 @@ pub enum Reason {
     BadSegmentRef,
     /// The reserved key `$b` used wrongly: on DECODE, a `{"$b":...}` object with
     /// a malformed shape (extra keys, or a non-integer / negative value); on
-    /// ENCODE, application data using `$b` as an object key (reserved — it would
-    /// be indistinguishable from a Bytes sentinel on the wire).
+    /// ENCODE, application data using `$b` as an object key in a value that ALSO
+    /// carries bytes (so it frames as an envelope, where the peer's `revive` could
+    /// not tell the app object from a Bytes sentinel). A `$b` key in a segment
+    /// -free value is harmless (plain-JSON path, never revived) and is allowed.
     BadSentinel,
 }
 
@@ -248,13 +250,25 @@ fn read_slice<'a>(buf: &'a [u8], pos: &mut usize, len: usize) -> Result<&'a [u8]
 pub fn encode_value(value: &Value) -> Result<Encoded, Reason> {
     let mut json = String::new();
     let mut segments: Vec<&[u8]> = Vec::new();
-    write_value(&mut json, value, &mut segments)?;
+    let mut saw_reserved_key = false;
+    write_value(&mut json, value, &mut segments, &mut saw_reserved_key)?;
     if segments.is_empty() {
         // Back-compat: a segment-free value is the plain raw-JSON body, byte-for
         // byte identical to today's wire — never an RBS1 frame. No MAX_JSON_BYTES
         // cap here: the raw-JSON path has none today and this must not change it.
+        // A literal `$b` app-key is HARMLESS here: no envelope is produced, so the
+        // peer receives plain JSON and never runs `revive` — the key rides through
+        // untouched. Only the envelope path below can misread it, so the reserved
+        // -key rejection lives there, keeping this path byte-for-byte unchanged.
         Ok(Encoded::Plain(json.into_bytes()))
     } else {
+        // An envelope IS produced, so the control plane will be `revive`d by the
+        // peer. A literal `$b` app-key would then be indistinguishable from a Bytes
+        // sentinel and silently turned into bytes — reject fail-closed. This is the
+        // ONLY breakable point, since revive cannot tell the two apart.
+        if saw_reserved_key {
+            return Err(Reason::BadSentinel);
+        }
         Ok(Encoded::Envelope(encode_envelope(&json, &segments)?))
     }
 }
@@ -263,6 +277,7 @@ fn write_value<'a>(
     out: &mut String,
     value: &'a Value,
     segments: &mut Vec<&'a [u8]>,
+    saw_reserved_key: &mut bool,
 ) -> Result<(), Reason> {
     match value {
         Value::Null => out.push_str("null"),
@@ -276,29 +291,27 @@ fn write_value<'a>(
                 if i > 0 {
                     out.push(',');
                 }
-                write_value(out, item, segments)?;
+                write_value(out, item, segments, saw_reserved_key)?;
             }
             out.push(']');
         }
         Value::Obj(entries) => {
             out.push('{');
             for (i, (key, val)) in entries.iter().enumerate() {
-                // `$b` is the RESERVED sentinel key. Application data may not use
-                // it: an app object `{"$b":N}` would be byte-identical on the wire
-                // to a Bytes sentinel, and the peer's `revive` would silently turn
-                // it back into bytes (or fail-closed). Reject at the source so the
-                // ambiguity can never be emitted — the ONLY place it is breakable,
-                // since decode cannot tell the two apart. The encoder's own
-                // sentinels are written by the `Bytes` arm below, never here.
+                // `$b` is the RESERVED sentinel key. Record that app data used it;
+                // `encode_value` rejects only if a byte stream also makes this an
+                // envelope (the sole path where the peer's `revive` would misread
+                // it as a Bytes sentinel). The encoder's own sentinels are written
+                // by the `Bytes` arm below, never here.
                 if key == "$b" {
-                    return Err(Reason::BadSentinel);
+                    *saw_reserved_key = true;
                 }
                 if i > 0 {
                     out.push(',');
                 }
                 crate::json_escape(out, key);
                 out.push(':');
-                write_value(out, val, segments)?;
+                write_value(out, val, segments, saw_reserved_key)?;
             }
             out.push('}');
         }

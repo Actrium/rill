@@ -110,10 +110,10 @@ describe('store-net-envelope — hoist / revive', () => {
     expect([...args.value]).toEqual([9, 9]);
   });
 
-  it('rejects app data using the reserved "$b" key on hoist (collision guard)', () => {
-    // An app object literally keyed `$b` is byte-identical on the wire to a Bytes
-    // sentinel; revive would silently turn it back into bytes. hoist must reject
-    // it at the source — parity with the Rust encoder's BadSentinel.
+  it('rejects reserved "$b" key ONLY when the value also carries bytes (collision guard)', () => {
+    // The collision is only breakable when an envelope is framed. A segment-free
+    // value with a literal `$b` key takes the plain-JSON path (never revived) and
+    // MUST ride through unchanged — the back-compat invariant. Parity with Rust.
     const reason = (fn: () => unknown) => {
       try {
         fn();
@@ -121,15 +121,24 @@ describe('store-net-envelope — hoist / revive', () => {
         expect(e).toBeInstanceOf(StoreNetEnvelopeError);
         return (e as StoreNetEnvelopeError).reason;
       }
-      throw new Error('expected a throw');
+      return null;
     };
-    expect(reason(() => hoistSentinels({ $b: 0 }))).toBe('bad-sentinel');
-    // Most dangerous mixed with a real byte stream (segment 0 exists, so the
-    // collision would revive to bytes, not fail-closed on an out-of-range index).
+    // Harmless: no byte streams -> passes through, no throw.
+    expect(reason(() => hoistSentinels({ $b: 0 }))).toBeNull();
+    expect(hoistSentinels({ $b: 0 })).toEqual({ control: { $b: 0 }, segments: [] });
+    expect(reason(() => hoistSentinels([{ $b: 1 }]))).toBeNull();
+    // Dangerous: mixed with a real byte stream (segment 0 exists, so the collision
+    // would revive to bytes, not fail-closed on an out-of-range index) -> reject.
     expect(reason(() => hoistSentinels({ payload: new Uint8Array([9]), meta: { $b: 0 } }))).toBe(
       'bad-sentinel'
     );
-    expect(reason(() => hoistSentinels([{ $b: 1 }]))).toBe('bad-sentinel');
+  });
+
+  it('a segment-free "$b" result yields the identical plain-JSON reply (back-compat)', () => {
+    // The always-on host reply path (resolve -> encodeResult) must return null for
+    // a non-binary result even when it contains `$b`, so the caller emits the
+    // byte-for-byte-same JSON.stringify bytes as before this guard existed.
+    expect(encodeRbs1Result({ $b: 7, note: 'plain' })).toBeNull();
   });
 });
 
