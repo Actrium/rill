@@ -47,7 +47,8 @@ TEST_SOURCES = \
 	$(TEST_DIR)/test_event_bus.cpp \
 	$(TEST_DIR)/test_instruction_codec.cpp \
 	$(TEST_DIR)/test_cdp_server.cpp \
-	$(TEST_DIR)/test_cdp_adapters.cpp
+	$(TEST_DIR)/test_cdp_adapters.cpp \
+	$(TEST_DIR)/test_engine_debug_target.cpp
 
 # Object files
 SRC_FLAT_OBJECTS = $(patsubst $(SRC_DIR)/%.cpp,$(BUILD_DIR)/src_%.o,$(SRC_FLAT))
