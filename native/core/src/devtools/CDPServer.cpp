@@ -14,6 +14,7 @@
  */
 
 #include "CDPServer.h"
+#include "EngineDebugTarget.h"
 
 #include <chrono>
 #include <climits>
@@ -149,11 +150,26 @@ void CDPServer::registerTenant(TenantId id, const std::string& title, const std:
   tenants_[id] = std::move(info);
 }
 
+void CDPServer::registerDebugTarget(TenantId id, std::shared_ptr<IEngineDebugTarget> target) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (target) {
+    tenantTargets_[id] = std::move(target);
+  } else {
+    tenantTargets_.erase(id);
+  }
+}
+
+void CDPServer::unregisterDebugTarget(TenantId id) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  tenantTargets_.erase(id);
+}
+
 void CDPServer::unregisterTenant(TenantId id) {
   std::lock_guard<std::mutex> lock(mutex_);
-  
+
   tenants_.erase(id);
-  
+  tenantTargets_.erase(id);
+
   // Close sessions for this tenant
   std::vector<SessionId> sessionsToRemove;
   for (const auto& [sessionId, session] : sessions_) {
@@ -273,23 +289,48 @@ void CDPServer::handleMessage(ConnectionId connId, const std::string& message) {
     return;
   }
 
-  // All session/routing operations must be under mutex to prevent races.
-  std::lock_guard<std::mutex> lock(mutex_);
-
-  // Get or create session
-  CDPSession* session = getOrCreateSessionLocked(connId, *request);
-  if (!session) {
-    CDPResponse error = makeError(request->id, CDPErrorCode::SESSION_NOT_FOUND, "Session not found");
-    sendResponse(connId, error);
-    return;
+  // Domain of this request ("Runtime.evaluate" -> "Runtime"), for the
+  // forward-vs-local routing decision below.
+  std::string domain;
+  {
+    size_t dotPos = request->method.find('.');
+    if (dotPos != std::string::npos) {
+      domain = request->method.substr(0, dotPos);
+    }
   }
 
-  // Update activity timestamp
-  session->lastActivityAt = currentTimeMs();
+  // Decide routing under the lock, then act. A domain owned by the tenant's
+  // debug target is forwarded verbatim OUTSIDE the lock, so the outbound sink
+  // may re-enter the server (sendToConnection) without self-deadlock.
+  std::shared_ptr<IEngineDebugTarget> forwardTarget;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
 
-  // Route to appropriate handler
-  CDPResponse response = routeRequest(*request, *session);
-  sendResponse(connId, response);
+    CDPSession* session = getOrCreateSessionLocked(connId, *request);
+    if (!session) {
+      CDPResponse error = makeError(request->id, CDPErrorCode::SESSION_NOT_FOUND, "Session not found");
+      sendResponse(connId, error);
+      return;
+    }
+    session->lastActivityAt = currentTimeMs();
+
+    auto it = tenantTargets_.find(session->tenantId);
+    if (it != tenantTargets_.end() && it->second && it->second->ownedDomains().owns(domain)) {
+      forwardTarget = it->second;  // forward below, outside the lock
+    } else {
+      // Local path: the built-in domain handler synthesizes the response.
+      CDPResponse response = routeRequest(*request, *session);
+      sendResponse(connId, response);
+      return;
+    }
+  }  // mutex_ released
+
+  // Owned domain: forward the raw CDP verbatim. The target is the sole authority
+  // — it emits the response and any events through the sink; we synthesize
+  // nothing, and outbound bypasses buildEventJSON (the target already speaks CDP).
+  forwardTarget->dispatch(message, [this, connId](const RawCdpMessage& out) {
+    sendToConnection(connId, out);
+  });
 }
 
 std::optional<CDPRequest> CDPServer::parseRequest(const std::string& json) {

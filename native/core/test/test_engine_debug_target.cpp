@@ -5,7 +5,9 @@
  */
 #include "test_framework.h"
 #include "../src/devtools/EngineDebugTarget.h"
+#include "../src/devtools/CDPServer.h"
 
+#include <memory>
 #include <vector>
 
 using namespace rill::devtools;
@@ -66,6 +68,90 @@ TestSuite createEngineDebugTargetTests() {
     t.dispatch("{\"id\":2,\"method\":\"Debugger.enable\"}",
                [&](const RawCdpMessage& m) { out.push_back(m); });
     assertEqual(out.size(), size_t(1), "just the response, no events");
+  }});
+
+  // --- CDPServer integration: the domain-ownership multiplexer ---
+
+  suite.cases.push_back({"CDPServer forwards an owned-domain request verbatim", []() {
+    struct MockTransport : public CDPTransport {
+      std::vector<std::pair<ConnectionId, std::string>> sent;
+      bool start(const std::string&, uint16_t) override { return true; }
+      void stop() override {}
+      void send(ConnectionId c, const std::string& m) override { sent.push_back({c, m}); }
+      void close(ConnectionId) override {}
+      void simulateConnect(ConnectionId c) { if (onConnect_) onConnect_(c); }
+      void simulateMessage(ConnectionId c, const std::string& m) { if (onMessage_) onMessage_(c, m); }
+    };
+    // Records what it received; replies with a recognizable response + event.
+    struct RecordingTarget : public IEngineDebugTarget {
+      std::vector<std::string> received;
+      DomainSet ownedDomains() const override {
+        DomainSet d; d.runtime = true; d.debugger = true; return d;
+      }
+      void dispatch(const RawCdpMessage& req, const CdpOutboundFn& out) override {
+        received.push_back(req);
+        out(std::string("{\"id\":7,\"result\":{\"from\":\"target\"}}"));
+        out(std::string("{\"method\":\"Debugger.scriptParsed\",\"params\":{}}"));
+      }
+    };
+
+    auto transport = std::make_shared<MockTransport>();
+    auto target = std::make_shared<RecordingTarget>();
+    CDPServerConfig config;
+    config.enabled = true;
+    config.transport = transport;
+    CDPServer server(config);
+    server.registerDebugTarget(0, target);  // tenant 0 (requests carry no sessionId)
+    server.start();
+    transport->simulateConnect(500);
+
+    transport->simulateMessage(500, R"({"id":7,"method":"Debugger.enable"})");
+
+    assertEqual(target->received.size(), size_t(1), "target received the request");
+    assertTrue(target->received[0].find("Debugger.enable") != std::string::npos, "verbatim request");
+    assertEqual(transport->sent.size(), size_t(2), "target response + event forwarded");
+    assertTrue(transport->sent[0].second.find("\"from\":\"target\"") != std::string::npos,
+               "response came from the target, not a local handler");
+    assertTrue(transport->sent[1].second.find("scriptParsed") != std::string::npos, "event forwarded");
+    server.stop();
+  }});
+
+  suite.cases.push_back({"CDPServer keeps a non-owned domain on the local handler", []() {
+    struct MockTransport : public CDPTransport {
+      std::vector<std::pair<ConnectionId, std::string>> sent;
+      bool start(const std::string&, uint16_t) override { return true; }
+      void stop() override {}
+      void send(ConnectionId c, const std::string& m) override { sent.push_back({c, m}); }
+      void close(ConnectionId) override {}
+      void simulateConnect(ConnectionId c) { if (onConnect_) onConnect_(c); }
+      void simulateMessage(ConnectionId c, const std::string& m) { if (onMessage_) onMessage_(c, m); }
+    };
+    struct RecordingTarget : public IEngineDebugTarget {
+      std::vector<std::string> received;
+      DomainSet ownedDomains() const override {
+        DomainSet d; d.runtime = true; d.debugger = true; return d;  // NOT DOM
+      }
+      void dispatch(const RawCdpMessage& req, const CdpOutboundFn& out) override {
+        received.push_back(req);
+        (void)out;
+      }
+    };
+
+    auto transport = std::make_shared<MockTransport>();
+    auto target = std::make_shared<RecordingTarget>();
+    CDPServerConfig config;
+    config.enabled = true;
+    config.transport = transport;
+    CDPServer server(config);
+    server.registerDebugTarget(0, target);
+    server.start();
+    transport->simulateConnect(501);
+
+    transport->simulateMessage(501, R"({"id":8,"method":"DOM.enable"})");
+
+    assertEqual(target->received.size(), size_t(0), "DOM not forwarded to the Runtime/Debugger target");
+    assertTrue(transport->sent.size() >= 1, "local DOM handler produced a response");
+    server.stop();
   }});
 
   return suite;

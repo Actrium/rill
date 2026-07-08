@@ -54,6 +54,7 @@ class RuntimeAdapter;
 class DOMAdapter;
 class DebuggerAdapter;
 class NetworkAdapter;
+class IEngineDebugTarget;
 
 // ============================================
 // Type Definitions
@@ -381,7 +382,25 @@ public:
    * Get all registered tenant IDs
    */
   std::vector<TenantId> getTenantIds() const;
-  
+
+  // ============================================
+  // Debug Targets (relay seam)
+  // ============================================
+
+  /**
+   * Register a per-tenant debug target. A request whose CDP domain the target
+   * owns (see IEngineDebugTarget::ownedDomains) is forwarded to it verbatim,
+   * OUTSIDE the server lock, and the target alone emits the response and any
+   * events — the built-in domain handlers are bypassed for that domain. Domains
+   * the target does not own keep going through the local handlers.
+   */
+  void registerDebugTarget(TenantId id, std::shared_ptr<IEngineDebugTarget> target);
+
+  /**
+   * Remove a tenant's debug target (its owned domains fall back to local handlers).
+   */
+  void unregisterDebugTarget(TenantId id);
+
   // ============================================
   // Event Emission
   // ============================================
@@ -598,6 +617,10 @@ private:
   
   // Registered tenants
   std::unordered_map<TenantId, TenantInfo> tenants_;
+
+  // Per-tenant debug targets (relay seam). A request for a domain the target
+  // owns is forwarded verbatim outside the lock; see handleMessage.
+  std::unordered_map<TenantId, std::shared_ptr<IEngineDebugTarget>> tenantTargets_;
   
   // Statistics
   std::atomic<uint64_t> messagesReceived_{0};
