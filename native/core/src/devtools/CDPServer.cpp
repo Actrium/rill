@@ -91,14 +91,24 @@ bool CDPServer::start() {
         });
     config_.transport->setOnDisconnect(
         [this](ConnectionId connId) {
-          std::lock_guard<std::mutex> lock(mutex_);
-          auto it = connectionToSession_.find(connId);
-          if (it != connectionToSession_.end()) {
-            sessions_.erase(it->second);
-            connectionToSession_.erase(it);
+          std::shared_ptr<IEngineDebugTarget> disconnectTarget;
+          {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto ct = connectionTarget_.find(connId);
+            if (ct != connectionTarget_.end()) {
+              disconnectTarget = ct->second;
+              connectionTarget_.erase(ct);
+            }
+            auto it = connectionToSession_.find(connId);
+            if (it != connectionToSession_.end()) {
+              sessions_.erase(it->second);
+              connectionToSession_.erase(it);
+            }
+            connectionTenant_.erase(connId);
+            connections_.erase(connId);
           }
-          connectionTenant_.erase(connId);
-          connections_.erase(connId);
+          // Outside the lock: let the target tear down per-connection state.
+          if (disconnectTarget) disconnectTarget->onClientDisconnect(connId);
         });
 
     if (!config_.transport->start(config_.host, config_.port)) {
@@ -124,12 +134,17 @@ void CDPServer::stop() {
   }
 
   // Close all sessions
+  std::vector<std::pair<ConnectionId, std::shared_ptr<IEngineDebugTarget>>> toDisconnect;
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    toDisconnect = detachConnectionTargetsLocked(nullptr);
     sessions_.clear();
     connectionToSession_.clear();
+    connectionTenant_.clear();
     connections_.clear();
   }
+  // Outside the lock: tear down each target's per-connection state.
+  for (auto& [connId, target] : toDisconnect) target->onClientDisconnect(connId);
 
   if (serverThread_ && serverThread_->joinable()) {
     serverThread_->join();
@@ -158,40 +173,70 @@ void CDPServer::registerTenant(TenantId id, const std::string& title, const std:
 }
 
 void CDPServer::registerDebugTarget(TenantId id, std::shared_ptr<IEngineDebugTarget> target) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (target) {
-    tenantTargets_[id] = std::move(target);
-  } else {
-    tenantTargets_.erase(id);
+  if (!target) {
+    unregisterDebugTarget(id);  // erase == unregister (disconnects bound clients)
+    return;
   }
+  std::lock_guard<std::mutex> lock(mutex_);
+  tenantTargets_[id] = std::move(target);
 }
 
 void CDPServer::unregisterDebugTarget(TenantId id) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  tenantTargets_.erase(id);
+  std::vector<std::pair<ConnectionId, std::shared_ptr<IEngineDebugTarget>>> toDisconnect;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto tt = tenantTargets_.find(id);
+    if (tt != tenantTargets_.end()) {
+      toDisconnect = detachConnectionTargetsLocked(tt->second);
+      tenantTargets_.erase(tt);
+    }
+  }
+  for (auto& [connId, target] : toDisconnect) target->onClientDisconnect(connId);
 }
 
 void CDPServer::unregisterTenant(TenantId id) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<std::pair<ConnectionId, std::shared_ptr<IEngineDebugTarget>>> toDisconnect;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
 
-  tenants_.erase(id);
-  tenantTargets_.erase(id);
+    tenants_.erase(id);
+    auto tt = tenantTargets_.find(id);
+    if (tt != tenantTargets_.end()) {
+      toDisconnect = detachConnectionTargetsLocked(tt->second);
+      tenantTargets_.erase(tt);
+    }
 
-  // Close sessions for this tenant
-  std::vector<SessionId> sessionsToRemove;
-  for (const auto& [sessionId, session] : sessions_) {
-    if (session.tenantId == id) {
-      sessionsToRemove.push_back(sessionId);
+    // Close sessions for this tenant
+    std::vector<SessionId> sessionsToRemove;
+    for (const auto& [sessionId, session] : sessions_) {
+      if (session.tenantId == id) {
+        sessionsToRemove.push_back(sessionId);
+      }
+    }
+
+    for (const auto& sessionId : sessionsToRemove) {
+      auto it = sessions_.find(sessionId);
+      if (it != sessions_.end()) {
+        connectionToSession_.erase(it->second.connectionId);
+        sessions_.erase(it);
+      }
     }
   }
-  
-  for (const auto& sessionId : sessionsToRemove) {
-    auto it = sessions_.find(sessionId);
-    if (it != sessions_.end()) {
-      connectionToSession_.erase(it->second.connectionId);
-      sessions_.erase(it);
+  for (auto& [connId, target] : toDisconnect) target->onClientDisconnect(connId);
+}
+
+std::vector<std::pair<ConnectionId, std::shared_ptr<IEngineDebugTarget>>>
+CDPServer::detachConnectionTargetsLocked(const std::shared_ptr<IEngineDebugTarget>& target) {
+  std::vector<std::pair<ConnectionId, std::shared_ptr<IEngineDebugTarget>>> detached;
+  for (auto it = connectionTarget_.begin(); it != connectionTarget_.end();) {
+    if (!target || it->second == target) {
+      detached.emplace_back(it->first, it->second);
+      it = connectionTarget_.erase(it);
+    } else {
+      ++it;
     }
   }
+  return detached;
 }
 
 bool CDPServer::hasTenant(TenantId id) const {
@@ -310,6 +355,7 @@ void CDPServer::handleMessage(ConnectionId connId, const std::string& message) {
   // debug target is forwarded verbatim OUTSIDE the lock, so the outbound sink
   // may re-enter the server (sendToConnection) without self-deadlock.
   std::shared_ptr<IEngineDebugTarget> forwardTarget;
+  bool needClientConnect = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -324,6 +370,9 @@ void CDPServer::handleMessage(ConnectionId connId, const std::string& message) {
     auto it = tenantTargets_.find(session->tenantId);
     if (it != tenantTargets_.end() && it->second && it->second->ownedDomains().owns(domain)) {
       forwardTarget = it->second;  // forward below, outside the lock
+      // Bind this connection to the target on first owned-domain contact so the
+      // target can install its persistent outbound sink.
+      needClientConnect = connectionTarget_.try_emplace(connId, forwardTarget).second;
     } else {
       // Local path: the built-in domain handler synthesizes the response.
       CDPResponse response = routeRequest(*request, *session);
@@ -332,12 +381,18 @@ void CDPServer::handleMessage(ConnectionId connId, const std::string& message) {
     }
   }  // mutex_ released
 
-  // Owned domain: forward the raw CDP verbatim. The target is the sole authority
-  // — it emits the response and any events through the sink; we synthesize
-  // nothing, and outbound bypasses buildEventJSON (the target already speaks CDP).
-  forwardTarget->dispatch(message, [this, connId](const RawCdpMessage& out) {
-    sendToConnection(connId, out);
-  });
+  // Owned domain: the target is the sole authority. On first contact install a
+  // persistent per-connection sink (the target emits its response AND any async
+  // events through it); then forward the raw request verbatim. Both run with
+  // mutex_ released so the sink may re-enter the server (sendToConnection)
+  // without self-deadlock, and outbound bypasses buildEventJSON (the target
+  // already speaks CDP).
+  if (needClientConnect) {
+    forwardTarget->onClientConnect(connId, [this, connId](const RawCdpMessage& out) {
+      sendToConnection(connId, out);
+    });
+  }
+  forwardTarget->dispatch(connId, message);
 }
 
 std::optional<CDPRequest> CDPServer::parseRequest(const std::string& json) {

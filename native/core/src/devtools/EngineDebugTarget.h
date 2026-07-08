@@ -14,6 +14,8 @@
  */
 #pragma once
 
+#include "ConnectionId.h"
+
 #include <functional>
 #include <string>
 
@@ -24,9 +26,12 @@ namespace rill::devtools {
 // messages, never parsed method-by-method.
 using RawCdpMessage = std::string;
 
-// Sink the target uses to push each raw CDP message back to the DevTools client.
-// One request may produce 0..N outbound messages (its response plus any events).
-// Called by the target during dispatch(); see the threading contract there.
+// Persistent per-connection sink the target uses to push raw CDP messages back
+// to the DevTools client. Installed once at onClientConnect() and used for the
+// life of the connection — because a CDP-native agent emits its responses AND
+// its async events (Debugger.paused, scriptParsed, ...) OUTSIDE the scope of any
+// single request. One request may produce 0..N outbound messages, and events
+// may arrive with no request in flight at all.
 using CdpOutboundFn = std::function<void(const RawCdpMessage&)>;
 
 // The CDP domains a target owns end-to-end. When a target owns a domain,
@@ -68,15 +73,28 @@ public:
   // forward-vs-local; keep it cheap and stable for the target's lifetime.
   virtual DomainSet ownedDomains() const = 0;
 
-  // Consume one raw CDP request and emit 0..N raw CDP messages (its response and
-  // any events) through `out`.
+  // A DevTools client has connected and its first owned-domain request is about
+  // to arrive. `persistentSink` is how the target pushes every subsequent raw
+  // CDP message for this connection — responses AND async events — for the life
+  // of the connection. Called once per (connection, target) pair, before the
+  // first dispatch() for that connection.
+  virtual void onClientConnect(ConnectionId conn, CdpOutboundFn persistentSink) = 0;
+
+  // The client connection is gone. Tear down any per-connection state (e.g. a
+  // CDP agent) and drop the persistent sink. After this, the sink must not be
+  // called for `conn` again.
+  virtual void onClientDisconnect(ConnectionId conn) = 0;
+
+  // Consume one raw CDP request from `conn`. Responses and events are emitted
+  // asynchronously through that connection's persistent sink (see
+  // onClientConnect) — NOT returned here — because a CDP-native agent may reply
+  // and raise events from another thread after this returns.
   //
-  // Threading contract: CDPServer calls dispatch() with its internal mutex
-  // RELEASED, precisely so `out` may re-enter the server (e.g. to resolve the
-  // connection) without self-deadlock. Implementations must not assume the
-  // server lock is held, and must not block the calling thread on the client.
-  virtual void dispatch(const RawCdpMessage& rawCdpRequest,
-                        const CdpOutboundFn& out) = 0;
+  // Threading contract: CDPServer calls onClientConnect()/dispatch() with its
+  // internal mutex RELEASED, precisely so the sink may re-enter the server
+  // (sendToConnection) without self-deadlock. Implementations must not assume
+  // the server lock is held, and must not block the calling thread on the client.
+  virtual void dispatch(ConnectionId conn, const RawCdpMessage& rawCdpRequest) = 0;
 };
 
 }  // namespace rill::devtools

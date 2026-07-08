@@ -42,8 +42,8 @@ TestSuite createAdapterDebugTargetTests() {
     CDPServer server;
     AdapterDebugTarget target(makeAdapter(server), 1);
     std::vector<std::string> out;
-    target.dispatch(R"({"id":11,"method":"Debugger.enable"})",
-                    [&](const RawCdpMessage& m) { out.push_back(m); });
+    target.onClientConnect(1, [&](const RawCdpMessage& m) { out.push_back(m); });
+    target.dispatch(1, R"({"id":11,"method":"Debugger.enable"})");
     assertEqual(out.size(), size_t(1), "one response");
     assertTrue(out[0].find("\"id\":11") != std::string::npos, "echoes id 11");
     assertTrue(out[0].find("\"error\"") == std::string::npos, "not an error");
@@ -53,8 +53,8 @@ TestSuite createAdapterDebugTargetTests() {
     CDPServer server;
     AdapterDebugTarget target(makeAdapter(server), 1);
     std::vector<std::string> out;
-    target.dispatch(R"({"id":12,"method":"Debugger.bogusMethod"})",
-                    [&](const RawCdpMessage& m) { out.push_back(m); });
+    target.onClientConnect(1, [&](const RawCdpMessage& m) { out.push_back(m); });
+    target.dispatch(1, R"({"id":12,"method":"Debugger.bogusMethod"})");
     assertEqual(out.size(), size_t(1), "one message");
     assertTrue(out[0].find("\"error\"") != std::string::npos, "is an error");
     assertTrue(out[0].find("-32601") != std::string::npos, "METHOD_NOT_FOUND code");

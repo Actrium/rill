@@ -17,6 +17,8 @@
 #include "EngineDebugTarget.h"
 
 #include <memory>
+#include <mutex>
+#include <unordered_map>
 
 namespace rill::devtools {
 
@@ -27,11 +29,16 @@ public:
   AdapterDebugTarget(std::shared_ptr<DebuggerAdapter> adapter, TenantId tenantId);
 
   DomainSet ownedDomains() const override;
-  void dispatch(const RawCdpMessage& rawCdpRequest, const CdpOutboundFn& out) override;
+  void onClientConnect(ConnectionId conn, CdpOutboundFn persistentSink) override;
+  void onClientDisconnect(ConnectionId conn) override;
+  void dispatch(ConnectionId conn, const RawCdpMessage& rawCdpRequest) override;
 
 private:
   std::shared_ptr<DebuggerAdapter> adapter_;
   TenantId tenantId_;
+
+  std::mutex sinksMutex_;
+  std::unordered_map<ConnectionId, CdpOutboundFn> sinks_;
 };
 
 }  // namespace rill::devtools

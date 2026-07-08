@@ -46,6 +46,8 @@
 #include <atomic>
 #include <optional>
 
+#include "ConnectionId.h"
+
 namespace rill::devtools {
 
 // Forward declarations
@@ -65,11 +67,7 @@ class IEngineDebugTarget;
  */
 using TenantId = uint32_t;
 
-/**
- * WebSocket connection identifier
- * (forward-declared here for CDPTransport)
- */
-using ConnectionId = uint64_t;
+// ConnectionId lives in ConnectionId.h (shared with the relay seam).
 
 // ============================================
 // WebSocket Transport Interface
@@ -561,6 +559,14 @@ private:
    * Get or create session from request (caller must hold mutex_)
    */
   CDPSession* getOrCreateSessionLocked(ConnectionId connId, const CDPRequest& request);
+
+  /**
+   * Remove and return the (connection, target) bindings matching `target`
+   * (nullptr = all), so the caller can invoke onClientDisconnect OUTSIDE the
+   * lock. Caller must hold mutex_.
+   */
+  std::vector<std::pair<ConnectionId, std::shared_ptr<IEngineDebugTarget>>>
+  detachConnectionTargetsLocked(const std::shared_ptr<IEngineDebugTarget>& target);
   
   // ============================================
   // Domain Handlers
@@ -625,6 +631,10 @@ private:
   // Tenant bound at connect time from the "/tenant/{id}" upgrade path. Takes
   // precedence over the per-request sessionId when creating a session.
   std::unordered_map<ConnectionId, TenantId> connectionTenant_;
+  // Connections that have been handed to a debug target (first owned-domain
+  // request installs the target's persistent sink). Drives onClientDisconnect on
+  // teardown so the target can drop per-connection state.
+  std::unordered_map<ConnectionId, std::shared_ptr<IEngineDebugTarget>> connectionTarget_;
   
   // Registered tenants
   std::unordered_map<TenantId, TenantInfo> tenants_;

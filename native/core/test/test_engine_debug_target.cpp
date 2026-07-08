@@ -8,6 +8,7 @@
 #include "../src/devtools/CDPServer.h"
 
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 using namespace rill::devtools;
@@ -29,13 +30,24 @@ public:
     return d;
   }
 
-  void dispatch(const RawCdpMessage& req, const CdpOutboundFn& out) override {
+  void onClientConnect(ConnectionId conn, CdpOutboundFn sink) override {
+    sinks_[conn] = std::move(sink);
+  }
+  void onClientDisconnect(ConnectionId conn) override { sinks_.erase(conn); }
+
+  void dispatch(ConnectionId conn, const RawCdpMessage& req) override {
     (void)req;
+    auto it = sinks_.find(conn);
+    if (it == sinks_.end()) return;
+    const auto& out = it->second;
     out(std::string("{\"id\":1,\"result\":{}}"));
     if (emitEvent) {
       out(std::string("{\"method\":\"Debugger.scriptParsed\",\"params\":{}}"));
     }
   }
+
+private:
+  std::unordered_map<ConnectionId, CdpOutboundFn> sinks_;
 };
 
 TestSuite createEngineDebugTargetTests() {
@@ -51,11 +63,11 @@ TestSuite createEngineDebugTargetTests() {
     assertFalse(d.owns("Nonsense"), "unknown domain");
   }});
 
-  suite.cases.push_back({"dispatch emits response + event through the sink", []() {
+  suite.cases.push_back({"dispatch emits response + event through the persistent sink", []() {
     FakeAgentTarget t;
     std::vector<std::string> out;
-    t.dispatch("{\"id\":1,\"method\":\"Runtime.evaluate\"}",
-               [&](const RawCdpMessage& m) { out.push_back(m); });
+    t.onClientConnect(1, [&](const RawCdpMessage& m) { out.push_back(m); });
+    t.dispatch(1, "{\"id\":1,\"method\":\"Runtime.evaluate\"}");
     assertEqual(out.size(), size_t(2), "response + event");
     assertTrue(out[0].find("\"result\"") != std::string::npos, "first is a response");
     assertTrue(out[1].find("scriptParsed") != std::string::npos, "second is an event");
@@ -65,8 +77,8 @@ TestSuite createEngineDebugTargetTests() {
     FakeAgentTarget t;
     t.emitEvent = false;
     std::vector<std::string> out;
-    t.dispatch("{\"id\":2,\"method\":\"Debugger.enable\"}",
-               [&](const RawCdpMessage& m) { out.push_back(m); });
+    t.onClientConnect(1, [&](const RawCdpMessage& m) { out.push_back(m); });
+    t.dispatch(1, "{\"id\":2,\"method\":\"Debugger.enable\"}");
     assertEqual(out.size(), size_t(1), "just the response, no events");
   }});
 
@@ -85,13 +97,17 @@ TestSuite createEngineDebugTargetTests() {
     // Records what it received; replies with a recognizable response + event.
     struct RecordingTarget : public IEngineDebugTarget {
       std::vector<std::string> received;
+      std::unordered_map<ConnectionId, CdpOutboundFn> sinks;
       DomainSet ownedDomains() const override {
         DomainSet d; d.runtime = true; d.debugger = true; return d;
       }
-      void dispatch(const RawCdpMessage& req, const CdpOutboundFn& out) override {
+      void onClientConnect(ConnectionId c, CdpOutboundFn s) override { sinks[c] = std::move(s); }
+      void onClientDisconnect(ConnectionId c) override { sinks.erase(c); }
+      void dispatch(ConnectionId c, const RawCdpMessage& req) override {
         received.push_back(req);
-        out(std::string("{\"id\":7,\"result\":{\"from\":\"target\"}}"));
-        out(std::string("{\"method\":\"Debugger.scriptParsed\",\"params\":{}}"));
+        auto it = sinks.find(c); if (it == sinks.end()) return;
+        it->second(std::string("{\"id\":7,\"result\":{\"from\":\"target\"}}"));
+        it->second(std::string("{\"method\":\"Debugger.scriptParsed\",\"params\":{}}"));
       }
     };
 
@@ -131,9 +147,10 @@ TestSuite createEngineDebugTargetTests() {
       DomainSet ownedDomains() const override {
         DomainSet d; d.runtime = true; d.debugger = true; return d;  // NOT DOM
       }
-      void dispatch(const RawCdpMessage& req, const CdpOutboundFn& out) override {
+      void onClientConnect(ConnectionId, CdpOutboundFn) override {}
+      void onClientDisconnect(ConnectionId) override {}
+      void dispatch(ConnectionId, const RawCdpMessage& req) override {
         received.push_back(req);
-        (void)out;
       }
     };
 

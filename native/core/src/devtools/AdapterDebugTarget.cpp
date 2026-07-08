@@ -55,7 +55,25 @@ DomainSet AdapterDebugTarget::ownedDomains() const {
   return d;
 }
 
-void AdapterDebugTarget::dispatch(const RawCdpMessage& raw, const CdpOutboundFn& out) {
+void AdapterDebugTarget::onClientConnect(ConnectionId conn, CdpOutboundFn persistentSink) {
+  std::lock_guard<std::mutex> lock(sinksMutex_);
+  sinks_[conn] = std::move(persistentSink);
+}
+
+void AdapterDebugTarget::onClientDisconnect(ConnectionId conn) {
+  std::lock_guard<std::mutex> lock(sinksMutex_);
+  sinks_.erase(conn);
+}
+
+void AdapterDebugTarget::dispatch(ConnectionId conn, const RawCdpMessage& raw) {
+  CdpOutboundFn out;
+  {
+    std::lock_guard<std::mutex> lock(sinksMutex_);
+    auto it = sinks_.find(conn);
+    if (it == sinks_.end()) return;  // no client sink installed; nothing to reply to
+    out = it->second;
+  }
+
   int id = cdp::parseJSONInt(raw, "id").value_or(0);
   auto methodOpt = cdp::parseJSONString(raw, "method");
   if (!methodOpt) return;

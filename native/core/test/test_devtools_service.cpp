@@ -10,6 +10,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 using namespace rill::devtools;
@@ -28,13 +29,18 @@ struct MockTransport : public CDPTransport {
   void simulateMessage(ConnectionId c, const std::string& m) { if (onMessage_) onMessage_(c, m); }
 };
 
-// Records what it received; owns the Debugger domain.
+// Records what it received; owns the Debugger domain. Emits via the persistent
+// per-connection sink installed at onClientConnect.
 struct RecordingTarget : public IEngineDebugTarget {
   std::vector<std::string> received;
+  std::unordered_map<ConnectionId, CdpOutboundFn> sinks;
   DomainSet ownedDomains() const override { DomainSet d; d.debugger = true; return d; }
-  void dispatch(const RawCdpMessage& req, const CdpOutboundFn& out) override {
+  void onClientConnect(ConnectionId c, CdpOutboundFn s) override { sinks[c] = std::move(s); }
+  void onClientDisconnect(ConnectionId c) override { sinks.erase(c); }
+  void dispatch(ConnectionId c, const RawCdpMessage& req) override {
     received.push_back(req);
-    out(std::string("{\"id\":1,\"result\":{}}"));
+    auto it = sinks.find(c);
+    if (it != sinks.end()) it->second(std::string("{\"id\":1,\"result\":{}}"));
   }
 };
 
