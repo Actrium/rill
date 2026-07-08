@@ -2519,14 +2519,13 @@ mod tests {
         // dealloc, so every large binary RESPONSE leaked. This drives that exact
         // path many times — allocate an oversized buffer (off-arena), hand it to
         // `resolve` (which copies it out then frees the fallback), then drain the
-        // copy — and asserts the net live heap returns to baseline. Extends the
-        // plateau discipline of the churn test above: hundreds of MiB flow through
-        // the return path yet the heap stays bounded. Without the fix, live would
-        // grow by iterations*BIG (tens of MiB) and this assertion would fail.
-        //
-        // Uses the test-build counting global allocator (`test_alloc::LIVE`).
-        // Concurrent tests perturb the counter only by small allocations, far
-        // below the multi-MiB threshold, so the delta stays attributable here.
+        // copy. Two independent checks then hold: the fallback tracking table
+        // returns to baseline (bookkeeping), AND the reused fallback addresses stay
+        // clustered rather than marching forward by BIG per iteration (proving the
+        // bytes are actually reclaimed, not merely un-tracked). Both are chosen to
+        // be immune to the shared-heap noise a parallel `cargo test` run injects —
+        // hence NO dependence on the process-global `test_alloc::LIVE` counter,
+        // whose multi-MiB concurrent jitter made an earlier threshold flaky.
         #[test]
         fn return_path_frees_oversized_fallback_no_leak() {
             use crate::rt;
@@ -2546,7 +2545,8 @@ mod tests {
             // this loop must therefore be zero (every fallback we make is freed by
             // `resolve`). Prior leftovers are present at both snapshots.
             let fb_baseline = rt::fallback_count();
-            for _ in 0..ITERS {
+            let mut addrs = [0usize; ITERS];
+            for slot in addrs.iter_mut() {
                 let p = rt::alloc(BIG);
                 assert!(!p.is_null(), "fallback alloc must succeed");
                 // Precondition of the fix: the buffer is OUTSIDE the WIRE arena,
@@ -2555,6 +2555,7 @@ mod tests {
                     !rt::wire_contains(p),
                     "an oversized alloc must fall back off-arena"
                 );
+                *slot = p as usize;
                 // The host wrote BIG bytes here (uninitialized-but-owned memory is
                 // fine to copy); `resolve` copies it out and frees the fallback.
                 unsafe { rt::resolve(CB, 1, p, BIG) };
@@ -2564,17 +2565,34 @@ mod tests {
                 assert!(taken.is_some(), "the copied result must be retrievable");
                 drop(taken);
             }
-            // DETERMINISTIC proof the fix works: the fallback table returned to
-            // its baseline — every off-arena buffer THIS test made was freed by
-            // `resolve` (a leak would leave up to ITERS tracked entries). Taken as
-            // a delta so a prior test's leftover entries don't matter and — key for
-            // a parallel run — the check is immune to concurrent global-heap noise.
-            // That talc actually reclaims the freed bytes is proven separately by
-            // the R3 churn/plateau test.
+
+            // Check 1 — bookkeeping: the fallback table returned to its baseline,
+            // so every off-arena buffer THIS test made was un-tracked by `resolve`
+            // (a leak would leave up to ITERS entries). Taken as a delta so a prior
+            // test's leftover entries don't matter, and — key for a parallel run —
+            // immune to concurrent global-heap noise.
             assert_eq!(
                 rt::fallback_count(),
                 fb_baseline,
-                "every oversized fallback must be freed (table back to baseline)"
+                "every oversized fallback must be un-tracked (table back to baseline)"
+            );
+
+            // Check 2 — actual RECLAMATION, not just bookkeeping: because each
+            // buffer is freed before the next same-size request, talc hands the
+            // freed block straight back, so the addresses CLUSTER. A regression
+            // that drops the `dealloc` but keeps the table `remove` would march the
+            // address forward by ~BIG every iteration — a span of ITERS*BIG (~4.3
+            // MiB). The generous 8*BIG ceiling separates reclamation (span ~0, plus
+            // at most a little jitter if a concurrent alloc briefly borrows the
+            // freed slot) from a real leak, without measuring the shared LIVE
+            // counter (which concurrent tests make too noisy to threshold).
+            let min = addrs.iter().copied().min().unwrap();
+            let max = addrs.iter().copied().max().unwrap();
+            assert!(
+                max - min < 8 * BIG,
+                "return path leaked: fallback addresses spanned {} bytes over {ITERS} freed \
+                 returns (reclamation would keep them clustered)",
+                max - min
             );
         }
     }

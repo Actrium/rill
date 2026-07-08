@@ -109,6 +109,28 @@ describe('store-net-envelope — hoist / revive', () => {
     expect(args.value).toBeInstanceOf(Uint8Array);
     expect([...args.value]).toEqual([9, 9]);
   });
+
+  it('rejects app data using the reserved "$b" key on hoist (collision guard)', () => {
+    // An app object literally keyed `$b` is byte-identical on the wire to a Bytes
+    // sentinel; revive would silently turn it back into bytes. hoist must reject
+    // it at the source — parity with the Rust encoder's BadSentinel.
+    const reason = (fn: () => unknown) => {
+      try {
+        fn();
+      } catch (e) {
+        expect(e).toBeInstanceOf(StoreNetEnvelopeError);
+        return (e as StoreNetEnvelopeError).reason;
+      }
+      throw new Error('expected a throw');
+    };
+    expect(reason(() => hoistSentinels({ $b: 0 }))).toBe('bad-sentinel');
+    // Most dangerous mixed with a real byte stream (segment 0 exists, so the
+    // collision would revive to bytes, not fail-closed on an out-of-range index).
+    expect(reason(() => hoistSentinels({ payload: new Uint8Array([9]), meta: { $b: 0 } }))).toBe(
+      'bad-sentinel'
+    );
+    expect(reason(() => hoistSentinels([{ $b: 1 }]))).toBe('bad-sentinel');
+  });
 });
 
 // ============================================================

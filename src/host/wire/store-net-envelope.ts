@@ -252,6 +252,15 @@ export function hoistSentinels(value: unknown): Hoisted {
       return v.map(walk);
     }
     if (v !== null && typeof v === 'object') {
+      // `$b` is the RESERVED sentinel key. Application data may not use it: an app
+      // object `{"$b":N}` is byte-identical on the wire to a Bytes sentinel, so
+      // the peer's revive would silently turn it back into bytes (or fail-closed).
+      // Reject at the source — the ONLY breakable point, since revive cannot tell
+      // the two apart. Our own sentinels are the returned `{[SENTINEL_KEY]:n}`
+      // objects above; they are never re-walked, so this only catches caller data.
+      if (Object.hasOwn(v as Record<string, unknown>, SENTINEL_KEY)) {
+        throw new StoreNetEnvelopeError('bad-sentinel', `reserved key ${SENTINEL_KEY} in input`);
+      }
       const out: Record<string, unknown> = {};
       for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
         out[k] = walk(val);

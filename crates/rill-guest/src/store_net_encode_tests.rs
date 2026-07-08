@@ -113,6 +113,36 @@ fn bytes_value_hoists_to_envelope_and_revives() {
     assert_eq!(decode_value(&frame).unwrap(), v);
 }
 
+// `$b` is the reserved sentinel key; application data using it as an object key
+// would be byte-identical on the wire to a Bytes sentinel and get silently
+// revived into bytes by the peer. The encoder rejects it at the source — the
+// only place the ambiguity is breakable, since decode cannot tell them apart.
+#[test]
+fn app_data_using_reserved_b_key_is_rejected_on_encode() {
+    // Standalone (would otherwise take the segment-free Plain path).
+    let plain = Value::Obj(std::vec![("$b".into(), Value::Num(0.0))]);
+    assert_eq!(encode_value(&plain).unwrap_err(), Reason::BadSentinel);
+
+    // Mixed with a real Bytes field (the envelope path): the collision is most
+    // dangerous here, because segment 0 exists so the app `{"$b":0}` would revive
+    // to real bytes rather than fail-closed on an out-of-range index.
+    let mixed = Value::Obj(std::vec![
+        ("payload".into(), Value::Bytes(std::vec![9, 9, 9])),
+        (
+            "meta".into(),
+            Value::Obj(std::vec![("$b".into(), Value::Num(0.0))])
+        ),
+    ]);
+    assert_eq!(encode_value(&mixed).unwrap_err(), Reason::BadSentinel);
+
+    // Nested inside an array, too.
+    let in_arr = Value::Arr(std::vec![Value::Obj(std::vec![(
+        "$b".into(),
+        Value::Num(1.0)
+    )])]);
+    assert_eq!(encode_value(&in_arr).unwrap_err(), Reason::BadSentinel);
+}
+
 #[test]
 fn nested_sentinels_in_object_and_array() {
     let v = Value::Obj(std::vec![

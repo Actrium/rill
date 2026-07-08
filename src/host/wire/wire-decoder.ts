@@ -476,6 +476,16 @@ class WireDecoder {
         // strings are interned like every other string; sourceLine is inline u32.
         const fnId = this.internRef();
         const fnFlags = this.readU8();
+        // bits 3..7 are reserved and MUST be written 0 (contracts/op-batch-wire.json
+        // values.FUNCTION flags note). A set reserved bit implies unknown trailing
+        // fields we cannot length, so reject fail-closed rather than desync the
+        // stream — matching the C++ decoder (WireDecoder.cpp: (fnFlags & 0xF8)).
+        if ((fnFlags & 0xf8) !== 0) {
+          throw new WireDecodeError(
+            `FUNCTION reserved flag bit set: 0x${fnFlags.toString(16)}`,
+            this.pos - 1
+          );
+        }
         const fn: SerializedFunction = { __type: 'function', __fnId: fnId };
         if ((fnFlags & 0x01) !== 0) fn.__name = this.internRef();
         if ((fnFlags & 0x02) !== 0) fn.__sourceFile = this.internRef();

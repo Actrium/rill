@@ -65,8 +65,10 @@ pub enum Reason {
     EnvelopeTooBig,
     /// A `{"$b":N}` sentinel references `N` outside `[0, segCount)`.
     BadSegmentRef,
-    /// The reserved key `$b` used with a malformed shape (extra keys, or a
-    /// non-integer / negative value) inside an RBS1 frame.
+    /// The reserved key `$b` used wrongly: on DECODE, a `{"$b":...}` object with
+    /// a malformed shape (extra keys, or a non-integer / negative value); on
+    /// ENCODE, application data using `$b` as an object key (reserved — it would
+    /// be indistinguishable from a Bytes sentinel on the wire).
     BadSentinel,
 }
 
@@ -281,6 +283,16 @@ fn write_value<'a>(
         Value::Obj(entries) => {
             out.push('{');
             for (i, (key, val)) in entries.iter().enumerate() {
+                // `$b` is the RESERVED sentinel key. Application data may not use
+                // it: an app object `{"$b":N}` would be byte-identical on the wire
+                // to a Bytes sentinel, and the peer's `revive` would silently turn
+                // it back into bytes (or fail-closed). Reject at the source so the
+                // ambiguity can never be emitted — the ONLY place it is breakable,
+                // since decode cannot tell the two apart. The encoder's own
+                // sentinels are written by the `Bytes` arm below, never here.
+                if key == "$b" {
+                    return Err(Reason::BadSentinel);
+                }
                 if i > 0 {
                     out.push(',');
                 }

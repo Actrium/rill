@@ -673,6 +673,21 @@ TestSuite createWireDecoderTests() {
     assertFalse(fn.hasFuncSourceLine, "no sourceLine");
   }});
 
+  // --- Fail-closed: FUNCTION value with a reserved flag bit (0x08) set ---
+  // The bare-function frame above, with the fnFlags byte flipped from 0x00 to
+  // 0x08. bits 3..7 are reserved and MUST be 0; a set reserved bit implies
+  // unknown trailing fields we cannot length, so the decoder rejects rather than
+  // desync. Locks the (fnFlags & 0xF8) guard; the TS decoder must match.
+  suite.cases.push_back({"fail-closed: FUNCTION reserved flag bit", []() {
+    auto bytes = hexToBytes(
+        "52494c4c0100ef03000001000000000003000400566965770100760400666e5f37"
+        "010100000000000100010007020008");
+    WireDecoder dec;
+    auto r = dec.decode(bytes.data(), bytes.size());
+    assertFalse(r.has_value(), "should reject reserved FUNCTION flag bit");
+    assertTrue(dec.lastError() == WireError::BadFlags, "BadFlags");
+  }});
+
   // --- Fail-closed: buffer shorter than the 16-byte header ---
   suite.cases.push_back({"fail-closed: truncated header", []() {
     auto bytes = hexToBytes(kEmptyBatch);

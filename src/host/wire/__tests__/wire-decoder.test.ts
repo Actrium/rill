@@ -182,6 +182,56 @@ describe('wire-decoder FUNCTION debug metadata', () => {
   });
 });
 
+// The golden/matrix only pin flags 0x00 (bare) and 0x07 (all three). These pin
+// every INDIVIDUAL metadata bit and — critically — the field ORDER when a middle
+// field is absent (0x05 = name + sourceLine, sourceFile skipped), which a decoder
+// that mis-orders or reads an absent field would get wrong while still passing
+// 0x00/0x07. fnId + the string fields resolve against the ["View","k"] intern
+// table (index 0 'View', index 1 'k'). Parity with the Rust encoder / C++ decoder.
+describe('wire-decoder FUNCTION flag combinations', () => {
+  const decodeFn = (buf: ArrayBuffer) => {
+    const { ops } = decodeToOps(buf);
+    return (ops[0] as Extract<SerializedOperation, { op: 'CREATE' }>).props.k;
+  };
+
+  it('decodes name-only (flags 0x01)', () => {
+    const buf = batchWithValue((w) => w.u8(0x07).u16(0).u8(0x01).u16(1));
+    expect(decodeFn(buf)).toEqual({ __type: 'function', __fnId: 'View', __name: 'k' });
+  });
+
+  it('decodes sourceFile-only (flags 0x02)', () => {
+    const buf = batchWithValue((w) => w.u8(0x07).u16(0).u8(0x02).u16(1));
+    expect(decodeFn(buf)).toEqual({ __type: 'function', __fnId: 'View', __sourceFile: 'k' });
+  });
+
+  it('decodes sourceLine-only (flags 0x04)', () => {
+    const buf = batchWithValue((w) => w.u8(0x07).u16(0).u8(0x04).u32(123));
+    expect(decodeFn(buf)).toEqual({ __type: 'function', __fnId: 'View', __sourceLine: 123 });
+  });
+
+  it('decodes name+sourceLine with sourceFile absent (flags 0x05) in field order', () => {
+    // The middle field (sourceFile, bit1) is skipped: name (bit0) is read, then
+    // sourceLine (bit2) as a u32 — NOT as an internRef. A decoder that failed to
+    // skip the absent field would misread the u32 line as an intern index.
+    const buf = batchWithValue((w) => w.u8(0x07).u16(0).u8(0x05).u16(1).u32(7));
+    expect(decodeFn(buf)).toEqual({
+      __type: 'function',
+      __fnId: 'View',
+      __name: 'k',
+      __sourceLine: 7,
+    });
+  });
+
+  it('rejects a reserved FUNCTION flag bit (0x08) fail-closed, matching C++', () => {
+    // bits 3..7 are reserved and MUST be 0; a set reserved bit implies unknown
+    // trailing fields we cannot length. C++ (WireDecoder.cpp: fnFlags & 0xF8)
+    // rejects; the TS decoder must too, or it silently accepts malformed input.
+    const buf = batchWithValue((w) => w.u8(0x07).u16(0).u8(0x08));
+    expect(() => decodeBatchStreaming(buf, () => {})).toThrow(WireDecodeError);
+    expect(() => decodeBatchStreaming(buf, () => {})).toThrow(/reserved flag bit/i);
+  });
+});
+
 describe('wire-decoder fail-closed rejections', () => {
   const goodHex = GOLDEN.vectors.find((v) => v.name === 'one-create')!.hex;
 
@@ -249,6 +299,33 @@ describe('wire-decoder fail-closed rejections', () => {
   it('rejects an oversized batch buffer', () => {
     const huge = new ArrayBuffer(16 * 1024 * 1024 + 1);
     expect(() => decodeBatchStreaming(huge, () => {})).toThrow(/maxBatchBytes/i);
+  });
+
+  it('rejects an unknown value tag (parity with C++ UnknownValueTag)', () => {
+    // tag 0x10 (16) is past the defined value tags: readValue's default arm must
+    // throw the typed error, never silently produce undefined.
+    const buf = batchWithValue((w) => w.u8(0x10));
+    expect(() => decodeBatchStreaming(buf, () => {})).toThrow(WireDecodeError);
+    expect(() => decodeBatchStreaming(buf, () => {})).toThrow(/unknown value tag/i);
+  });
+
+  it('rejects an unknown opcode (parity with C++ UnknownOpcode)', () => {
+    // one-create's CREATE opcode sits at offset 24 (16 header + 2 internCount +
+    // 2 byteLen + 4 'View'). Corrupt it to 0x7f — an opcode the loop must reject.
+    const buf = hexToArrayBuffer(goodHex);
+    new Uint8Array(buf)[24] = 0x7f;
+    expect(() => decodeBatchStreaming(buf, () => {})).toThrow(WireDecodeError);
+  });
+
+  it('accepts a nonzero header reserved field (forward-compat, parity with C++)', () => {
+    // reserved[3] occupies header offsets 13..15. A decoder MUST skip it without
+    // inspection — setting it nonzero must NOT change the decode result.
+    const buf = hexToArrayBuffer(goodHex);
+    const u8 = new Uint8Array(buf);
+    u8[13] = 0x13;
+    u8[14] = 0x14;
+    u8[15] = 0x15;
+    expect(() => decodeBatchStreaming(buf, () => {})).not.toThrow();
   });
 });
 
