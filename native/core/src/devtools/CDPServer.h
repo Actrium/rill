@@ -95,8 +95,10 @@ public:
 
   /**
    * Connection callback: transport calls this on connect/disconnect.
+   * `path` is the WebSocket upgrade request target (e.g. "/tenant/3"); it binds
+   * the connection to a tenant. Empty when the transport cannot supply it.
    */
-  using OnConnectCallback = std::function<void(ConnectionId connId)>;
+  using OnConnectCallback = std::function<void(ConnectionId connId, const std::string& path)>;
   using OnDisconnectCallback = std::function<void(ConnectionId connId)>;
 
   /**
@@ -401,6 +403,12 @@ public:
    */
   void unregisterDebugTarget(TenantId id);
 
+  /**
+   * Parse a tenant id from a WebSocket upgrade path of the form
+   * ".../tenant/{id}". Returns nullopt when the path carries no tenant segment.
+   */
+  static std::optional<TenantId> parseTenantFromPath(const std::string& path);
+
   // ============================================
   // Event Emission
   // ============================================
@@ -614,6 +622,9 @@ private:
   // Sessions
   std::unordered_map<SessionId, CDPSession> sessions_;
   std::unordered_map<ConnectionId, SessionId> connectionToSession_;
+  // Tenant bound at connect time from the "/tenant/{id}" upgrade path. Takes
+  // precedence over the per-request sessionId when creating a session.
+  std::unordered_map<ConnectionId, TenantId> connectionTenant_;
   
   // Registered tenants
   std::unordered_map<TenantId, TenantInfo> tenants_;

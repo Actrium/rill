@@ -24,7 +24,7 @@ struct MockTransport : public CDPTransport {
   void stop() override {}
   void send(ConnectionId c, const std::string& m) override { sent.push_back({c, m}); }
   void close(ConnectionId) override {}
-  void simulateConnect(ConnectionId c) { if (onConnect_) onConnect_(c); }
+  void simulateConnect(ConnectionId c, const std::string& path = "") { if (onConnect_) onConnect_(c, path); }
   void simulateMessage(ConnectionId c, const std::string& m) { if (onMessage_) onMessage_(c, m); }
 };
 
@@ -76,6 +76,30 @@ TestSuite createDevToolsServiceTests() {
     transport->simulateMessage(700, R"({"id":1,"method":"Debugger.enable"})");
     assertEqual(target->received.size(), size_t(1), "target received the request");
     assertTrue(transport->sent.size() >= 1, "target response forwarded to the client");
+    svc.stop();
+  }});
+
+  suite.cases.push_back({"parseTenantFromPath extracts the tenant segment", []() {
+    assertTrue(CDPServer::parseTenantFromPath("/tenant/3").value_or(999) == 3u, "/tenant/3 -> 3");
+    assertTrue(CDPServer::parseTenantFromPath("/devtools/tenant/12/page").value_or(999) == 12u,
+               "nested path -> 12");
+    assertFalse(CDPServer::parseTenantFromPath("/").has_value(), "no marker -> none");
+    assertFalse(CDPServer::parseTenantFromPath("/tenant/").has_value(), "no digits -> none");
+    assertFalse(CDPServer::parseTenantFromPath("").has_value(), "empty -> none");
+  }});
+
+  suite.cases.push_back({"a connection bound via /tenant/{id} routes to that tenant's target", []() {
+    auto transport = std::make_shared<MockTransport>();
+    auto target = std::make_shared<RecordingTarget>();
+    DevToolsService svc(transport);
+    svc.start();
+    svc.onTenantCreated(5, "App 5");
+    svc.registerDebugTarget(5, target);
+    // Without the path binding this connection would default to tenant 0 and the
+    // Debugger request would miss tenant 5's target entirely.
+    transport->simulateConnect(710, "/tenant/5");
+    transport->simulateMessage(710, R"({"id":1,"method":"Debugger.enable"})");
+    assertEqual(target->received.size(), size_t(1), "tenant 5 target received the request");
     svc.stop();
   }});
 

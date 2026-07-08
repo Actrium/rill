@@ -246,7 +246,13 @@ void CDPTransportApple::handleNewConnection(void* nwConnection) {
       case nw_connection_state_ready:
         NSLog(@"[CDPTransport] Connection %llu ready", connId);
         if (this->onConnect_) {
-          this->onConnect_(connId);
+          // Network.framework's server-side WebSocket (nw_ws_request) exposes
+          // subprotocols and additional headers but not the HTTP request-line
+          // target, so the "/tenant/{id}" path shortcut is unavailable here.
+          // Tenant routing on this transport therefore relies on the CDP-standard
+          // sessionId (target-attach) flow handled by CDPServer. The path arg is
+          // wired for transports/clients that can supply it (discovery endpoint).
+          this->onConnect_(connId, std::string());
         }
         this->receiveLoop(connId);
         break;

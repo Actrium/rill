@@ -79,7 +79,7 @@ TestSuite createEngineDebugTargetTests() {
       void stop() override {}
       void send(ConnectionId c, const std::string& m) override { sent.push_back({c, m}); }
       void close(ConnectionId) override {}
-      void simulateConnect(ConnectionId c) { if (onConnect_) onConnect_(c); }
+      void simulateConnect(ConnectionId c, const std::string& path = "") { if (onConnect_) onConnect_(c, path); }
       void simulateMessage(ConnectionId c, const std::string& m) { if (onMessage_) onMessage_(c, m); }
     };
     // Records what it received; replies with a recognizable response + event.
@@ -123,7 +123,7 @@ TestSuite createEngineDebugTargetTests() {
       void stop() override {}
       void send(ConnectionId c, const std::string& m) override { sent.push_back({c, m}); }
       void close(ConnectionId) override {}
-      void simulateConnect(ConnectionId c) { if (onConnect_) onConnect_(c); }
+      void simulateConnect(ConnectionId c, const std::string& path = "") { if (onConnect_) onConnect_(c, path); }
       void simulateMessage(ConnectionId c, const std::string& m) { if (onMessage_) onMessage_(c, m); }
     };
     struct RecordingTarget : public IEngineDebugTarget {

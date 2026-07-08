@@ -76,12 +76,18 @@ bool CDPServer::start() {
           handleMessage(connId, msg);
         });
     config_.transport->setOnConnect(
-        [this](ConnectionId connId) {
+        [this](ConnectionId connId, const std::string& path) {
           std::lock_guard<std::mutex> lock(mutex_);
           Connection conn;
           conn.id = connId;
           conn.connectedAt = currentTimeMs();
           connections_[connId] = std::move(conn);
+          // Bind the connection to a tenant from its "/tenant/{id}" path, so
+          // relay and events route to the right guest without a per-request
+          // sessionId.
+          if (auto tenantId = parseTenantFromPath(path)) {
+            connectionTenant_[connId] = *tenantId;
+          }
         });
     config_.transport->setOnDisconnect(
         [this](ConnectionId connId) {
@@ -91,6 +97,7 @@ bool CDPServer::start() {
             sessions_.erase(it->second);
             connectionToSession_.erase(it);
           }
+          connectionTenant_.erase(connId);
           connections_.erase(connId);
         });
 
@@ -543,9 +550,12 @@ CDPSession* CDPServer::getOrCreateSessionLocked(ConnectionId connId, const CDPRe
     return getSession(connIt->second);
   }
   
-  // Determine tenant from request sessionId or URL
+  // Prefer the tenant bound at connect time from the "/tenant/{id}" path.
   TenantId tenantId = 0;
-  if (request.sessionId) {
+  auto ctIt = connectionTenant_.find(connId);
+  if (ctIt != connectionTenant_.end()) {
+    tenantId = ctIt->second;
+  } else if (request.sessionId) {
     // Parse tenant ID from session ID (format: "tenant-{id}-{uuid}")
     const std::string& sid = *request.sessionId;
     size_t dashPos = sid.find('-');
@@ -565,6 +575,23 @@ CDPSession* CDPServer::getOrCreateSessionLocked(ConnectionId connId, const CDPRe
   // Create new session
   SessionId newSessionId = createSession(connId, tenantId);
   return getSession(newSessionId);
+}
+
+std::optional<TenantId> CDPServer::parseTenantFromPath(const std::string& path) {
+  // Match ".../tenant/{digits}", tolerating a leading path and trailing
+  // segments/query (e.g. "/tenant/3", "/devtools/tenant/12/page").
+  static const std::string kMarker = "/tenant/";
+  size_t pos = path.find(kMarker);
+  if (pos == std::string::npos) return std::nullopt;
+  size_t start = pos + kMarker.size();
+  size_t end = start;
+  while (end < path.size() && path[end] >= '0' && path[end] <= '9') ++end;
+  if (end == start) return std::nullopt;  // no digits after the marker
+  try {
+    return static_cast<TenantId>(std::stoul(path.substr(start, end - start)));
+  } catch (...) {
+    return std::nullopt;
+  }
 }
 
 // ============================================
