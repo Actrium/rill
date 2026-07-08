@@ -31,7 +31,8 @@ SRC_DEVTOOLS = \
 	$(SRC_DIR)/devtools/RuntimeAdapter.cpp \
 	$(SRC_DIR)/devtools/DOMAdapter.cpp \
 	$(SRC_DIR)/devtools/DebuggerAdapter.cpp \
-	$(SRC_DIR)/devtools/NetworkAdapter.cpp
+	$(SRC_DIR)/devtools/NetworkAdapter.cpp \
+	$(SRC_DIR)/devtools/AdapterDebugTarget.cpp
 
 # Test files
 TEST_SOURCES = \
@@ -48,7 +49,8 @@ TEST_SOURCES = \
 	$(TEST_DIR)/test_instruction_codec.cpp \
 	$(TEST_DIR)/test_cdp_server.cpp \
 	$(TEST_DIR)/test_cdp_adapters.cpp \
-	$(TEST_DIR)/test_engine_debug_target.cpp
+	$(TEST_DIR)/test_engine_debug_target.cpp \
+	$(TEST_DIR)/test_adapter_debug_target.cpp
 
 # Object files
 SRC_FLAT_OBJECTS = $(patsubst $(SRC_DIR)/%.cpp,$(BUILD_DIR)/src_%.o,$(SRC_FLAT))
