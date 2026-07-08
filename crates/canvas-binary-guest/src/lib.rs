@@ -32,6 +32,10 @@ async fn guest_main() {
     // A red dot — REPEATS #ff0000 so the intern table reuses the same ref.
     dl.set_fill_style("#ff0000");
     dl.begin_path();
+    // A deliberate ~full-circle end angle. 6.28 is a fixture literal the golden
+    // vectors + host tests assert verbatim (NOT std TAU) — keep the exact value,
+    // so silence clippy's approx_constant here rather than round-trip through TAU.
+    #[allow(clippy::approx_constant)]
     dl.arc(50.0, 25.0, 10.0, 0.0, 6.28); // ccw=false (SDK fixes this)
     dl.fill();
 
