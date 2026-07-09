@@ -108,9 +108,10 @@ CDPResponse DebuggerAdapter::handleSetBreakpointByUrl(TenantId tenantId, int req
       condition.value_or(""));
   
   if (result) {
+    if (!result->empty()) breakpointId = *result;  // engine-authoritative id
     std::lock_guard<std::mutex> lock(stateMutex_);
     auto& state = tenantStates_[tenantId];
-    
+
     BreakpointInfo bp;
     bp.breakpointId = breakpointId;
     bp.scriptId = scriptId;
@@ -142,8 +143,8 @@ CDPResponse DebuggerAdapter::handleSetBreakpoint(TenantId tenantId, int requestI
   CDPResponse response;
   response.id = requestId;
   
-  auto scriptId = cdp::parseJSONString(params, "location.scriptId");
-  auto lineNumber = cdp::parseJSONInt(params, "location.lineNumber");
+  auto scriptId = cdp::parseJSONString(params, "scriptId");
+  auto lineNumber = cdp::parseJSONInt(params, "lineNumber");
   
   if (!scriptId || !lineNumber) {
     // Try alternate parsing
@@ -154,7 +155,7 @@ CDPResponse DebuggerAdapter::handleSetBreakpoint(TenantId tenantId, int requestI
   }
   
   int columnNumber = 0;
-  auto colOpt = cdp::parseJSONInt(params, "location.columnNumber");
+  auto colOpt = cdp::parseJSONInt(params, "columnNumber");
   if (colOpt) columnNumber = *colOpt;
   
   auto condition = cdp::parseJSONString(params, "condition");
@@ -165,9 +166,10 @@ CDPResponse DebuggerAdapter::handleSetBreakpoint(TenantId tenantId, int requestI
       condition.value_or(""));
   
   if (result) {
+    if (!result->empty()) breakpointId = *result;  // engine-authoritative id
     std::lock_guard<std::mutex> lock(stateMutex_);
     auto& state = tenantStates_[tenantId];
-    
+
     BreakpointInfo bp;
     bp.breakpointId = breakpointId;
     bp.scriptId = *scriptId;
