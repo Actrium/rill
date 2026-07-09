@@ -17,6 +17,9 @@
 namespace facebook {
 namespace hermes {
 class HermesRuntime;  // fwd-decl: keep the concrete runtime type off this header
+namespace cdp {
+class CDPDebugAPI;
+}
 }
 }  // namespace facebook
 
@@ -52,12 +55,25 @@ public:
 
   bool isDisposed() const { return disposed_; }
 
+#if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
+  // CDP debug handles for the relay layer: RillTenantManager builds a
+  // CDPAgentTarget from the runtime + this shared CDPDebugAPI. Dev-only.
+  facebook::hermes::HermesRuntime &hermesRuntime() { return *sandboxRuntime_; }
+  std::shared_ptr<facebook::hermes::cdp::CDPDebugAPI> cdpDebugAPI() { return cdpDebugAPI_; }
+#endif
+
 private:
   // Stored as its concrete Hermes type (not sliced to jsi::Runtime) so the CDP
   // debug layer can hand it to CDPDebugAPI::create(HermesRuntime&). HermesRuntime
   // IS-A jsi::Runtime, so every existing jsi:: use of *sandboxRuntime_ is
   // unaffected.
   std::unique_ptr<facebook::hermes::HermesRuntime> sandboxRuntime_;
+#if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
+  // Per-runtime CDP debug API (owns the AsyncDebuggerAPI). Constructed with the
+  // runtime; inert until a CDPAgent attaches a pause callback. Destroyed before
+  // the runtime in dispose(). Dev-only.
+  std::shared_ptr<facebook::hermes::cdp::CDPDebugAPI> cdpDebugAPI_;
+#endif
   jsi::Runtime *hostRuntime_;
   bool disposed_;
   std::recursive_mutex mutex_;

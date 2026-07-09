@@ -4,6 +4,9 @@
 #else
 #error "Rill Hermes sandbox requires Hermes headers. Enable Hermes in the host (hermes_enabled: true / USE_HERMES=1) or build with RILL_SANDBOX_ENGINE=jsc|quickjs."
 #endif
+#if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
+#include <hermes/cdp/CDPDebugAPI.h>
+#endif
 #include <string>
 #include <cstring>
 
@@ -488,6 +491,13 @@ HermesSandboxContext::HermesSandboxContext(jsi::Runtime &hostRuntime,
 
   installTaskQueueShim(hostRuntime);
 
+#if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
+  // Create the CDP debug API alongside the runtime — its AsyncDebuggerAPI must
+  // be constructed with the runtime. Inert (no pausing) until a CDPAgent
+  // attaches a pause callback. Dev-only.
+  cdpDebugAPI_ = facebook::hermes::cdp::CDPDebugAPI::create(*sandboxRuntime_);
+#endif
+
   rill_log(kLogTag, "Created new Hermes sandbox context");
 }
 
@@ -503,6 +513,10 @@ void HermesSandboxContext::dispose() {
   wrapperCache_.clear();
   callbacks_.clear();
   sandboxFunctions_.clear();
+#if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
+  // Destroy the CDP debug API before the runtime it wraps (hard order).
+  cdpDebugAPI_.reset();
+#endif
   sandboxRuntime_.reset();
   rill_log(kLogTag, "Disposed sandbox context");
 }
