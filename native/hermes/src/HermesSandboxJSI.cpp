@@ -498,6 +498,7 @@ HermesSandboxContext::HermesSandboxContext(jsi::Runtime &hostRuntime,
   // be constructed with the runtime. Inert (no pausing) until a CDPAgent
   // attaches a pause callback. Dev-only.
   cdpDebugAPI_ = facebook::hermes::cdp::CDPDebugAPI::create(*sandboxRuntime_);
+  runtimeAlive_ = std::make_shared<int>(1);
 #endif
 
   rill_log(kLogTag, "Created new Hermes sandbox context");
@@ -516,7 +517,10 @@ void HermesSandboxContext::dispose() {
   callbacks_.clear();
   sandboxFunctions_.clear();
 #if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
-  // Destroy the CDP debug API before the runtime it wraps (hard order).
+  // Expire the pump token first so any task still queued on the host CallInvoker
+  // drops instead of touching a half-torn-down runtime, then destroy the CDP
+  // debug API before the runtime it wraps (hard order).
+  runtimeAlive_.reset();
   cdpDebugAPI_.reset();
 #endif
   sandboxRuntime_.reset();
@@ -538,10 +542,15 @@ HermesSandboxContext::createCdpDebugTarget(
   // RillTenantManager tears the target down (resume + unregister) before it
   // disposes this context, so no task outlives *rt.
   auto *rt = sandboxRuntime_.get();
+  std::weak_ptr<int> alive = runtimeAlive_;
   facebook::hermes::debugger::EnqueueRuntimeTaskFunc enqueue =
-      [callInvoker, rt](facebook::hermes::debugger::RuntimeTask task) {
-        callInvoker->invokeAsync(
-            [task = std::move(task), rt]() { task(*rt); });
+      [callInvoker, rt, alive](facebook::hermes::debugger::RuntimeTask task) {
+        callInvoker->invokeAsync([task = std::move(task), rt, alive]() {
+          // Drop the task if the runtime was disposed before we ran.
+          if (auto keep = alive.lock()) {
+            task(*rt);
+          }
+        });
       };
   return std::make_shared<rill::devtools::CDPAgentTarget>(
       executionContextId, cdpDebugAPI_, std::move(enqueue));

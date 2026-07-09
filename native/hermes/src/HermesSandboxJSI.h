@@ -88,6 +88,11 @@ private:
   // runtime; inert until a CDPAgent attaches a pause callback. Destroyed before
   // the runtime in dispose(). Dev-only.
   std::shared_ptr<facebook::hermes::cdp::CDPDebugAPI> cdpDebugAPI_;
+  // Liveness token for the runtime-task pump: enqueued tasks hold a weak_ptr and
+  // drop themselves if the runtime was disposed before the host CallInvoker got
+  // to them (guards against use-after-free on *sandboxRuntime_). Reset first in
+  // dispose(). Dev-only.
+  std::shared_ptr<int> runtimeAlive_;
 #endif
   jsi::Runtime *hostRuntime_;
   bool disposed_;
