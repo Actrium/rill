@@ -3,6 +3,7 @@
 #include "DebuggerAdapter.h"
 
 #include <string>
+#include <vector>
 
 namespace rill::devtools {
 
@@ -47,7 +48,30 @@ std::string responseToRawCdp(const CDPResponse& r) {
 
 AdapterDebugTarget::AdapterDebugTarget(std::shared_ptr<DebuggerAdapter> adapter,
                                        TenantId tenantId)
-    : adapter_(std::move(adapter)), tenantId_(tenantId) {}
+    : adapter_(std::move(adapter)), tenantId_(tenantId) {
+  // Route the adapter's async events (Debugger.paused/resumed/scriptParsed/...)
+  // out through this target's per-connection sinks — the same path as command
+  // responses, so events and responses stay consistent.
+  if (adapter_) {
+    adapter_->setEventSink([this](const std::string& json) { broadcast(json); });
+  }
+}
+
+AdapterDebugTarget::~AdapterDebugTarget() {
+  // Drop the sink before this object dies so a late event can't call broadcast()
+  // on a destroyed target.
+  if (adapter_) adapter_->setEventSink(nullptr);
+}
+
+void AdapterDebugTarget::broadcast(const std::string& rawEventJson) {
+  std::vector<CdpOutboundFn> targets;
+  {
+    std::lock_guard<std::mutex> lock(sinksMutex_);
+    targets.reserve(sinks_.size());
+    for (const auto& [conn, sink] : sinks_) targets.push_back(sink);
+  }
+  for (const auto& sink : targets) sink(rawEventJson);
+}
 
 DomainSet AdapterDebugTarget::ownedDomains() const {
   DomainSet d;

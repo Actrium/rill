@@ -27,6 +27,7 @@ class DebuggerAdapter;
 class AdapterDebugTarget : public IEngineDebugTarget {
 public:
   AdapterDebugTarget(std::shared_ptr<DebuggerAdapter> adapter, TenantId tenantId);
+  ~AdapterDebugTarget() override;
 
   DomainSet ownedDomains() const override;
   void onClientConnect(ConnectionId conn, CdpOutboundFn persistentSink) override;
@@ -34,6 +35,9 @@ public:
   void dispatch(ConnectionId conn, const RawCdpMessage& rawCdpRequest) override;
 
 private:
+  // Fan a raw CDP event out to every connected client's persistent sink.
+  void broadcast(const std::string& rawEventJson);
+
   std::shared_ptr<DebuggerAdapter> adapter_;
   TenantId tenantId_;
 

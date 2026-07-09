@@ -203,13 +203,22 @@ public:
  */
 class DebuggerAdapter {
 public:
-  explicit DebuggerAdapter(CDPServer& server);
+  // Raw CDP event JSON sink. The relay layer (AdapterDebugTarget) wires this to
+  // broadcast events to the tenant's connected DevTools clients through the same
+  // persistent per-connection sinks that carry command responses — so events and
+  // responses share one path, consistent with the CDP-native (Hermes) engine.
+  using EventSink = std::function<void(const std::string& rawEventJson)>;
+
+  DebuggerAdapter();
   ~DebuggerAdapter() = default;
-  
+
   // Non-copyable
   DebuggerAdapter(const DebuggerAdapter&) = delete;
   DebuggerAdapter& operator=(const DebuggerAdapter&) = delete;
-  
+
+  // Wire (or clear, with nullptr) the event broadcast sink.
+  void setEventSink(EventSink sink);
+
   /**
    * Set engine debugger implementation
    */
@@ -284,8 +293,11 @@ private:
    * Generate unique breakpoint ID
    */
   std::string generateBreakpointId();
-  
-  CDPServer& server_;
+
+  // Serialize + emit a CDP event through the wired sink (no-op if unset).
+  void emitEvent(const CDPEvent& event);
+
+  EventSink eventSink_;
   std::shared_ptr<IEngineDebugger> engineDebugger_;
   
   // Per-tenant state

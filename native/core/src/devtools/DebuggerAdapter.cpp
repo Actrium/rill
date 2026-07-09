@@ -9,9 +9,16 @@
 
 namespace rill::devtools {
 
-DebuggerAdapter::DebuggerAdapter(CDPServer& server)
-    : server_(server)
-    , engineDebugger_(std::make_shared<StubEngineDebugger>()) {}
+DebuggerAdapter::DebuggerAdapter()
+    : engineDebugger_(std::make_shared<StubEngineDebugger>()) {}
+
+void DebuggerAdapter::setEventSink(EventSink sink) {
+  eventSink_ = std::move(sink);
+}
+
+void DebuggerAdapter::emitEvent(const CDPEvent& event) {
+  if (eventSink_) eventSink_(cdp::buildEventJSON(event.method, event.params));
+}
 
 void DebuggerAdapter::setEngineDebugger(std::shared_ptr<IEngineDebugger> debugger) {
   engineDebugger_ = debugger ? debugger : std::make_shared<StubEngineDebugger>();
@@ -359,21 +366,21 @@ void DebuggerAdapter::onPaused(TenantId tenantId, PauseReason reason,
   params << "}";
   event.params = params.str();
   
-  server_.sendEvent(tenantId, event);
+  emitEvent(event);
 }
 
 void DebuggerAdapter::onResumed(TenantId tenantId) {
   CDPEvent event;
   event.method = "Debugger.resumed";
   event.params = "{}";
-  server_.sendEvent(tenantId, event);
+  emitEvent(event);
 }
 
 void DebuggerAdapter::onScriptParsed(TenantId tenantId, const ScriptInfo& script) {
   CDPEvent event;
   event.method = "Debugger.scriptParsed";
   event.params = scriptInfoToJSON(script);
-  server_.sendEvent(tenantId, event);
+  emitEvent(event);
 }
 
 void DebuggerAdapter::onScriptFailedToParse(TenantId tenantId, const ScriptInfo& script,
@@ -389,7 +396,7 @@ void DebuggerAdapter::onScriptFailedToParse(TenantId tenantId, const ScriptInfo&
   json += ",\"errorMessage\":\"" + cdp::escapeJSON(errorMessage) + "\"}";
   
   event.params = json;
-  server_.sendEvent(tenantId, event);
+  emitEvent(event);
 }
 
 // ============================================
