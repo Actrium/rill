@@ -16475,6 +16475,53 @@ typedef enum {
 #define FUNC_RET_YIELD_STAR 2
 
 /* argv[] is modified if (flags & JS_CALL_FLAG_COPY_ARGV) = 0. */
+#ifdef RILL_QJS_DEBUG
+/*
+ * Dev-only source-line debug hook (see quickjs-debug.h). Global rather than
+ * per-runtime: the callback routes by JSContext, so one pointer keeps the
+ * per-instruction check in SWITCH() down to a single predictable branch, and a
+ * build without RILL_QJS_DEBUG pays nothing at all.
+ */
+#include "quickjs-debug.h"
+static RillQjsDebugHook rill_qjs_debug_hook_fn;
+static void *rill_qjs_debug_hook_opaque;
+
+void rill_qjs_set_debug_hook(JSRuntime *rt, RillQjsDebugHook hook, void *opaque)
+{
+    (void)rt;
+    rill_qjs_debug_hook_fn = hook;
+    rill_qjs_debug_hook_opaque = opaque;
+}
+
+const char *rill_qjs_script_filename(JSContext *ctx, const void *script_token)
+{
+    const JSFunctionBytecode *b = script_token;
+    if (!b || !b->has_debug || b->debug.filename == JS_ATOM_NULL)
+        return NULL;
+    return JS_AtomToCString(ctx, b->debug.filename);
+}
+
+/* Resolve the current source line and forward it; pause policy is the hook's. */
+static void rill_qjs_on_step(JSContext *ctx, JSFunctionBytecode *b,
+                             const uint8_t *pc)
+{
+    int line;
+    if (!b || !b->has_debug || !b->debug.pc2line_buf)
+        return;
+    line = find_line_num(ctx, b, (uint32_t)(pc - b->byte_code_buf));
+    if (line < 0)
+        return;
+    rill_qjs_debug_hook_fn(ctx, b, line, rill_qjs_debug_hook_opaque);
+}
+
+/* An EXPRESSION (not a statement) so it can ride inside SWITCH's dispatch
+   without splitting `if (...) BREAK;` — BREAK must stay a single statement. */
+#define RILL_QJS_STEP(ctx, b, pc) \
+    (unlikely(rill_qjs_debug_hook_fn) ? rill_qjs_on_step(ctx, b, pc) : (void)0)
+#else
+#define RILL_QJS_STEP(ctx, b, pc) ((void)0)
+#endif
+
 static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                                JSValueConst this_obj, JSValueConst new_target,
                                int argc, JSValue *argv, int flags)
@@ -16495,7 +16542,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
     // JS_FreeCString(caller_ctx, str);
 
 #if !DIRECT_DISPATCH
-#define SWITCH(pc)      switch (opcode = *pc++)
+#define SWITCH(pc)      switch (RILL_QJS_STEP(ctx, b, pc), opcode = *pc++)
 #define CASE(op)        case op
 #define DEFAULT         default
 #define BREAK           break
@@ -16510,7 +16557,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
 #include "quickjs-opcode.h"
         [ OP_COUNT ... 255 ] = &&case_default
     };
-#define SWITCH(pc)      goto *dispatch_table[opcode = *pc++];
+#define SWITCH(pc)      goto *dispatch_table[(RILL_QJS_STEP(ctx, b, pc), opcode = *pc++)];
 #define CASE(op)        case_ ## op
 #define DEFAULT         case_default
 #define BREAK           SWITCH(pc)
