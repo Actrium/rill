@@ -5,6 +5,7 @@
 #error "Rill Hermes sandbox requires Hermes headers. Enable Hermes in the host (hermes_enabled: true / USE_HERMES=1) or build with RILL_SANDBOX_ENGINE=jsc|quickjs."
 #endif
 #if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
+#include <hermes/AsyncDebuggerAPI.h>
 #include <hermes/cdp/CDPDebugAPI.h>
 #include <ReactCommon/CallInvoker.h>
 #include "devtools/CDPAgentTarget.h"
@@ -581,6 +582,44 @@ HermesSandboxContext::HermesSandboxContext(jsi::Runtime &hostRuntime,
   // attaches a pause callback. Dev-only.
   cdpDebugAPI_ = facebook::hermes::cdp::CDPDebugAPI::create(*sandboxRuntime_);
   runtimeAlive_ = std::make_shared<int>(1);
+
+  // Reconcile the eval-timeout watchdog with debugger pauses: the watchdog is a
+  // wall-clock timer, but time spent stopped at a breakpoint is not execution
+  // and must not be charged against the eval budget — otherwise stepping off a
+  // breakpoint after the budget elapsed would immediately kill the program. On
+  // every pause suspend the watchdog (unwatchTimeLimit); on resume re-arm it with
+  // a fresh budget. Fires on the runtime thread, so the plain-bool/id state is
+  // single-threaded. Only meaningful when a finite timeout is set.
+  watchdogPauseCallbackId_ =
+      cdpDebugAPI_->asyncDebuggerAPI().addDebuggerEventCallback_TS(
+          [this](facebook::hermes::HermesRuntime &rt,
+                 facebook::hermes::debugger::AsyncDebuggerAPI &,
+                 facebook::hermes::debugger::DebuggerEventType event) {
+            using ET = facebook::hermes::debugger::DebuggerEventType;
+            if (!(timeoutMs_ > 0 && timeoutMs_ < 4294967295.0)) {
+              return;
+            }
+            switch (event) {
+              case ET::Breakpoint:
+              case ET::DebuggerStatement:
+              case ET::StepFinish:
+              case ET::ExplicitPause:
+              case ET::Exception:
+                if (!watchdogSuspended_) {
+                  rt.unwatchTimeLimit();
+                  watchdogSuspended_ = true;
+                }
+                break;
+              case ET::Resumed:
+                if (watchdogSuspended_) {
+                  rt.watchTimeLimit(static_cast<uint32_t>(timeoutMs_));
+                  watchdogSuspended_ = false;
+                }
+                break;
+              default:
+                break;
+            }
+          });
 #endif
 
   rill_log(kLogTag, "Created new Hermes sandbox context");
@@ -599,6 +638,12 @@ void HermesSandboxContext::dispose() {
   callbacks_.clear();
   sandboxFunctions_.clear();
 #if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
+  // Detach the watchdog-pause observer (it captures this) before its owner dies.
+  if (watchdogPauseCallbackId_ != 0 && cdpDebugAPI_) {
+    cdpDebugAPI_->asyncDebuggerAPI().removeDebuggerEventCallback_TS(
+        watchdogPauseCallbackId_);
+    watchdogPauseCallbackId_ = 0;
+  }
   // Expire the pump token first so any task still queued on the host CallInvoker
   // drops instead of touching a half-torn-down runtime, then destroy the CDP
   // debug API before the runtime it wraps (hard order).

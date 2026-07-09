@@ -8,6 +8,7 @@
 //
 // For Windows (Hermes NuGet, N-API-only), see HermesSandboxNAPI.h instead.
 
+#include <cstdint>
 #include <jsi/jsi.h>
 #include <memory>
 #include <mutex>
@@ -120,6 +121,13 @@ private:
   // to them (guards against use-after-free on *sandboxRuntime_). Reset first in
   // dispose(). Dev-only.
   std::shared_ptr<int> runtimeAlive_;
+  // Suspends the eval-timeout watchdog while paused at a breakpoint so stopped
+  // wall-clock time is not charged against the eval budget (see the debugger
+  // event callback in the ctor). Both touched only on the runtime thread. The id
+  // is a debugger::DebuggerEventCallbackID (uint32_t; 0 == invalid) kept untyped
+  // here to keep the Hermes debugger headers off this header.
+  std::uint32_t watchdogPauseCallbackId_ = 0;
+  bool watchdogSuspended_ = false;
 #endif
   jsi::Runtime *hostRuntime_;
   bool disposed_;
