@@ -108,6 +108,33 @@ int main() {
   check(evalFut.wait_for(std::chrono::milliseconds(200)) != std::future_status::ready,
         "runtime thread stays blocked while paused");
 
+  // While paused, evaluate expressions in the (global-scope) paused context.
+  // The dispatch runs the eval on the blocked runtime thread and returns once
+  // its response has been pushed to the sink.
+  target.dispatch(
+      1,
+      R"({"id":10,"method":"Debugger.evaluateOnCallFrame","params":{"callFrameId":"0","expression":"1+2"}})");
+  check(sink.waitFor("\"value\":3,\"description\":\"3\"", "eval 1+2"),
+        "evaluateOnCallFrame 1+2 -> number 3");
+  target.dispatch(
+      1,
+      R"({"id":11,"method":"Debugger.evaluateOnCallFrame","params":{"callFrameId":"0","expression":"'a'+'b'"}})");
+  check(sink.waitFor("\"type\":\"string\",\"value\":\"ab\"", "eval string"),
+        "evaluateOnCallFrame 'a'+'b' -> string \"ab\"");
+  // Reads global state: at the line-3 breakpoint, log holds only 'a'.
+  target.dispatch(
+      1,
+      R"({"id":12,"method":"Debugger.evaluateOnCallFrame","params":{"callFrameId":"0","expression":"globalThis.log.length"}})");
+  check(sink.waitFor("\"value\":1,\"description\":\"1\"", "eval global read"),
+        "evaluateOnCallFrame globalThis.log.length -> 1");
+  // A throwing expression is reported as an error and clears the pending
+  // exception so the paused program can still resume cleanly.
+  target.dispatch(
+      1,
+      R"json({"id":13,"method":"Debugger.evaluateOnCallFrame","params":{"callFrameId":"0","expression":"nope()"}})json");
+  check(sink.waitFor("\"subtype\":\"error\"", "eval throw"),
+        "evaluateOnCallFrame nope() -> error object");
+
   target.dispatch(1, R"({"id":3,"method":"Debugger.resume"})");
   bool finished =
       evalFut.wait_for(std::chrono::seconds(5)) == std::future_status::ready;

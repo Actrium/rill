@@ -71,6 +71,14 @@ public:
   void stepOut();
   bool isPaused();
 
+  // Run a job on the (blocked) runtime thread while it is paused, then return.
+  // Used to evaluate expressions in the paused context: the debug hook is
+  // suppressed for the duration so a re-entrant eval cannot self-pause. Returns
+  // false (without running) if the runtime is not currently paused. Safe to call
+  // from the CDP thread only.
+  using EvalJob = std::function<void(JSContext*)>;
+  bool runOnPausedThread(const EvalJob& job);
+
   // C hook entry (registered with the engine); dispatches to onStep. `depth` is
   // the live call-stack length (1 = top-level), used by stepping.
   void onStep(JSContext* ctx, const void* scriptToken, int line, int depth);
@@ -85,10 +93,14 @@ private:
 
   std::mutex mutex_;
   std::condition_variable cv_;
+  std::condition_variable jobCv_;  // signals a paused-thread job completed
   std::set<std::pair<std::string, int>> breakpoints_;  // guarded by mutex_
   bool pauseRequested_ = false;                        // guarded by mutex_
   bool paused_ = false;                                // guarded by mutex_
   bool resumeRequested_ = false;                       // guarded by mutex_
+  const EvalJob* pendingJob_ = nullptr;  // guarded by mutex_
+  bool jobDone_ = false;                 // guarded by mutex_
+  bool inEval_ = false;  // runtime-thread-only: suppress the hook during eval
   StepMode stepMode_ = StepMode::None;                 // guarded by mutex_
   int stepDepth_ = 0;    // call depth the step was armed at; guarded by mutex_
   int stepLine_ = 0;     // source line the step was armed at; guarded by mutex_

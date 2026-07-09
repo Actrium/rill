@@ -2,9 +2,54 @@
 
 #ifdef RILL_QJS_DEBUG
 
+#include "devtools/CDPServer.h"  // rill::devtools::cdp::escapeJSON
+#include "quickjs.h"
+
+#include <cmath>
+#include <sstream>
+
 namespace rill::qjs_debug {
 
 namespace rd = rill::devtools;
+
+namespace {
+// Serialize a JSValue as a CDP Runtime.RemoteObject (the value of the response's
+// "result" field). Global-scope MVP: primitives fully; objects by description.
+std::string toRemoteObjectJson(JSContext* ctx, JSValueConst v) {
+  if (JS_IsUndefined(v)) return R"({"type":"undefined"})";
+  if (JS_IsNull(v)) return R"({"type":"object","subtype":"null","value":null})";
+  if (JS_IsBool(v))
+    return std::string("{\"type\":\"boolean\",\"value\":") +
+           (JS_ToBool(ctx, v) ? "true" : "false") + "}";
+  if (JS_IsNumber(v)) {
+    double d = 0;
+    JS_ToFloat64(ctx, &d, v);
+    const char* s = JS_ToCString(ctx, v);
+    std::ostringstream ss;
+    if (std::isfinite(d))
+      ss << "{\"type\":\"number\",\"value\":" << (s ? s : "0")
+         << ",\"description\":\"" << (s ? s : "0") << "\"}";
+    else  // NaN / +-Infinity are not valid JSON numbers
+      ss << "{\"type\":\"number\",\"description\":\""
+         << (s ? s : "NaN") << "\"}";
+    if (s) JS_FreeCString(ctx, s);
+    return ss.str();
+  }
+  if (JS_IsString(v)) {
+    const char* s = JS_ToCString(ctx, v);
+    std::string out = "{\"type\":\"string\",\"value\":\"" +
+                      rd::cdp::escapeJSON(s ? s : "") + "\"}";
+    if (s) JS_FreeCString(ctx, s);
+    return out;
+  }
+  // Objects / functions: describe them (no remote object ids in this MVP).
+  const char* s = JS_ToCString(ctx, v);
+  std::string out = "{\"type\":\"object\",\"description\":\"" +
+                    rd::cdp::escapeJSON(s ? s : "") + "\"}";
+  if (s) JS_FreeCString(ctx, s);
+  return out;
+}
+}  // namespace
 
 QuickJSEngineDebugger::QuickJSEngineDebugger(QuickJSDebugCore* core,
                                              rd::TenantId tenantId)
@@ -85,8 +130,29 @@ void QuickJSEngineDebugger::step(rd::TenantId, rd::StepAction action) {
 
 std::string QuickJSEngineDebugger::evaluateOnCallFrame(
     rd::TenantId, const std::string& /*callFrameId*/,
-    const std::string& /*expression*/) {
-  return "{}";  // M3
+    const std::string& expression) {
+  // Global-scope MVP: the frame's locals are not yet addressable, so evaluate in
+  // global scope on the paused runtime thread. Not paused -> undefined.
+  std::string result = R"({"type":"undefined"})";
+  core_->runOnPausedThread([&](JSContext* ctx) {
+    JSValue v = JS_Eval(ctx, expression.c_str(), expression.size(),
+                        "<evaluate>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(v)) {
+      // Take and clear the pending exception so the paused program resumes
+      // cleanly; report it as an error remote object.
+      JSValue e = JS_GetException(ctx);
+      const char* s = JS_ToCString(ctx, e);
+      result = "{\"type\":\"object\",\"subtype\":\"error\",\"className\":"
+               "\"Error\",\"description\":\"" +
+               rd::cdp::escapeJSON(s ? s : "") + "\"}";
+      if (s) JS_FreeCString(ctx, s);
+      JS_FreeValue(ctx, e);
+    } else {
+      result = toRemoteObjectJson(ctx, v);
+    }
+    JS_FreeValue(ctx, v);
+  });
+  return result;
 }
 
 std::vector<rd::CallFrame> QuickJSEngineDebugger::getCallFrames(rd::TenantId) {

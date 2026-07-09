@@ -114,6 +114,16 @@ bool QuickJSDebugCore::isPaused() {
   return paused_;
 }
 
+bool QuickJSDebugCore::runOnPausedThread(const EvalJob& job) {
+  std::unique_lock<std::mutex> lk(mutex_);
+  if (!paused_) return false;  // no blocked runtime thread to run the job
+  pendingJob_ = &job;
+  jobDone_ = false;
+  cv_.notify_all();  // wake the pause loop to pick up the job
+  jobCv_.wait(lk, [&] { return jobDone_; });
+  return true;
+}
+
 std::string QuickJSDebugCore::resolveScript(JSContext* ctx, const void* token) {
   auto it = scriptNames_.find(token);
   if (it != scriptNames_.end()) return it->second;
@@ -129,6 +139,9 @@ std::string QuickJSDebugCore::resolveScript(JSContext* ctx, const void* token) {
 
 void QuickJSDebugCore::onStep(JSContext* ctx, const void* token, int line,
                               int depth) {
+  // Suppress the hook while evaluating in the paused context: a re-entrant eval
+  // runs on this same thread and would otherwise self-pause / recurse.
+  if (inEval_) return;
   // Fire once per (source line, call depth): the same line re-entered at a
   // different depth (recursion, or a step that returns to it) must re-evaluate.
   if (token == lastToken_ && line == lastLine_ && depth == lastDepth_) return;
@@ -175,7 +188,25 @@ void QuickJSDebugCore::onStep(JSContext* ctx, const void* token, int line,
     onPaused_(scriptId, line, reason);
     lk.lock();
   }
-  cv_.wait(lk, [&] { return resumeRequested_; });
+  // Block until resumed, but stay responsive to eval jobs from the CDP thread:
+  // run each on this (the runtime) thread with the hook suppressed, then keep
+  // waiting.
+  while (true) {
+    cv_.wait(lk, [&] { return resumeRequested_ || pendingJob_ != nullptr; });
+    if (pendingJob_ != nullptr) {
+      const EvalJob* job = pendingJob_;
+      pendingJob_ = nullptr;
+      inEval_ = true;
+      lk.unlock();
+      (*job)(ctx_);
+      lk.lock();
+      inEval_ = false;
+      jobDone_ = true;
+      jobCv_.notify_all();
+      continue;
+    }
+    break;  // resumeRequested_
+  }
   paused_ = false;
 }
 
