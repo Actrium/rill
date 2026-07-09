@@ -37,10 +37,16 @@ public:
       const std::vector<rill::devtools::CallFrame>&,
       const std::vector<std::string>& hitBreakpoints)>;
 
+  // Emits a Debugger.scriptParsed. Wired by the assembler to
+  // DebuggerAdapter::onScriptParsed.
+  using ScriptParsedNotifier =
+      std::function<void(const rill::devtools::ScriptInfo&)>;
+
   QuickJSEngineDebugger(QuickJSDebugCore* core, rill::devtools::TenantId tenantId);
   ~QuickJSEngineDebugger() override;
 
   void setPausedNotifier(PausedNotifier fn);
+  void setScriptParsedNotifier(ScriptParsedNotifier fn);
 
   // IEngineDebugger
   bool enable(rill::devtools::TenantId) override;
@@ -68,16 +74,23 @@ private:
   void onCorePaused(const std::string& scriptId, int line1Based,
                     PauseReason reason);
   static rill::devtools::PauseReason toCdpReason(PauseReason reason);
+  // Runs on the QuickJS runtime thread the first time a script is seen.
+  void onScriptSeen(const std::string& scriptId, const std::string& url,
+                    const std::string& source);
 
   QuickJSDebugCore* core_;
   rill::devtools::TenantId tenantId_;
   PausedNotifier notifier_;
+  ScriptParsedNotifier scriptNotifier_;
 
   std::mutex mutex_;
   std::uint64_t nextBreakpointId_ = 1;  // guarded by mutex_
   // engine breakpoint id -> (scriptId, 1-based line)
   std::unordered_map<std::string, std::pair<std::string, int>> breakpoints_;
   std::vector<rill::devtools::CallFrame> lastFrames_;  // last pause; guarded by mutex_
+  // Script registry (scriptId == url == filename); guarded by mutex_.
+  std::unordered_map<std::string, rill::devtools::ScriptInfo> scripts_;
+  std::unordered_map<std::string, std::string> sources_;
 };
 
 }  // namespace rill::qjs_debug

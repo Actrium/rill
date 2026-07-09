@@ -5,6 +5,7 @@
 #include "devtools/CDPServer.h"  // rill::devtools::cdp::escapeJSON
 #include "quickjs.h"
 
+#include <algorithm>
 #include <cmath>
 #include <sstream>
 
@@ -58,6 +59,9 @@ QuickJSEngineDebugger::QuickJSEngineDebugger(QuickJSDebugCore* core,
       [this](const std::string& scriptId, int line1Based, PauseReason reason) {
         onCorePaused(scriptId, line1Based, reason);
       });
+  core_->setScriptSeenCallback(
+      [this](const std::string& scriptId, const std::string& url,
+             const std::string& source) { onScriptSeen(scriptId, url, source); });
 }
 
 QuickJSEngineDebugger::~QuickJSEngineDebugger() {
@@ -66,6 +70,7 @@ QuickJSEngineDebugger::~QuickJSEngineDebugger() {
   // observer. The core outlives us (owned by the sandbox context, torn down
   // after the debug target).
   core_->setPausedCallback(nullptr);
+  core_->setScriptSeenCallback(nullptr);
   std::lock_guard<std::mutex> lk(mutex_);
   for (const auto& [id, loc] : breakpoints_) {
     core_->removeBreakpoint(loc.first, loc.second);
@@ -75,6 +80,10 @@ QuickJSEngineDebugger::~QuickJSEngineDebugger() {
 
 void QuickJSEngineDebugger::setPausedNotifier(PausedNotifier fn) {
   notifier_ = std::move(fn);
+}
+
+void QuickJSEngineDebugger::setScriptParsedNotifier(ScriptParsedNotifier fn) {
+  scriptNotifier_ = std::move(fn);
 }
 
 bool QuickJSEngineDebugger::enable(rd::TenantId) { return true; }
@@ -161,12 +170,35 @@ std::vector<rd::CallFrame> QuickJSEngineDebugger::getCallFrames(rd::TenantId) {
 }
 
 std::vector<rd::ScriptInfo> QuickJSEngineDebugger::getScripts(rd::TenantId) {
-  return {};  // M3: script registry / scriptParsed
+  std::lock_guard<std::mutex> lk(mutex_);
+  std::vector<rd::ScriptInfo> out;
+  out.reserve(scripts_.size());
+  for (const auto& [id, info] : scripts_) out.push_back(info);
+  return out;
 }
 
 std::string QuickJSEngineDebugger::getScriptSource(rd::TenantId,
-                                                   const std::string&) {
-  return "";  // M3
+                                                   const std::string& scriptId) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  auto it = sources_.find(scriptId);
+  return it == sources_.end() ? std::string() : it->second;
+}
+
+void QuickJSEngineDebugger::onScriptSeen(const std::string& scriptId,
+                                         const std::string& url,
+                                         const std::string& source) {
+  rd::ScriptInfo info;
+  info.scriptId = scriptId;
+  info.url = url;
+  // endLine lets a front-end size the script; count source newlines.
+  info.endLine = static_cast<int>(
+      std::count(source.begin(), source.end(), '\n'));
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    scripts_[scriptId] = info;
+    sources_[scriptId] = source;
+  }
+  if (scriptNotifier_) scriptNotifier_(info);
 }
 
 bool QuickJSEngineDebugger::isPaused(rd::TenantId) { return core_->isPaused(); }

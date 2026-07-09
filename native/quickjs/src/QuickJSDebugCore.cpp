@@ -40,6 +40,10 @@ void QuickJSDebugCore::setPausedCallback(PausedFn fn) {
   onPaused_ = std::move(fn);
 }
 
+void QuickJSDebugCore::setScriptSeenCallback(ScriptSeenFn fn) {
+  onScriptSeen_ = std::move(fn);
+}
+
 std::vector<QuickJSDebugCore::FrameSnapshot> QuickJSDebugCore::captureFrames() {
   std::vector<RawFrame> raw;
   rill_qjs_capture_frames(ctx_, &rill_qjs_capture_sink, &raw);
@@ -134,6 +138,15 @@ std::string QuickJSDebugCore::resolveScript(JSContext* ctx, const void* token) {
     JS_FreeCString(ctx, fn);
   }
   scriptNames_.emplace(token, name);
+  // First time this script (by url) is seen: announce it with its source. Runs
+  // on the runtime thread, no lock held here, so the callback is free to emit.
+  if (!name.empty() && seenScripts_.insert(name).second && onScriptSeen_) {
+    std::string source;
+    std::size_t len = 0;
+    const char* src = rill_qjs_script_source(token, &len);  // borrowed
+    if (src) source.assign(src, len);
+    onScriptSeen_(name, name, source);
+  }
   return name;
 }
 

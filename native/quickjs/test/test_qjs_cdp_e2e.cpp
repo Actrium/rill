@@ -217,6 +217,79 @@ int main() {
     JS_FreeRuntime(nrt);
   }
 
+  // --- scriptParsed registry drives setBreakpointByUrl + getScriptSource. -----
+  {
+    JSRuntime* srt = JS_NewRuntime();
+    JSContext* sctx = JS_NewContext(srt);
+    QuickJSDebugCore score(srt, sctx);
+    auto sEngine = std::make_shared<QuickJSEngineDebugger>(&score, 1);
+    auto sAdapter = std::make_shared<DebuggerAdapter>();
+    sAdapter->setEngineDebugger(sEngine);
+    AdapterDebugTarget sTarget(sAdapter, 1);
+    sEngine->setPausedNotifier(
+        [sAdapter](PauseReason r, const std::vector<CallFrame>& frames,
+                   const std::vector<std::string>& hits) {
+          sAdapter->onPaused(1, r, frames, hits);
+        });
+    sEngine->setScriptParsedNotifier(
+        [sAdapter](const ScriptInfo& s) { sAdapter->onScriptParsed(1, s); });
+
+    Sink ssink;
+    sTarget.onClientConnect(1, [&ssink](const RawCdpMessage& m) { ssink.push(m); });
+    sTarget.dispatch(1, R"({"id":1,"method":"Debugger.enable"})");
+
+    static const char* kUrlScript =
+        "globalThis.n = (globalThis.n || 0) + 1;\n"  // line 1
+        "globalThis.mark = 42;\n";                    // line 2 <- breakpoint by url
+
+    // Run once so the script is seen and announced via Debugger.scriptParsed.
+    std::thread reg([&] {
+      JS_UpdateStackTop(srt);
+      JSValue v = JS_Eval(sctx, kUrlScript, std::strlen(kUrlScript), "url.js",
+                          JS_EVAL_TYPE_GLOBAL);
+      JS_FreeValue(sctx, v);
+    });
+    reg.join();
+    check(ssink.waitFor("\"Debugger.scriptParsed\"", "scriptParsed") &&
+              ssink.waitFor("\"url\":\"url.js\"", "scriptParsed url"),
+          "Debugger.scriptParsed announced url.js");
+
+    // Now a URL-addressed breakpoint resolves through the registry.
+    sTarget.dispatch(
+        1,
+        R"({"id":2,"method":"Debugger.setBreakpointByUrl","params":{"url":"url.js","lineNumber":1}})");
+    check(ssink.waitFor("\"breakpointId\":\"1\"", "byUrl bp id"),
+          "setBreakpointByUrl resolved url.js -> breakpoint");
+
+    // getScriptSource returns the registered source.
+    sTarget.dispatch(
+        1,
+        R"({"id":4,"method":"Debugger.getScriptSource","params":{"scriptId":"url.js"}})");
+    check(ssink.waitFor("globalThis.mark", "script source"),
+          "getScriptSource returns url.js source");
+
+    // Re-run the same filename: a fresh bytecode token, yet the url-keyed
+    // breakpoint still fires (breakpoints key on scriptId, not token).
+    std::promise<void> hit;
+    auto hitFut = hit.get_future();
+    std::thread run2([&] {
+      JS_UpdateStackTop(srt);
+      JSValue v = JS_Eval(sctx, kUrlScript, std::strlen(kUrlScript), "url.js",
+                          JS_EVAL_TYPE_GLOBAL);
+      JS_FreeValue(sctx, v);
+      hit.set_value();
+    });
+    check(ssink.waitFor("\"Debugger.paused\"", "byUrl paused"),
+          "url-keyed breakpoint fires on a re-run (new token)");
+    sTarget.dispatch(1, R"({"id":5,"method":"Debugger.resume"})");
+    check(hitFut.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+          "resume completed the re-run");
+    run2.join();
+
+    JS_FreeContext(sctx);
+    JS_FreeRuntime(srt);
+  }
+
   std::cout << "=== " << (g_failures == 0 ? "ALL PASS" : "FAILURES") << " ("
             << g_failures << " failed) ===\n";
   return g_failures == 0 ? 0 : 1;

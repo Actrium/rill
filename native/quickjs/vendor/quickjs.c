@@ -34039,6 +34039,18 @@ static JSValue __JS_EvalInternal(JSContext *ctx, JSValueConst this_obj,
         goto fail1;
     }
 
+#ifdef RILL_QJS_DEBUG
+    /* Bellard QuickJS retains source only for function bodies, not the
+       top-level program. Set it on the function def before js_create_function so
+       the engine's own transfer (b->debug.source = fd->source) carries it, which
+       lets the debugger's getScriptSource return whole-script source. Gated:
+       non-debug builds keep the original (lower) memory footprint. */
+    if (!fd->source && input_len > 0) {
+        fd->source = js_strndup(ctx, input, input_len);
+        if (fd->source)
+            fd->source_len = input_len;
+    }
+#endif
     /* create the function object and all the enclosed functions */
     fun_obj = js_create_function(ctx, fd);
     if (JS_IsException(fun_obj))

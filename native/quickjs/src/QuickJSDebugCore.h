@@ -39,6 +39,12 @@ public:
   using PausedFn =
       std::function<void(const std::string& scriptId, int line, PauseReason)>;
 
+  // Invoked on the runtime thread the first time a script (by url/filename) is
+  // seen executing, carrying its full source. Drives Debugger.scriptParsed.
+  using ScriptSeenFn = std::function<void(const std::string& scriptId,
+                                          const std::string& url,
+                                          const std::string& source)>;
+
   QuickJSDebugCore(JSRuntime* rt, JSContext* ctx);
   ~QuickJSDebugCore();
 
@@ -53,6 +59,7 @@ public:
   };
 
   void setPausedCallback(PausedFn fn);
+  void setScriptSeenCallback(ScriptSeenFn fn);
 
   // Snapshot the live call stack. Runtime-thread-only: valid only while paused
   // (the frame chain must be intact), i.e. called from within the paused
@@ -107,13 +114,15 @@ private:
   int pausedDepth_ = 0;  // call depth at the current pause; guarded by mutex_
   int pausedLine_ = 0;   // source line at the current pause; guarded by mutex_
 
-  // Runtime-thread-only state (touched only inside onStep).
+  // Runtime-thread-only state (touched only inside onStep / captureFrames).
   std::unordered_map<const void*, std::string> scriptNames_;
+  std::set<std::string> seenScripts_;  // scripts already announced (by url)
   const void* lastToken_ = nullptr;
   int lastLine_ = -1;
   int lastDepth_ = -1;
 
-  PausedFn onPaused_;  // set once before debugging starts
+  PausedFn onPaused_;         // set once before debugging starts
+  ScriptSeenFn onScriptSeen_;  // set once before debugging starts
 };
 
 }  // namespace rill::qjs_debug
