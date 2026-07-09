@@ -236,8 +236,11 @@ CDPResponse DebuggerAdapter::handlePause(TenantId tenantId, int requestId) {
 }
 
 CDPResponse DebuggerAdapter::handleResume(TenantId tenantId, int requestId) {
+  // Emit Debugger.resumed before unblocking the engine so a front-end can clear
+  // its paused UI state; resume() carries no subsequent paused event.
+  onResumed(tenantId);
   engineDebugger_->resume(tenantId);
-  
+
   CDPResponse response;
   response.id = requestId;
   response.result = "{}";
@@ -245,8 +248,11 @@ CDPResponse DebuggerAdapter::handleResume(TenantId tenantId, int requestId) {
 }
 
 CDPResponse DebuggerAdapter::handleStepOver(TenantId tenantId, int requestId) {
+  // A step resumes, then re-pauses at the next stop. Emit resumed first so it
+  // always precedes the Debugger.paused the engine delivers on step completion.
+  onResumed(tenantId);
   engineDebugger_->step(tenantId, StepAction::StepOver);
-  
+
   CDPResponse response;
   response.id = requestId;
   response.result = "{}";
@@ -254,8 +260,9 @@ CDPResponse DebuggerAdapter::handleStepOver(TenantId tenantId, int requestId) {
 }
 
 CDPResponse DebuggerAdapter::handleStepInto(TenantId tenantId, int requestId) {
+  onResumed(tenantId);
   engineDebugger_->step(tenantId, StepAction::StepInto);
-  
+
   CDPResponse response;
   response.id = requestId;
   response.result = "{}";
@@ -263,8 +270,9 @@ CDPResponse DebuggerAdapter::handleStepInto(TenantId tenantId, int requestId) {
 }
 
 CDPResponse DebuggerAdapter::handleStepOut(TenantId tenantId, int requestId) {
+  onResumed(tenantId);
   engineDebugger_->step(tenantId, StepAction::StepOut);
-  
+
   CDPResponse response;
   response.id = requestId;
   response.result = "{}";
