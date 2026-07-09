@@ -22,6 +22,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 struct JSContext;
 struct JSRuntime;
@@ -44,7 +45,19 @@ public:
   QuickJSDebugCore(const QuickJSDebugCore&) = delete;
   QuickJSDebugCore& operator=(const QuickJSDebugCore&) = delete;
 
+  // One live call-stack frame, top (innermost) first. Line is 1-based.
+  struct FrameSnapshot {
+    std::string scriptId;
+    std::string functionName;
+    int line1Based;
+  };
+
   void setPausedCallback(PausedFn fn);
+
+  // Snapshot the live call stack. Runtime-thread-only: valid only while paused
+  // (the frame chain must be intact), i.e. called from within the paused
+  // callback. Native/stripped frames (no source location) are skipped.
+  std::vector<FrameSnapshot> captureFrames();
 
   // Breakpoint + control surface — all safe to call from any thread.
   void addBreakpoint(const std::string& scriptId, int line);

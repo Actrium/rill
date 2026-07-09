@@ -116,16 +116,35 @@ rd::PauseReason QuickJSEngineDebugger::toCdpReason(PauseReason reason) {
 
 void QuickJSEngineDebugger::onCorePaused(const std::string& scriptId,
                                          int line1Based, PauseReason reason) {
-  rd::CallFrame frame;
-  frame.callFrameId = "0";
-  frame.scriptId = scriptId;
-  frame.url = scriptId;
-  frame.lineNumber = line1Based - 1;  // QuickJS 1-based -> CDP 0-based
-  frame.columnNumber = 0;
+  // Snapshot the whole live stack (top frame first) while it is still intact.
+  std::vector<rd::CallFrame> frames;
+  const auto snaps = core_->captureFrames();
+  frames.reserve(snaps.size());
+  for (std::size_t i = 0; i < snaps.size(); ++i) {
+    const auto& s = snaps[i];
+    rd::CallFrame f;
+    f.callFrameId = std::to_string(i);
+    f.functionName = s.functionName.empty() ? "<anonymous>" : s.functionName;
+    f.scriptId = s.scriptId;
+    f.url = s.scriptId;
+    f.lineNumber = s.line1Based - 1;  // QuickJS 1-based -> CDP 0-based
+    f.columnNumber = 0;
+    frames.push_back(std::move(f));
+  }
+  if (frames.empty()) {
+    // Fallback: a pause must always surface a location even if the walk came up
+    // empty (e.g. the top frame was stripped).
+    rd::CallFrame f;
+    f.callFrameId = "0";
+    f.scriptId = scriptId;
+    f.url = scriptId;
+    f.lineNumber = line1Based - 1;
+    f.columnNumber = 0;
+    frames.push_back(std::move(f));
+  }
 
-  std::vector<rd::CallFrame> frames{frame};
-
-  // A breakpoint pause reports which engine breakpoint id(s) fired here.
+  // A breakpoint pause reports which engine breakpoint id(s) fired at the top
+  // frame (scriptId + 1-based line).
   std::vector<std::string> hitBreakpoints;
   {
     std::lock_guard<std::mutex> lk(mutex_);

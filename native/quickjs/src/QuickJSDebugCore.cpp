@@ -12,6 +12,19 @@ extern "C" void rill_qjs_hook_thunk(JSContext* ctx, const void* token, int line,
                                     int depth, void* opaque) {
   static_cast<QuickJSDebugCore*>(opaque)->onStep(ctx, token, line, depth);
 }
+
+// One raw frame as emitted by the engine walk, before scriptId resolution.
+struct RawFrame {
+  const void* token;
+  int line;
+  std::string name;
+};
+// extern "C" sink for rill_qjs_capture_frames; copies the borrowed name.
+extern "C" void rill_qjs_capture_sink(void* user, const void* token, int line,
+                                      const char* name) {
+  static_cast<std::vector<RawFrame>*>(user)->push_back(
+      {token, line, name ? std::string(name) : std::string()});
+}
 }  // namespace
 
 QuickJSDebugCore::QuickJSDebugCore(JSRuntime* rt, JSContext* ctx)
@@ -25,6 +38,18 @@ QuickJSDebugCore::~QuickJSDebugCore() {
 
 void QuickJSDebugCore::setPausedCallback(PausedFn fn) {
   onPaused_ = std::move(fn);
+}
+
+std::vector<QuickJSDebugCore::FrameSnapshot> QuickJSDebugCore::captureFrames() {
+  std::vector<RawFrame> raw;
+  rill_qjs_capture_frames(ctx_, &rill_qjs_capture_sink, &raw);
+  std::vector<FrameSnapshot> out;
+  out.reserve(raw.size());
+  for (auto& r : raw) {
+    if (!r.token || r.line < 0) continue;  // native/stripped frame: no location
+    out.push_back({resolveScript(ctx_, r.token), std::move(r.name), r.line});
+  }
+  return out;
 }
 
 void QuickJSDebugCore::addBreakpoint(const std::string& scriptId, int line) {

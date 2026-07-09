@@ -239,6 +239,69 @@ int main() {
     JS_FreeRuntime(srt);
   }
 
+  // --- Real call frames (M3.2): full live stack at a nested breakpoint. -------
+  static const char* kStackCode =
+      "function c() {\n"          // line 1
+      "  globalThis.hit = 1;\n"   // line 2  <-- breakpoint (innermost)
+      "}\n"                        // line 3
+      "function b() {\n"          // line 4
+      "  c();\n"                   // line 5  (calls c)
+      "}\n"                        // line 6
+      "function a() {\n"          // line 7
+      "  b();\n"                   // line 8  (calls b)
+      "}\n"                        // line 9
+      "a();\n";                    // line 10 (top-level call)
+  {
+    JSRuntime* frt = JS_NewRuntime();
+    JSContext* fctx = JS_NewContext(frt);
+    QuickJSDebugCore fdbg(frt, fctx);
+
+    std::vector<QuickJSDebugCore::FrameSnapshot> captured;
+    std::promise<void> reached;
+    auto reachedFut = reached.get_future();
+    std::atomic<bool> once{false};
+    // Capture on the runtime thread, while paused and the chain is intact.
+    fdbg.setPausedCallback([&](const std::string&, int, PauseReason) {
+      if (!once.exchange(true)) {
+        captured = fdbg.captureFrames();
+        reached.set_value();
+      }
+    });
+    fdbg.addBreakpoint("stack.js", 2);
+
+    std::thread th([&] {
+      JS_UpdateStackTop(frt);
+      JSValue v = JS_Eval(fctx, kStackCode, std::strlen(kStackCode), "stack.js",
+                          JS_EVAL_TYPE_GLOBAL);
+      JS_FreeValue(fctx, v);
+    });
+
+    bool got = reachedFut.wait_for(std::chrono::seconds(5)) ==
+               std::future_status::ready;
+    fdbg.resume();
+    th.join();
+
+    check(got && captured.size() == 4,
+          "captured full stack c->b->a->top (" +
+              std::to_string(captured.size()) + " frames)");
+    if (captured.size() == 4) {
+      check(captured[0].functionName == "c" && captured[0].line1Based == 2,
+            "frame 0 = c at line 2");
+      check(captured[1].functionName == "b" && captured[1].line1Based == 5,
+            "frame 1 = b at call site line 5");
+      check(captured[2].functionName == "a" && captured[2].line1Based == 8,
+            "frame 2 = a at call site line 8");
+      // QuickJS names the top-level eval function "<eval>".
+      check(captured[3].functionName == "<eval>" && captured[3].line1Based == 10,
+            "frame 3 = top-level <eval> at line 10");
+      check(captured[0].scriptId == "stack.js",
+            "frames carry the script id");
+    }
+
+    JS_FreeContext(fctx);
+    JS_FreeRuntime(frt);
+  }
+
   std::cout << "=== " << (g_failures == 0 ? "ALL PASS" : "FAILURES") << " ("
             << g_failures << " failed) ===\n";
   return g_failures == 0 ? 0 : 1;

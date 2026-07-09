@@ -125,6 +125,71 @@ int main() {
   JS_FreeContext(ctx);
   JS_FreeRuntime(rt);
 
+  // --- Nested stack over CDP: Debugger.paused must carry every call frame. ----
+  {
+    JSRuntime* nrt = JS_NewRuntime();
+    JSContext* nctx = JS_NewContext(nrt);
+    QuickJSDebugCore ncore(nrt, nctx);
+    auto nEngine =
+        std::make_shared<QuickJSEngineDebugger>(&ncore, /*tenantId=*/1);
+    auto nAdapter = std::make_shared<DebuggerAdapter>();
+    nAdapter->setEngineDebugger(nEngine);
+    AdapterDebugTarget nTarget(nAdapter, /*tenantId=*/1);
+    nEngine->setPausedNotifier(
+        [nAdapter](PauseReason r, const std::vector<CallFrame>& frames,
+                   const std::vector<std::string>& hits) {
+          nAdapter->onPaused(1, r, frames, hits);
+        });
+
+    Sink nsink;
+    nTarget.onClientConnect(1, [&nsink](const RawCdpMessage& m) { nsink.push(m); });
+    nTarget.dispatch(1, R"({"id":1,"method":"Debugger.enable"})");
+    // Breakpoint inside c() at source line 2 (CDP lineNumber 1).
+    nTarget.dispatch(
+        1,
+        R"({"id":2,"method":"Debugger.setBreakpoint","params":{"location":{"scriptId":"stack.js","lineNumber":1}}})");
+
+    std::promise<void> nDone;
+    auto nFut = nDone.get_future();
+    std::thread nThread([&] {
+      JS_UpdateStackTop(nrt);
+      static const char* kStack =
+          "function c() {\n"          // 1
+          "  globalThis.hit = 1;\n"   // 2 <- breakpoint
+          "}\n"                        // 3
+          "function b() {\n"          // 4
+          "  c();\n"                   // 5
+          "}\n"                        // 6
+          "function a() {\n"          // 7
+          "  b();\n"                   // 8
+          "}\n"                        // 9
+          "a();\n";                    // 10
+      JSValue v = JS_Eval(nctx, kStack, std::strlen(kStack), "stack.js",
+                          JS_EVAL_TYPE_GLOBAL);
+      JS_FreeValue(nctx, v);
+      nDone.set_value();
+    });
+
+    check(nsink.waitFor("\"Debugger.paused\"", "nested paused event"),
+          "nested Debugger.paused delivered");
+    // The serialized callFrames array carries the innermost c and its callers
+    // (functions kept multi-line so QuickJS does not tail-call-eliminate them).
+    check(nsink.waitFor("\"functionName\":\"c\"", "frame c"),
+          "paused payload includes innermost frame c");
+    check(nsink.waitFor("\"functionName\":\"b\"", "frame b"),
+          "paused payload includes caller frame b");
+    check(nsink.waitFor("\"functionName\":\"a\"", "frame a"),
+          "paused payload includes caller frame a");
+
+    nTarget.dispatch(1, R"({"id":3,"method":"Debugger.resume"})");
+    check(nFut.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+          "nested case resumed to completion");
+    nThread.join();
+
+    JS_FreeContext(nctx);
+    JS_FreeRuntime(nrt);
+  }
+
   std::cout << "=== " << (g_failures == 0 ? "ALL PASS" : "FAILURES") << " ("
             << g_failures << " failed) ===\n";
   return g_failures == 0 ? 0 : 1;
