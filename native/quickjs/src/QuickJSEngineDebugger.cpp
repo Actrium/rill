@@ -10,8 +10,8 @@ QuickJSEngineDebugger::QuickJSEngineDebugger(QuickJSDebugCore* core,
                                              rd::TenantId tenantId)
     : core_(core), tenantId_(tenantId) {
   core_->setPausedCallback(
-      [this](const std::string& scriptId, int line1Based) {
-        onCorePaused(scriptId, line1Based);
+      [this](const std::string& scriptId, int line1Based, PauseReason reason) {
+        onCorePaused(scriptId, line1Based, reason);
       });
 }
 
@@ -74,9 +74,13 @@ void QuickJSEngineDebugger::pause(rd::TenantId) { core_->requestPause(); }
 
 void QuickJSEngineDebugger::resume(rd::TenantId) { core_->resume(); }
 
-void QuickJSEngineDebugger::step(rd::TenantId, rd::StepAction /*action*/) {
-  // M3: precise stepping. For now, continue so a step request never wedges.
-  core_->resume();
+void QuickJSEngineDebugger::step(rd::TenantId, rd::StepAction action) {
+  switch (action) {
+    case rd::StepAction::StepInto: core_->stepInto(); break;
+    case rd::StepAction::StepOver: core_->stepOver(); break;
+    case rd::StepAction::StepOut:  core_->stepOut();  break;
+    case rd::StepAction::Continue: core_->resume();   break;
+  }
 }
 
 std::string QuickJSEngineDebugger::evaluateOnCallFrame(
@@ -101,8 +105,17 @@ std::string QuickJSEngineDebugger::getScriptSource(rd::TenantId,
 
 bool QuickJSEngineDebugger::isPaused(rd::TenantId) { return core_->isPaused(); }
 
+rd::PauseReason QuickJSEngineDebugger::toCdpReason(PauseReason reason) {
+  switch (reason) {
+    case PauseReason::Breakpoint: return rd::PauseReason::Breakpoint;
+    case PauseReason::Step:       return rd::PauseReason::Step;
+    case PauseReason::Pause:      return rd::PauseReason::DebugCommand;
+  }
+  return rd::PauseReason::Other;
+}
+
 void QuickJSEngineDebugger::onCorePaused(const std::string& scriptId,
-                                         int line1Based) {
+                                         int line1Based, PauseReason reason) {
   rd::CallFrame frame;
   frame.callFrameId = "0";
   frame.scriptId = scriptId;
@@ -111,11 +124,20 @@ void QuickJSEngineDebugger::onCorePaused(const std::string& scriptId,
   frame.columnNumber = 0;
 
   std::vector<rd::CallFrame> frames{frame};
+
+  // A breakpoint pause reports which engine breakpoint id(s) fired here.
+  std::vector<std::string> hitBreakpoints;
   {
     std::lock_guard<std::mutex> lk(mutex_);
     lastFrames_ = frames;
+    if (reason == PauseReason::Breakpoint) {
+      for (const auto& [id, loc] : breakpoints_) {
+        if (loc.first == scriptId && loc.second == line1Based)
+          hitBreakpoints.push_back(id);
+      }
+    }
   }
-  if (notifier_) notifier_(rd::PauseReason::Breakpoint, frames, {});
+  if (notifier_) notifier_(toCdpReason(reason), frames, hitBreakpoints);
 }
 
 }  // namespace rill::qjs_debug

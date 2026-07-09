@@ -65,7 +65,9 @@ public:
 
 private:
   // Runs on the QuickJS runtime thread when execution pauses.
-  void onCorePaused(const std::string& scriptId, int line1Based);
+  void onCorePaused(const std::string& scriptId, int line1Based,
+                    PauseReason reason);
+  static rill::devtools::PauseReason toCdpReason(PauseReason reason);
 
   QuickJSDebugCore* core_;
   rill::devtools::TenantId tenantId_;

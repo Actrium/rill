@@ -28,10 +28,15 @@ struct JSRuntime;
 
 namespace rill::qjs_debug {
 
+// Why the runtime paused. Core-local (kept independent of the devtools CDP
+// types); QuickJSEngineDebugger translates it to rill::devtools::PauseReason.
+enum class PauseReason { Breakpoint, Step, Pause };
+
 class QuickJSDebugCore {
 public:
   // Invoked on the runtime thread the moment execution pauses, before it blocks.
-  using PausedFn = std::function<void(const std::string& scriptId, int line)>;
+  using PausedFn =
+      std::function<void(const std::string& scriptId, int line, PauseReason)>;
 
   QuickJSDebugCore(JSRuntime* rt, JSContext* ctx);
   ~QuickJSDebugCore();
@@ -46,6 +51,11 @@ public:
   void removeBreakpoint(const std::string& scriptId, int line);
   void requestPause();  // pause at the next source line
   void resume();
+  // Stepping: arm the mode against the paused call depth, then resume. A pause
+  // (breakpoint, request, or the step landing) disarms it.
+  void stepInto();
+  void stepOver();
+  void stepOut();
   bool isPaused();
 
   // C hook entry (registered with the engine); dispatches to onStep. `depth` is
@@ -58,17 +68,25 @@ private:
   JSRuntime* rt_;
   JSContext* ctx_;
 
+  enum class StepMode { None, Into, Over, Out };
+
   std::mutex mutex_;
   std::condition_variable cv_;
   std::set<std::pair<std::string, int>> breakpoints_;  // guarded by mutex_
   bool pauseRequested_ = false;                        // guarded by mutex_
   bool paused_ = false;                                // guarded by mutex_
   bool resumeRequested_ = false;                       // guarded by mutex_
+  StepMode stepMode_ = StepMode::None;                 // guarded by mutex_
+  int stepDepth_ = 0;    // call depth the step was armed at; guarded by mutex_
+  int stepLine_ = 0;     // source line the step was armed at; guarded by mutex_
+  int pausedDepth_ = 0;  // call depth at the current pause; guarded by mutex_
+  int pausedLine_ = 0;   // source line at the current pause; guarded by mutex_
 
   // Runtime-thread-only state (touched only inside onStep).
   std::unordered_map<const void*, std::string> scriptNames_;
   const void* lastToken_ = nullptr;
   int lastLine_ = -1;
+  int lastDepth_ = -1;
 
   PausedFn onPaused_;  // set once before debugging starts
 };
