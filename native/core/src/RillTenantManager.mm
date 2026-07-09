@@ -763,6 +763,14 @@ TenantId RillTenantManager::createTenant(facebook::jsi::Runtime& rt,
   if (devTools_) {
     devTools_->onTenantCreated(
         id, tc.appId.empty() ? ("rill guest " + std::to_string(id)) : tc.appId);
+    // Register an engine-specific CDP target when the sandbox is debug-capable
+    // (today: Hermes). One CDP execution context per tenant (dev-only MVP).
+    if (auto* dbg = tenants_.at(id)->cdpDebuggable()) {
+      if (auto target =
+              dbg->createCdpDebugTarget(callInvoker_, static_cast<int32_t>(id))) {
+        devTools_->registerDebugTarget(id, std::move(target));
+      }
+    }
   }
 #endif
 
@@ -784,13 +792,17 @@ void RillTenantManager::destroyTenant(TenantId id) {
   // P2: Destroy security context
   securityManager_.destroySecurityContext(id);
 
+#if RILL_WIP_CDP_DEVTOOLS
+  // Tear down the CDP target BEFORE disposing the runtime: unregistering the
+  // tenant disconnects any DevTools clients, which force-resumes a runtime left
+  // paused at a breakpoint. Disposing first would destroy the runtime out from
+  // under a pending resume.
+  if (devTools_) devTools_->onTenantDestroyed(id);
+#endif
+
   it->second->dispose();
   tenants_.erase(it);
   registry_.unregisterTenant(id);
-
-#if RILL_WIP_CDP_DEVTOOLS
-  if (devTools_) devTools_->onTenantDestroyed(id);
-#endif
 }
 
 void RillTenantManager::pauseTenant(TenantId id) {
