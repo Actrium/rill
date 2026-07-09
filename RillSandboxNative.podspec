@@ -67,7 +67,11 @@ Pod::Spec.new do |s|
     ]
   elsif sandbox_engine == 'hermes'
     s.source_files = common_sources + [
-      "native/hermes/src/HermesSandboxJSI.{h,cpp}"
+      "native/hermes/src/HermesSandboxJSI.{h,cpp}",
+      # CDP DevTools relay for guest debugging. Whole TU is gated on
+      # RILL_WIP_CDP_DEVTOOLS && !NDEBUG, so it compiles to nothing unless the
+      # dev flag is on (see the ENV opt-in below).
+      "native/hermes/src/devtools/*.{h,cpp}"
     ]
     s.public_header_files = [
       "native/core/src/SandboxEngineConfig.h",
@@ -122,9 +126,22 @@ Pod::Spec.new do |s|
   # ship an inspectable sandbox. Only meaningful for sandbox_engine == 'jsc'.
   preprocessor_defs += ' RILL_WIP_JSC_INSPECTOR=1' if ENV['RILL_WIP_JSC_INSPECTOR'] == '1'
 
+  # Dev-only: opt Hermes sandbox tenants into the CDP DevTools relay (guest
+  # debugging over Chrome DevTools Protocol) when explicitly requested via ENV.
+  # Also gated on !NDEBUG, so a Release archive strips it even if this define
+  # leaks in. HERMES_ENABLE_DEBUGGER is paired in so our TUs bind the real
+  # cdp::CDPAgent / AsyncDebuggerAPI (a debug Hermes build ships them); never
+  # ship an inspectable sandbox. Only meaningful for sandbox_engine == 'hermes'.
+  if ENV['RILL_WIP_CDP_DEVTOOLS'] == '1'
+    preprocessor_defs += ' RILL_WIP_CDP_DEVTOOLS=1 HERMES_ENABLE_DEBUGGER=1'
+  end
+
   s.pod_target_xcconfig = {
     'GCC_PREPROCESSOR_DEFINITIONS' => preprocessor_defs,
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++17',
-    'HEADER_SEARCH_PATHS' => '$(inherited) $(PODS_ROOT)/Headers/Public/ReactCommon $(PODS_ROOT)/Headers/Private/ReactCommon $(PODS_ROOT)/Headers/Public/React-RuntimeApple'
+    # native/core/src on the path lets the Hermes CDP relay resolve its
+    # cross-module quoted includes ("devtools/CdpDebuggable.h",
+    # "devtools/EngineDebugTarget.h") when RILL_WIP_CDP_DEVTOOLS is on.
+    'HEADER_SEARCH_PATHS' => '$(inherited) $(PODS_ROOT)/Headers/Public/ReactCommon $(PODS_ROOT)/Headers/Private/ReactCommon $(PODS_ROOT)/Headers/Public/React-RuntimeApple $(PODS_TARGET_SRCROOT)/native/core/src $(PODS_TARGET_SRCROOT)/native/hermes/src'
   }
 end
