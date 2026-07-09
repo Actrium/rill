@@ -6,6 +6,8 @@
 #endif
 #if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
 #include <hermes/cdp/CDPDebugAPI.h>
+#include <ReactCommon/CallInvoker.h>
+#include "devtools/CDPAgentTarget.h"
 #endif
 #include <string>
 #include <cstring>
@@ -520,6 +522,31 @@ void HermesSandboxContext::dispose() {
   sandboxRuntime_.reset();
   rill_log(kLogTag, "Disposed sandbox context");
 }
+
+#if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
+std::shared_ptr<rill::devtools::IEngineDebugTarget>
+HermesSandboxContext::createCdpDebugTarget(
+    std::shared_ptr<facebook::react::CallInvoker> callInvoker,
+    std::int32_t executionContextId) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (disposed_ || !cdpDebugAPI_ || !callInvoker) {
+    return nullptr;
+  }
+  // Runtime-task pump. Hermes emits tasks that must run on the runtime thread;
+  // this guest runtime runs on the host JS thread, so bounce each task through
+  // the host CallInvoker. Capturing the raw runtime pointer is safe because
+  // RillTenantManager tears the target down (resume + unregister) before it
+  // disposes this context, so no task outlives *rt.
+  auto *rt = sandboxRuntime_.get();
+  facebook::hermes::debugger::EnqueueRuntimeTaskFunc enqueue =
+      [callInvoker, rt](facebook::hermes::debugger::RuntimeTask task) {
+        callInvoker->invokeAsync(
+            [task = std::move(task), rt]() { task(*rt); });
+      };
+  return std::make_shared<rill::devtools::CDPAgentTarget>(
+      executionContextId, cdpDebugAPI_, std::move(enqueue));
+}
+#endif
 
 jsi::Value HermesSandboxContext::get(jsi::Runtime &rt,
                                      const jsi::PropNameID &name) {

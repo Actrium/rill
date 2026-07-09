@@ -14,6 +14,10 @@
 #include <string>
 #include <unordered_map>
 
+#if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
+#include "devtools/CdpDebuggable.h"  // rill::devtools::ICdpDebuggable (capability seam)
+#endif
+
 namespace facebook {
 namespace hermes {
 class HermesRuntime;  // fwd-decl: keep the concrete runtime type off this header
@@ -36,7 +40,12 @@ using namespace facebook;
  * - extract(name: string): unknown
  * - dispose(): void
  */
-class HermesSandboxContext : public jsi::HostObject {
+class HermesSandboxContext : public jsi::HostObject
+#if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
+    ,
+    public rill::devtools::ICdpDebuggable
+#endif
+{
 public:
   HermesSandboxContext(jsi::Runtime &hostRuntime, double timeout);
   ~HermesSandboxContext() override;
@@ -60,6 +69,12 @@ public:
   // CDPAgentTarget from the runtime + this shared CDPDebugAPI. Dev-only.
   facebook::hermes::HermesRuntime &hermesRuntime() { return *sandboxRuntime_; }
   std::shared_ptr<facebook::hermes::cdp::CDPDebugAPI> cdpDebugAPI() { return cdpDebugAPI_; }
+
+  // ICdpDebuggable: build a per-tenant CDP target. Runtime tasks are pumped onto
+  // the host JS thread (where this guest runtime runs) via `callInvoker`.
+  std::shared_ptr<rill::devtools::IEngineDebugTarget> createCdpDebugTarget(
+      std::shared_ptr<facebook::react::CallInvoker> callInvoker,
+      std::int32_t executionContextId) override;
 #endif
 
 private:
