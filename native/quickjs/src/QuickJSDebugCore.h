@@ -48,8 +48,9 @@ public:
   void resume();
   bool isPaused();
 
-  // C hook entry (registered with the engine); dispatches to onStep.
-  void onStep(JSContext* ctx, const void* scriptToken, int line);
+  // C hook entry (registered with the engine); dispatches to onStep. `depth` is
+  // the live call-stack length (1 = top-level), used by stepping.
+  void onStep(JSContext* ctx, const void* scriptToken, int line, int depth);
 
 private:
   std::string resolveScript(JSContext* ctx, const void* scriptToken);

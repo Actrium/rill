@@ -16501,25 +16501,74 @@ const char *rill_qjs_script_filename(JSContext *ctx, const void *script_token)
     return JS_AtomToCString(ctx, b->debug.filename);
 }
 
-/* Resolve the current source line and forward it; pause policy is the hook's. */
-static void rill_qjs_on_step(JSContext *ctx, JSFunctionBytecode *b,
-                             const uint8_t *pc)
+const char *rill_qjs_script_source(const void *script_token, size_t *out_len)
 {
-    int line;
+    const JSFunctionBytecode *b = script_token;
+    if (!b || !b->has_debug || !b->debug.source) {
+        if (out_len)
+            *out_len = 0;
+        return NULL;
+    }
+    if (out_len)
+        *out_len = (size_t)b->debug.source_len;
+    return b->debug.source;
+}
+
+/*
+ * Walk the live call stack, top (innermost) first, mirroring build_backtrace().
+ * The top frame's PC is live-stamped by rill_qjs_on_step (see below), so it uses
+ * the raw offset; caller frames record the PC of the instruction AFTER the call,
+ * so subtract one to land back inside the call site (as build_backtrace does).
+ */
+int rill_qjs_capture_frames(JSContext *ctx, RillQjsFrameSink sink, void *user)
+{
+    JSStackFrame *sf;
+    int idx = 0;
+    for (sf = ctx->rt->current_stack_frame; sf != NULL; sf = sf->prev_frame) {
+        JSFunctionBytecode *b = JS_GetFunctionBytecode(sf->cur_func);
+        const char *name = get_func_name(ctx, sf->cur_func);
+        if (b && b->has_debug && b->debug.pc2line_buf && sf->cur_pc) {
+            uint32_t off = (uint32_t)(sf->cur_pc - b->byte_code_buf);
+            if (idx > 0 && off > 0)
+                off -= 1;
+            sink(user, b, find_line_num(ctx, b, off), name);
+        } else {
+            /* native or stripped frame: no source location */
+            sink(user, NULL, -1, name);
+        }
+        JS_FreeCString(ctx, name);
+        idx++;
+    }
+    return idx;
+}
+
+/* Resolve the current source line and forward it; pause policy is the hook's.
+   Stamps sf->cur_pc so a frame walk triggered from the callback reads this live
+   PC for the top frame instead of a stale call-site value (only ever runs while
+   attached, so a detached build pays nothing). */
+static void rill_qjs_on_step(JSContext *ctx, JSFunctionBytecode *b,
+                             JSStackFrame *sf, const uint8_t *pc)
+{
+    int line, depth;
+    JSStackFrame *f;
     if (!b || !b->has_debug || !b->debug.pc2line_buf)
         return;
     line = find_line_num(ctx, b, (uint32_t)(pc - b->byte_code_buf));
     if (line < 0)
         return;
-    rill_qjs_debug_hook_fn(ctx, b, line, rill_qjs_debug_hook_opaque);
+    sf->cur_pc = pc;
+    depth = 0;
+    for (f = ctx->rt->current_stack_frame; f != NULL; f = f->prev_frame)
+        depth++;
+    rill_qjs_debug_hook_fn(ctx, b, line, depth, rill_qjs_debug_hook_opaque);
 }
 
 /* An EXPRESSION (not a statement) so it can ride inside SWITCH's dispatch
    without splitting `if (...) BREAK;` — BREAK must stay a single statement. */
-#define RILL_QJS_STEP(ctx, b, pc) \
-    (unlikely(rill_qjs_debug_hook_fn) ? rill_qjs_on_step(ctx, b, pc) : (void)0)
+#define RILL_QJS_STEP(ctx, b, sf, pc) \
+    (unlikely(rill_qjs_debug_hook_fn) ? rill_qjs_on_step(ctx, b, sf, pc) : (void)0)
 #else
-#define RILL_QJS_STEP(ctx, b, pc) ((void)0)
+#define RILL_QJS_STEP(ctx, b, sf, pc) ((void)0)
 #endif
 
 static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
@@ -16542,7 +16591,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
     // JS_FreeCString(caller_ctx, str);
 
 #if !DIRECT_DISPATCH
-#define SWITCH(pc)      switch (RILL_QJS_STEP(ctx, b, pc), opcode = *pc++)
+#define SWITCH(pc)      switch (RILL_QJS_STEP(ctx, b, sf, pc), opcode = *pc++)
 #define CASE(op)        case op
 #define DEFAULT         default
 #define BREAK           break
@@ -16557,7 +16606,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
 #include "quickjs-opcode.h"
         [ OP_COUNT ... 255 ] = &&case_default
     };
-#define SWITCH(pc)      goto *dispatch_table[(RILL_QJS_STEP(ctx, b, pc), opcode = *pc++)];
+#define SWITCH(pc)      goto *dispatch_table[(RILL_QJS_STEP(ctx, b, sf, pc), opcode = *pc++)];
 #define CASE(op)        case_ ## op
 #define DEFAULT         case_default
 #define BREAK           SWITCH(pc)

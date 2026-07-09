@@ -9,8 +9,8 @@ namespace rill::qjs_debug {
 namespace {
 // extern "C" trampoline: the engine hook is a C function pointer.
 extern "C" void rill_qjs_hook_thunk(JSContext* ctx, const void* token, int line,
-                                    void* opaque) {
-  static_cast<QuickJSDebugCore*>(opaque)->onStep(ctx, token, line);
+                                    int depth, void* opaque) {
+  static_cast<QuickJSDebugCore*>(opaque)->onStep(ctx, token, line, depth);
 }
 }  // namespace
 
@@ -68,7 +68,8 @@ std::string QuickJSDebugCore::resolveScript(JSContext* ctx, const void* token) {
   return name;
 }
 
-void QuickJSDebugCore::onStep(JSContext* ctx, const void* token, int line) {
+void QuickJSDebugCore::onStep(JSContext* ctx, const void* token, int line,
+                              int /*depth*/) {
   // Fire once per source line, not per instruction on that line.
   if (token == lastToken_ && line == lastLine_) return;
   lastToken_ = token;
