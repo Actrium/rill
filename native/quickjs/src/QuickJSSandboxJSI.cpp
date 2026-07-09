@@ -135,6 +135,11 @@ QuickJSSandboxContext::createCdpDebugTarget(
                              const std::vector<std::string>& hits) {
         adapterRaw->onPaused(tenantId, r, frames, hits);
       });
+  // Script first seen -> Debugger.scriptParsed (drives setBreakpointByUrl).
+  engineDbg->setScriptParsedNotifier(
+      [adapterRaw, tenantId](const rill::devtools::ScriptInfo& info) {
+        adapterRaw->onScriptParsed(tenantId, info);
+      });
   return target;
 }
 #endif
