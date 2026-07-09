@@ -126,14 +126,21 @@ Pod::Spec.new do |s|
   # ship an inspectable sandbox. Only meaningful for sandbox_engine == 'jsc'.
   preprocessor_defs += ' RILL_WIP_JSC_INSPECTOR=1' if ENV['RILL_WIP_JSC_INSPECTOR'] == '1'
 
-  # Dev-only: opt Hermes sandbox tenants into the CDP DevTools relay (guest
-  # debugging over Chrome DevTools Protocol) when explicitly requested via ENV.
-  # Also gated on !NDEBUG, so a Release archive strips it even if this define
-  # leaks in. HERMES_ENABLE_DEBUGGER is paired in so our TUs bind the real
-  # cdp::CDPAgent / AsyncDebuggerAPI (a debug Hermes build ships them); never
-  # ship an inspectable sandbox. Only meaningful for sandbox_engine == 'hermes'.
+  # Dev-only: opt guest sandboxes into the CDP DevTools relay (debugging over
+  # Chrome DevTools Protocol) when explicitly requested via ENV. The code paths
+  # are ALSO gated on !NDEBUG, so a Release archive strips them even if this
+  # define leaks in — never ship an inspectable sandbox. Each engine gets its
+  # own debug enabler alongside the relay flag:
+  #   - Hermes: HERMES_ENABLE_DEBUGGER so our TUs bind the real cdp::CDPAgent /
+  #     AsyncDebuggerAPI (a debug Hermes build ships them);
+  #   - QuickJS: RILL_QJS_DEBUG, which compiles the interpreter debug hook in.
   if ENV['RILL_WIP_CDP_DEVTOOLS'] == '1'
-    preprocessor_defs += ' RILL_WIP_CDP_DEVTOOLS=1 HERMES_ENABLE_DEBUGGER=1'
+    preprocessor_defs += ' RILL_WIP_CDP_DEVTOOLS=1'
+    if sandbox_engine == 'hermes'
+      preprocessor_defs += ' HERMES_ENABLE_DEBUGGER=1'
+    elsif sandbox_engine == 'quickjs'
+      preprocessor_defs += ' RILL_QJS_DEBUG=1'
+    end
   end
 
   s.pod_target_xcconfig = {

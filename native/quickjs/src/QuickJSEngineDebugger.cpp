@@ -15,6 +15,19 @@ QuickJSEngineDebugger::QuickJSEngineDebugger(QuickJSDebugCore* core,
       });
 }
 
+QuickJSEngineDebugger::~QuickJSEngineDebugger() {
+  // Detach from the core before we die: clear the paused callback (it captures
+  // this) and drop our breakpoints so a still-live core can't pause with no
+  // observer. The core outlives us (owned by the sandbox context, torn down
+  // after the debug target).
+  core_->setPausedCallback(nullptr);
+  std::lock_guard<std::mutex> lk(mutex_);
+  for (const auto& [id, loc] : breakpoints_) {
+    core_->removeBreakpoint(loc.first, loc.second);
+  }
+  breakpoints_.clear();
+}
+
 void QuickJSEngineDebugger::setPausedNotifier(PausedNotifier fn) {
   notifier_ = std::move(fn);
 }

@@ -38,6 +38,7 @@ public:
       const std::vector<std::string>& hitBreakpoints)>;
 
   QuickJSEngineDebugger(QuickJSDebugCore* core, rill::devtools::TenantId tenantId);
+  ~QuickJSEngineDebugger() override;
 
   void setPausedNotifier(PausedNotifier fn);
 
