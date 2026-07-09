@@ -1,3 +1,53 @@
+// ============================================================================
+// WIP — gated behind RILL_WIP_CDP_DEVTOOLS (off by default in production builds).
+//
+// WHAT THIS IS
+//   A Chrome DevTools Protocol (CDP) server that lets a downstream app developer
+//   attach Chrome DevTools / VS Code to a *live guest sandbox* and inspect it.
+//   This is developer-facing tooling infrastructure, distinct from:
+//     - the internal [DIAG] logging (rill's own diagnostics), and
+//     - the TS `rill/devtools` entry (guest-side op-log / profiling / error
+//       tracking, which IS wired and shipped).
+//
+// GOAL
+//   Full Chrome DevTools attach to a running guest: Console, DOM tree (from the
+//   receiver node tree), Network panel (from host-module traffic), Runtime
+//   evaluate, and — the hard part — real breakpoints / stepping.
+//
+// CURRENT STATUS (why it is gated, not shipped)
+//   - Transport (CDPTransportApple): REAL — Network.framework WebSocket server.
+//     CDPTransport is an abstract base, so a CDPTransportWeb could be added.
+//   - CDPServer + Console/DOM/Network/Runtime adapters: real structure, fed from
+//     data rill already owns.
+//   - Debugger adapter (breakpoints/stepping): STUB ONLY — IEngineDebugger is a
+//     pure interface and NO engine (quickjs/hermes/jsc) implements it; only
+//     StubEngineDebugger exists.
+//   - It is NEVER constructed in production (test-only), yet was compiled into
+//     every native build — hence the gate, to keep it out of release weight
+//     while preserving the work as a documented roadmap.
+//
+// TODO TO COMPLETE (ordered)
+//   (see the local architecture deep-review doc, section II.3 addendum, for the
+//    full cost analysis behind these estimates)
+//   1. Wire the non-breakpoint tiers (days): instantiate CDPServer +
+//      CDPTransportApple in RillTenantManager, start(port), registerTenant per
+//      tenant, feed Console/DOM/Network/Runtime adapters from existing events.
+//   2. Real breakpoints (weeks, per engine):
+//      - Hermes: bridge hermes::inspector into IEngineDebugger.
+//      - JSC: private inspector API (App Store risk — decide first).
+//      - QuickJS: no built-in debugger; requires a forked engine with debug
+//        hooks (e.g. koush/quickjs `js_debugger_connect`, which speaks a custom
+//        JSON protocol — needs a protocol translator to CDP semantics).
+//   3. Web/WASM support: add CDPTransportWeb, compile the C++ stack into the
+//      wasm build, and solve single-thread "pause on breakpoint" (Asyncify or
+//      multi-worker). Non-breakpoint tiers are cheaper to do in TS instead.
+//
+// PROCESS / HOW TO BUILD WITH IT
+//   Tests always define the flag (native/core/Makefile) so this code keeps
+//   compiling and stays honest. For an evaluation native build:
+//     RILL_WIP_CDP_DEVTOOLS=1 pod install   (podspec forwards it as a -D define)
+// ============================================================================
+
 /**
  * CDPServer.h
  *

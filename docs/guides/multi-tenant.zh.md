@@ -183,7 +183,7 @@ tenant manager.busMulticast([tenantIdA, tenantIdB], channel, payload);
 | 策略 | 类型 | 描述 |
 |---|---|---|
 | `systemOnly` | `boolean` | 只有 host 可以发布到此通道。 |
-| `requirePermission` | `boolean` | Tenant 必须被授予显式访问权限。 |
+| `requirePermission` | `boolean` | Tenant 必须被授予显式访问权限。**当前未强制执行** —— 详见 [Event Bus](../architecture/event-bus.zh.md)。 |
 | `maxSubscribers` | `number` | 最大并发订阅者数量。 |
 | `maxEventsPerSecond` | `number` | 已发布事件的速率限制。 |
 | `maxPayloadBytes` | `number` | 最大序列化载荷大小。 |
@@ -191,7 +191,9 @@ tenant manager.busMulticast([tenantIdA, tenantIdB], channel, payload);
 
 ### 内置通道
 
-| 通道 | 方向 | 描述 |
+> **状态：规划中 —— 尚未实现。** Event Bus 启动时**没有任何**预注册通道；下表所列通道目前都不存在，使用前必须显式创建。详见 [Event Bus](../architecture/event-bus.zh.md)。
+
+| 通道（规划中） | 方向 | 描述 |
 |---|---|---|
 | `system` | Host 到 tenant | 系统级通知(内存警告等)。 |
 | `lifecycle` | Host 到 tenant | 应用生命周期事件(前台、后台)。 |

@@ -14,6 +14,8 @@ Rill is a lightweight, headless, sandboxed dynamic UI rendering engine for React
 
 5. **Sandbox Isolation** -- Guest code runs in a dedicated JavaScript engine instance (JavaScriptCore, QuickJS, Hermes, WASM, or Node `vm`). The host injects a carefully controlled set of globals; no ambient APIs (network, file system, timers) are available unless explicitly polyfilled.
 
+6. **One Engine Per Environment** -- A single rill engine drives one guest per host JavaScript environment. Composing *multiple* apps is done by isolation, not by sharing an environment: on the web each app runs in its own iframe (separate origin, storage, and CSP); natively each tenant runs on its own `TenantThread` with its own JS runtime. Rill does **not** target several independent app engines coexisting inside one shared JS context, so environment-scoped module-level singletons (e.g. the guest callback registry installed on `globalThis`) are legitimate rather than a limitation. Opening multiple `<Canvas>` surfaces *within* a single app is a separate concern and fully supported.
+
 ## Four-Layer Architecture
 
 ```

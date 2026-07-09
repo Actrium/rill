@@ -43,6 +43,11 @@ Pod::Spec.new do |s|
     "native/core/src/TenantContext.{h,cpp}",
     "native/core/src/TenantRegistry.{h,cpp}",
     "native/core/src/EventBus.{h,cpp}",
+    # WIP subsystems. Their bodies are wrapped in #if RILL_WIP_* (off by default),
+    # so these files compile to empty translation units in a normal build — no
+    # binary weight, no accidental use. Enable for evaluation with
+    # RILL_WIP_CDP_DEVTOOLS=1 / RILL_WIP_NATIVE_SECURITY=1 (forwarded below).
+    # See devtools/CDPServer.h and security/SecurityManager.h for status/TODO.
     "native/core/src/security/*.{h,cpp}",
     "native/core/src/devtools/*.{h,cpp}",
     "native/core/src/devtools/CDPTransportApple.{h,mm}"
@@ -54,9 +59,19 @@ Pod::Spec.new do |s|
       "native/quickjs/src/*.{h,cpp}",
       "native/quickjs/vendor/*.{h,c}"
     ]
+    # Full jsi::Runtime hosts kept only as the test host for native sandbox unit/
+    # leak tests (native/{quickjs,jsc}/Makefile); excluded from the shipped pod -
+    # production installs the *SandboxJSI HostObject into the app's own runtime and
+    # never links these. See each file's header for details.
     s.exclude_files = [
-      "native/quickjs/src/EmscriptenBindings.cpp",
-      "native/quickjs/src/wasm_bindings.c"
+      "native/quickjs/src/wasm_bindings.c",
+      "native/quickjs/src/QuickJSRuntime.{h,cpp}",
+      "native/quickjs/src/QuickJSRuntimeFactory.{h,cpp}",
+      "native/quickjs/src/HostProxy.{h,cpp}",
+      "native/quickjs/src/JSIValueConverter.{h,cpp}",
+      "native/quickjs/src/QuickJSPointerValue.{h,cpp}",
+      "native/quickjs/src/ScopedJSValue.h",
+      "native/quickjs/src/QuickJSInstrumentation.{h,cpp}"
     ]
     s.public_header_files = [
       "native/core/src/SandboxEngineConfig.h",
@@ -87,6 +102,13 @@ Pod::Spec.new do |s|
     # Default: JSC sandbox
     s.source_files = common_sources + [
       "native/jsc/src/**/*.{h,mm}"
+    ]
+    # Full jsi::Runtime hosts kept only as the test host for native sandbox unit/
+    # leak tests (native/{quickjs,jsc}/Makefile); excluded from the shipped pod -
+    # production installs the *SandboxJSI HostObject into the app's own runtime and
+    # never links these. See each file's header for details.
+    s.exclude_files = [
+      "native/jsc/src/JSCRuntime.{h,mm}"
     ]
     s.public_header_files = [
       "native/core/src/SandboxEngineConfig.h",
@@ -142,6 +164,8 @@ Pod::Spec.new do |s|
       preprocessor_defs += ' RILL_QJS_DEBUG=1'
     end
   end
+  # Other WIP subsystem, opt-in for evaluation builds (off by default).
+  preprocessor_defs += ' RILL_WIP_NATIVE_SECURITY=1' if ENV['RILL_WIP_NATIVE_SECURITY'] == '1'
 
   s.pod_target_xcconfig = {
     'GCC_PREPROCESSOR_DEFINITIONS' => preprocessor_defs,

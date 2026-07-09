@@ -1,9 +1,10 @@
 [package]
 name = "seq-guest"
-version = "0.0.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Demo native rill guest exercising two sequential host awaits (put then get) and JSON escaping."
-license = "Apache-2.0"
+license.workspace = true
+publish = false
 
 [lib]
 crate-type = ["cdylib"]

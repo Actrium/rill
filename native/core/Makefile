@@ -13,10 +13,7 @@ SRC_FLAT = \
 	$(SRC_DIR)/ThreadPool.cpp \
 	$(SRC_DIR)/TenantContext.cpp \
 	$(SRC_DIR)/TenantRegistry.cpp \
-	$(SRC_DIR)/EventBus.cpp \
-	$(SRC_DIR)/InstructionDecoder.cpp \
-	$(SRC_DIR)/InstructionEncoder.cpp \
-	$(SRC_DIR)/InstructionCodec.cpp
+	$(SRC_DIR)/EventBus.cpp
 
 # Source files under test (security subdirectory)
 SRC_SECURITY = \
@@ -35,6 +32,12 @@ SRC_DEVTOOLS = \
 	$(SRC_DIR)/devtools/AdapterDebugTarget.cpp \
 	$(SRC_DIR)/devtools/DevToolsService.cpp
 
+# Source files under test (protocol subdirectory).
+# WIP — bodies gated behind RILL_WIP_BINARY_PROTOCOL (see WIP_DEFS below);
+# compiles to an empty translation unit unless that flag is defined.
+SRC_PROTOCOL = \
+	$(SRC_DIR)/protocol/WireDecoder.cpp
+
 # Test files
 TEST_SOURCES = \
 	$(TEST_DIR)/main.cpp \
@@ -47,19 +50,20 @@ TEST_SOURCES = \
 	$(TEST_DIR)/test_network_sandbox.cpp \
 	$(TEST_DIR)/test_file_sandbox.cpp \
 	$(TEST_DIR)/test_event_bus.cpp \
-	$(TEST_DIR)/test_instruction_codec.cpp \
 	$(TEST_DIR)/test_cdp_server.cpp \
 	$(TEST_DIR)/test_cdp_adapters.cpp \
 	$(TEST_DIR)/test_engine_debug_target.cpp \
 	$(TEST_DIR)/test_adapter_debug_target.cpp \
-	$(TEST_DIR)/test_devtools_service.cpp
+	$(TEST_DIR)/test_devtools_service.cpp \
+	$(TEST_DIR)/test_wire_decoder.cpp
 
 # Object files
 SRC_FLAT_OBJECTS = $(patsubst $(SRC_DIR)/%.cpp,$(BUILD_DIR)/src_%.o,$(SRC_FLAT))
 SRC_SECURITY_OBJECTS = $(patsubst $(SRC_DIR)/security/%.cpp,$(BUILD_DIR)/src_security_%.o,$(SRC_SECURITY))
 SRC_DEVTOOLS_OBJECTS = $(patsubst $(SRC_DIR)/devtools/%.cpp,$(BUILD_DIR)/src_devtools_%.o,$(SRC_DEVTOOLS))
+SRC_PROTOCOL_OBJECTS = $(patsubst $(SRC_DIR)/protocol/%.cpp,$(BUILD_DIR)/src_protocol_%.o,$(SRC_PROTOCOL))
 TEST_OBJECTS = $(patsubst $(TEST_DIR)/%.cpp,$(BUILD_DIR)/test_%.o,$(TEST_SOURCES))
-ALL_OBJECTS = $(SRC_FLAT_OBJECTS) $(SRC_SECURITY_OBJECTS) $(SRC_DEVTOOLS_OBJECTS) $(TEST_OBJECTS)
+ALL_OBJECTS = $(SRC_FLAT_OBJECTS) $(SRC_SECURITY_OBJECTS) $(SRC_DEVTOOLS_OBJECTS) $(SRC_PROTOCOL_OBJECTS) $(TEST_OBJECTS)
 
 # Output
 TEST_BINARY = $(BUILD_DIR)/core_test
@@ -68,9 +72,14 @@ TEST_BINARY = $(BUILD_DIR)/core_test
 EXTRA_CXXFLAGS ?=
 EXTRA_LDFLAGS ?=
 
+# WIP subsystems are gated out of production builds (see RillSandboxNative.podspec).
+# The test build always enables them so the CDP and native-security code keeps
+# compiling and running — tests are what stop "WIP" from rotting into "broken".
+WIP_DEFS = -DRILL_WIP_CDP_DEVTOOLS=1 -DRILL_WIP_NATIVE_SECURITY=1 -DRILL_WIP_BINARY_PROTOCOL=1
+
 # C++ compiler flags
 CXXFLAGS = -std=c++17 -O2 -Wall -Wextra -Wpedantic
-CXXFLAGS += -I.
+CXXFLAGS += -I. $(WIP_DEFS)
 CXXFLAGS += $(EXTRA_CXXFLAGS)
 
 # Linker flags
@@ -95,6 +104,10 @@ $(BUILD_DIR)/src_security_%.o: $(SRC_DIR)/security/%.cpp | $(BUILD_DIR)
 $(BUILD_DIR)/src_devtools_%.o: $(SRC_DIR)/devtools/%.cpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+# Compile protocol subdirectory source files
+$(BUILD_DIR)/src_protocol_%.o: $(SRC_DIR)/protocol/%.cpp | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
 # Compile test files
 $(BUILD_DIR)/test_%.o: $(TEST_DIR)/%.cpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
@@ -113,7 +126,7 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 # Debug build
-debug: CXXFLAGS = -std=c++17 -g -O0 -Wall -Wextra -Wpedantic -DDEBUG -I. $(EXTRA_CXXFLAGS)
+debug: CXXFLAGS = -std=c++17 -g -O0 -Wall -Wextra -Wpedantic -DDEBUG -I. $(WIP_DEFS) $(EXTRA_CXXFLAGS)
 debug: clean all
 
 # Address sanitizer build

@@ -13,6 +13,13 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
+
+namespace facebook {
+namespace hermes {
+class HermesRuntime;
+} // namespace hermes
+} // namespace facebook
 
 #if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
 #include "devtools/CdpDebuggable.h"  // rill::devtools::ICdpDebuggable (capability seam)
@@ -57,6 +64,22 @@ public:
 
   jsi::Value eval(jsi::Runtime &rt, const std::string &code);
   jsi::Value evalBytecode(jsi::Runtime &rt, const uint8_t *bytecode, size_t size);
+
+  // RAII: arms the Hermes time-limit watchdog (HermesRuntime::watchTimeLimit)
+  // for one top-level entry into sandbox JS execution. Nested entries keep
+  // the OUTERMOST budget — a re-entry can neither replace nor, on exit,
+  // silently remove the outer deadline. timeout <= 0 means unlimited.
+  class TimeLimitScope {
+  public:
+    explicit TimeLimitScope(HermesSandboxContext &ctx);
+    ~TimeLimitScope();
+    TimeLimitScope(const TimeLimitScope &) = delete;
+    TimeLimitScope &operator=(const TimeLimitScope &) = delete;
+
+  private:
+    HermesSandboxContext &ctx_;
+    bool armedHere_ = false;
+  };
   void inject(jsi::Runtime &rt, const std::string &name,
                  const jsi::Value &value);
   jsi::Value extract(jsi::Runtime &rt, const std::string &name);
@@ -78,11 +101,15 @@ public:
 #endif
 
 private:
-  // Stored as its concrete Hermes type (not sliced to jsi::Runtime) so the CDP
-  // debug layer can hand it to CDPDebugAPI::create(HermesRuntime&). HermesRuntime
-  // IS-A jsi::Runtime, so every existing jsi:: use of *sandboxRuntime_ is
-  // unaffected.
+  // Stored as its concrete Hermes type (not sliced to jsi::Runtime) so both the
+  // watchdog (watchTimeLimit) and the CDP debug layer (CDPDebugAPI::create) can
+  // call Hermes-specific APIs on it directly. HermesRuntime IS-A jsi::Runtime, so
+  // every existing jsi:: use of *sandboxRuntime_ is unaffected.
   std::unique_ptr<facebook::hermes::HermesRuntime> sandboxRuntime_;
+  // Wall-clock execution budget per top-level eval; <= 0 means unlimited.
+  double timeoutMs_ = 0;
+  // Nesting depth for TimeLimitScope (guarded by mutex_).
+  int timeLimitDepth_ = 0;
 #if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
   // Per-runtime CDP debug API (owns the AsyncDebuggerAPI). Constructed with the
   // runtime; inert until a CDPAgent attaches a pause callback. Destroyed before
@@ -112,6 +139,18 @@ private:
   // Convert value from sandbox runtime to host runtime
   jsi::Value sandboxToHost(jsi::Runtime &sandboxRt, jsi::Runtime &hostRt,
                            const jsi::Value &value);
+  // Recursive implementations with depth limit + ancestor-path cycle
+  // detection. `path` holds the objects currently being converted on this
+  // branch (ancestors only — entries are popped after each subtree), so
+  // sibling-shared references are not falsely flagged as circular.
+  // Convention matches QuickJSSandboxJSI: on depth/cycle violation the
+  // offending subtree is replaced by a descriptive string, no throw.
+  jsi::Value hostToSandboxImpl(jsi::Runtime &hostRt, jsi::Runtime &sandboxRt,
+                               const jsi::Value &value, int depth,
+                               std::vector<jsi::Object> &path);
+  jsi::Value sandboxToHostImpl(jsi::Runtime &sandboxRt, jsi::Runtime &hostRt,
+                               const jsi::Value &value, int depth,
+                               std::vector<jsi::Object> &path);
   // Wrap a host function for use in sandbox
   jsi::Value wrapHostFunctionForSandbox(jsi::Runtime &hostRt,
                                         jsi::Runtime &sandboxRt,

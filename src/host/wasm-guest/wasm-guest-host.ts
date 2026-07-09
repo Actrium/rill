@@ -22,11 +22,26 @@
  *   host  -> guest imports:  env.rill_host_call(mod_ptr,mod_len, method_ptr,method_len, in_ptr,in_len, cb_id)
  *                            env.rill_log(ptr,len)
  *   guest -> host  exports:  memory, rill_alloc(size)->ptr, rill_resolve(cb,ok,ptr,len), rill_init()
+ *   guest -> host  exports (optional): rill_abi_version() -> u32
  *   wire: request/response bytes are UTF-8 JSON in the guest's linear memory,
- *         addressed by (ptr,len); the host reads guest memory zero-copy.
+ *         addressed by (ptr,len); the host reads guest memory bounds-checked
+ *         (results are copied out).
  */
 import type { HostModuleDispatchTable } from '../../contract';
 import type { OperationBatch } from '../../shared/types';
+import {
+  decodeRequest as decodeRbs1Request,
+  encodeResult as encodeRbs1Result,
+  isRbs1,
+} from '../wire/store-net-envelope';
+
+/**
+ * Guest ABI versions this host understands. A guest may declare its version via
+ * the optional `rill_abi_version()` export; the host rejects any version outside
+ * this set at load (fail-closed) and tolerates a guest that omits the export
+ * (pre-versioning — the ABI v0/v1 wire is identical).
+ */
+export const SUPPORTED_GUEST_ABI_VERSIONS: ReadonlySet<number> = new Set([1]);
 
 export interface WasmGuestHostOptions {
   /** Capability dispatch table from `createHostModuleDispatch(contract, impl)`. */
@@ -49,11 +64,21 @@ export class WasmGuestHost {
   private readonly onLog?: (message: string) => void;
   private readonly onRenderBatch?: (batch: OperationBatch) => void;
   private readonly inflight = new Set<Promise<void>>();
+  private abiVersion: number | null = null;
 
   constructor(options: WasmGuestHostOptions) {
     this.dispatch = options.dispatch;
     this.onLog = options.onLog;
     this.onRenderBatch = options.onRenderBatch;
+  }
+
+  /**
+   * The ABI version the loaded guest declared via `rill_abi_version()`, or
+   * `null` when the guest predates the export (tolerated). Undefined until
+   * `load()` runs.
+   */
+  get guestAbiVersion(): number | null {
+    return this.abiVersion;
   }
 
   /** Instantiate the guest `.wasm`, wire host imports, and run its entry. */
@@ -76,6 +101,25 @@ export class WasmGuestHost {
     const { instance } = await WebAssembly.instantiate(wasmBytes, importObject);
     this.instance = instance;
     this.memory = instance.exports.memory as WebAssembly.Memory;
+
+    // ABI version gate BEFORE rill_init: a guest that declares an unsupported
+    // version must not run its entry (fail-closed). A guest that omits the
+    // export is a pre-versioning guest and is tolerated.
+    const versionExport = instance.exports.rill_abi_version;
+    if (typeof versionExport === 'function') {
+      // May trap (guest code): let it propagate — a guest whose version probe
+      // traps must not run (same fail-closed posture as a failed instantiate).
+      const version = (versionExport as () => number)() >>> 0;
+      if (!SUPPORTED_GUEST_ABI_VERSIONS.has(version)) {
+        throw new Error(
+          `unsupported guest ABI version: ${version} (host supports: ${[...SUPPORTED_GUEST_ABI_VERSIONS].join(', ')})`
+        );
+      }
+      this.abiVersion = version;
+    } else {
+      this.abiVersion = null; // pre-versioning guest (ABI v0/v1 wire is identical): tolerated
+    }
+
     (instance.exports.rill_init as (() => void) | undefined)?.();
   }
 
@@ -118,6 +162,13 @@ export class WasmGuestHost {
   /** Allocate guest memory via rill_alloc and copy `bytes` in; returns the ptr. */
   private allocWrite(bytes: Uint8Array): number {
     const ptr = (this.instance.exports.rill_alloc as (n: number) => number)(bytes.length) >>> 0;
+    // rill_alloc returning 0 (NULL) is the allocator's failure signal (e.g. the
+    // SDK's bump heap is exhausted). Address 0 is IN bounds, so without this
+    // check the write below would silently corrupt whatever the guest keeps at
+    // the bottom of its linear memory. Fail closed instead.
+    if (ptr === 0 && bytes.length > 0) {
+      throw new Error(`guest rill_alloc failed (returned 0) for ${bytes.length} bytes`);
+    }
     // rill_alloc is guest code: a broken/exhausted allocator can hand back a
     // pointer that doesn't fit. Validate before writing (re-reads the buffer,
     // which may have grown during alloc). Fails closed instead of writing OOB.
@@ -207,7 +258,38 @@ export class WasmGuestHost {
         await Promise.resolve();
         const moduleId = this.readString(mp, ml);
         const method = this.readString(xp, xl);
-        const input = il > 0 ? JSON.parse(this.readString(ip, il)) : undefined;
+        // Payload framing fork (canvas-wire.DESIGN.md §1.4 + store-net-bytes
+        // §B.2). Each binary wire has a DISTINCT 4-byte magic, all sharing byte 0
+        // (0x52 'R'), so the fork compares the FULL u32 — never byte 0 alone:
+        //   - 'RCNV' (52 43 4E 56) -> hand RAW BYTES to a binary-aware capability
+        //     (host:canvas.draw) to decode itself.
+        //   - 'RBS1' (52 42 53 31) -> decode the RBS1 envelope here and revive
+        //     each {"$b":N} sentinel into a Uint8Array, then hand the
+        //     contract-agnostic args to dispatch (the codec is self-describing —
+        //     no per-module knowledge). A malformed frame throws and fails closed.
+        //   - anything else -> the legacy JSON.parse path, byte-for-byte
+        //     unchanged (a JSON body '{…}'/'[…]' matches no magic). Genuinely
+        //     malformed input still throws here and fails closed (ok=0).
+        // Reason: the guest-supplied call input is untrusted bytes until a magic fork decodes it.
+        let input: unknown;
+        if (il > 0) {
+          const raw = this.readBytes(ip, il);
+          const isCanvasBinary =
+            raw.length >= 4 &&
+            raw[0] === 0x52 &&
+            raw[1] === 0x43 &&
+            raw[2] === 0x4e &&
+            raw[3] === 0x56;
+          if (isCanvasBinary) {
+            input = raw;
+          } else if (isRbs1(raw)) {
+            input = decodeRbs1Request(raw);
+          } else {
+            input = JSON.parse(new TextDecoder().decode(raw));
+          }
+        } else {
+          input = undefined;
+        }
         const handler = this.dispatch[moduleId]?.[method];
         if (typeof handler !== 'function') {
           throw new Error(`host module not registered: ${moduleId}.${method}`);
@@ -231,7 +313,15 @@ export class WasmGuestHost {
     // call resolve() again, throw again, and reject drain(). On failure the cb
     // is simply abandoned (the guest never sees a resolution), staying fail-closed.
     try {
-      const bytes = new TextEncoder().encode(JSON.stringify(result));
+      // Return framing fork (store-net-bytes §B.3), symmetric with the receive
+      // fork. When the handler result carries at least one Uint8Array, encode an
+      // RBS1 envelope (hoisting each byte stream to a segment + a {"$b":N}
+      // sentinel); when it carries none, `encodeRbs1Result` returns null and the
+      // reply is the IDENTICAL JSON.stringify bytes as today — no behaviour
+      // change for any existing (non-binary) capability. Contract-agnostic: the
+      // hoist is driven by the runtime type (Uint8Array), not per-module config.
+      const envelope = encodeRbs1Result(result);
+      const bytes = envelope ?? new TextEncoder().encode(JSON.stringify(result));
       const ptr = this.allocWrite(bytes);
       (
         this.instance.exports.rill_resolve as (

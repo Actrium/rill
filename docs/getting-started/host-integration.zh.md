@@ -140,15 +140,17 @@ useEffect(() => {
 ### 健康和诊断
 
 ```tsx
-// 返回健康快照：状态、正常运行时间、错误计数、渲染统计
-const health = engine.getHealth();
-
-// 返回资源使用情况：内存、活动计时器、待处理回调
-const resources = engine.getResourceStats();
-
-// 返回诊断数据（需要 diagnostics: true）
+// 唯一的可观测性入口 -- 始终可用
 const diagnostics = engine.getDiagnostics();
+
+// 健康快照：加载/销毁标志、错误计数、receiver 节点数
+const health = diagnostics.health;
+
+// 资源使用情况：活动计时器、存活 UI 节点、已注册回调
+const resources = diagnostics.resources;
 ```
+
+`EngineOptions` 中的 `diagnostics` 选项只用于调整活动统计窗口与时间线分桶参数；无论是否设置，`getDiagnostics()` 都可用。
 
 ### 暂停和恢复
 

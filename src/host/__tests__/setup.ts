@@ -107,13 +107,6 @@ if (typeof globalThis.setInterval === 'undefined') {
 // Now import bun:test after polyfills are in place
 import { mock, spyOn } from 'bun:test';
 
-const reactModulePath = new URL('../../../node_modules/react/index.js', import.meta.url).pathname;
-
-mock.module('react', () => {
-  const React = require(reactModulePath) as typeof import('react');
-  return { ...React, default: React };
-});
-
 // CRITICAL: Ensure console is available before react modules try to load
 // This is a defensive measure to prevent ReferenceError: console is not defined
 // when react-jsx-dev-runtime loads

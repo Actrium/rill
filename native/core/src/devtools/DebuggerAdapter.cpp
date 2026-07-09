@@ -1,3 +1,6 @@
+// WIP subsystem — gated behind RILL_WIP_CDP_DEVTOOLS (off by default in production builds).
+// Rationale, goals, current status, and completion TODO live in devtools/CDPServer.h.
+#if RILL_WIP_CDP_DEVTOOLS
 /**
  * DebuggerAdapter.cpp
  *
@@ -475,3 +478,4 @@ std::string DebuggerAdapter::generateBreakpointId() {
 }
 
 } // namespace rill::devtools
+#endif // RILL_WIP_CDP_DEVTOOLS

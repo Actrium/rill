@@ -768,6 +768,42 @@ describe('Bridge - Unified Communication Layer', () => {
     });
   });
 
+  describe('sendJsonBatch - structural validation at trust boundary', () => {
+    test('accepts a well-formed JSON batch', () => {
+      const json = JSON.stringify({
+        version: 1,
+        batchId: 1,
+        operations: [{ op: 'CREATE', id: 1, type: 'View', props: {} }],
+      });
+      bridge.sendJsonBatch(json);
+      expect(hostReceived.length).toBe(1);
+      expect(hostReceived[0]!.operations[0]!.op).toBe('CREATE');
+    });
+
+    test('rejects non-object payloads', () => {
+      expect(() => bridge.sendJsonBatch('42')).toThrow(/expected a batch object/);
+      expect(() => bridge.sendJsonBatch('null')).toThrow(/expected a batch object/);
+      expect(() => bridge.sendJsonBatch('[]')).toThrow(/expected a batch object/);
+    });
+
+    test('rejects batches without an operations array', () => {
+      expect(() => bridge.sendJsonBatch('{"version":1}')).toThrow(/operations must be an array/);
+      expect(() => bridge.sendJsonBatch('{"operations":{}}')).toThrow(
+        /operations must be an array/
+      );
+    });
+
+    test('rejects operations with unknown or missing op discriminant', () => {
+      expect(() => bridge.sendJsonBatch('{"operations":[{"id":1}]}')).toThrow(
+        /not a known operation type/
+      );
+      expect(() => bridge.sendJsonBatch('{"operations":[{"op":"EVIL","id":1}]}')).toThrow(
+        /not a known operation type/
+      );
+      expect(() => bridge.sendJsonBatch('{"operations":[null]}')).toThrow(/must be an object/);
+    });
+  });
+
   describe('Lifecycle', () => {
     test('should clean up resources on destroy', () => {
       const fn = () => 'test';

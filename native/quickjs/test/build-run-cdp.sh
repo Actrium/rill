@@ -14,7 +14,10 @@ trap 'rm -rf "$TMP"' EXIT
 CC="${CC:-clang}"
 CXX="${CXX:-clang++}"
 CFLAGS="-DRILL_QJS_DEBUG -D_GNU_SOURCE -O0 -g -funsigned-char -I $VENDOR"
-CXXFLAGS="-std=c++17 -DRILL_QJS_DEBUG -g -I $VENDOR -I $QSRC -I $CORE"
+# The native/core devtools relay is gated behind RILL_WIP_CDP_DEVTOOLS (off by
+# default in production); the engine debug hook behind RILL_QJS_DEBUG. Both are
+# needed to exercise the full QuickJS CDP stack, matching the pod's quickjs opt-in.
+CXXFLAGS="-std=c++17 -DRILL_QJS_DEBUG -DRILL_WIP_CDP_DEVTOOLS=1 -g -I $VENDOR -I $QSRC -I $CORE"
 
 for c in quickjs libregexp libunicode cutils; do
   $CC $CFLAGS -c "$VENDOR/$c.c" -o "$TMP/$c.o"

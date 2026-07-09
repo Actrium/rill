@@ -3,7 +3,13 @@
 #include "TenantRegistry.h"
 #include "ThreadPool.h"
 #include "EventBus.h"
+#if RILL_WIP_NATIVE_SECURITY
+// WIP: native per-tenant fs/net sandbox, gated behind RILL_WIP_NATIVE_SECURITY.
+// See security/SecurityManager.h for status/TODO. Off by default: the enforced
+// security boundary is the contract capability layer + the engine's zero ambient
+// authority, not this native stack (which currently guards no live data path).
 #include "security/SecurityManager.h"
+#endif
 #include <ReactCommon/CallInvoker.h>
 #include <jsi/jsi.h>
 #include <memory>
@@ -151,7 +157,9 @@ private:
   TenantRegistry registry_;
   ThreadPool threadPool_;  // P0.2: per-tenant thread management
   EventBus eventBus_;      // P2: cross-tenant event bus
-  rill::security::SecurityManager securityManager_; // P2: per-tenant security
+#if RILL_WIP_NATIVE_SECURITY
+  rill::security::SecurityManager securityManager_; // WIP: per-tenant native sandbox
+#endif
   std::recursive_mutex mutex_;
   std::mutex callbacksMutex_;
   TenantId nextTenantId_ = 1;

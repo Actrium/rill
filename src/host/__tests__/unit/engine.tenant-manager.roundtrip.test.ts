@@ -220,3 +220,24 @@ describe.skip('native JSI providers — covered by on-device e2e, not host suite
     });
   }
 });
+
+describe('explicit tenant-manager selection without the native module', () => {
+  // Save/restore the global so this suite can't leak state into files that
+  // run after it and expect a pre-installed (fake) tenant manager.
+  let saved: unknown;
+  beforeEach(() => {
+    saved = (globalThis as Record<string, unknown>).__RillTenantManager;
+    delete (globalThis as Record<string, unknown>).__RillTenantManager;
+  });
+  afterEach(() => {
+    if (saved !== undefined) {
+      (globalThis as Record<string, unknown>).__RillTenantManager = saved;
+    }
+  });
+
+  it('throws instead of silently falling back to another provider', () => {
+    expect(
+      () => new Engine({ sandbox: 'tenant-manager', tenant: { appId: 'com.test.missing' } })
+    ).toThrow(/__RillTenantManager/);
+  });
+});

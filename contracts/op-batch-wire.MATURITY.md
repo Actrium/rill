@@ -1,0 +1,149 @@
+# op-batch binary wire protocol — M1 MATURITY REPORT (+ M2 correctness update)
+
+Status: **WIP** (all artifacts gated behind `wip-binary-protocol` / `RILL_WIP_BINARY_PROTOCOL`, default OFF; neither binary path is wired into a live guest→host route). This document consolidates the M1 maturation phases (audit → coverage → pairs/routes → harden → differential fuzz → benchmark) into one evidence base and hands M2 the decisions that need a human call.
+
+Live transport today is JSON on every route. The binary format is staging/bench code only.
+
+> **M2 correctness update (2026-07-07): all decoder drift is CLOSED and FUNCTION debug metadata is now on the wire.** The three TS↔C++ differential-fuzz divergences from M1 §2 are fixed and re-proven at **0** (200,000 inputs × 3 seeds = 600,000, perfect TS/C++ agreement, `confirmedDefects=0`, memory-safe under ASan+UBSan; see §2). FUNCTION now carries `__name`/`__sourceFile`/`__sourceLine` end-to-end (Rust encode → TS + C++ decode), so binary is no longer lossy vs JSON for DevTools. Decisions closed in M2: **FUNCTION debug metadata = DONE** (carried on the wire), **trailing bytes = strict (both decoders reject)**, **HAS_TIMESTAMPS = reserved + rejected by both**, **non-UTF-8 intern = both reject**, **nonzero reserved bytes = both read-past/ignore**. Conformance is green in all three languages (Rust 40 / TS 111 / C++ 336). What remains open for a human: (1) reconcile/retire the old `binary-encoder.ts` + `binary-protocol.ts` TS pair (they now DIVERGE from the schema on FUNCTION — still fnId-only + orphan intern); (2) promotion is **directed by the platform** (2026-07-07): promote at rill's pace via a capability-handshake gradual rollout, and extend the mechanism to canvas draw ops without waiting for a benchmark — the marginal-CPU caveat below applies to the op-batch tree-diff path, not the canvas per-frame path (see §4c); (3) the per-route JS-guest conformant encoder. See §4.
+
+> **R1 canvas-wire extension delivered under WIP (2026-07-08).** The platform's R1 directive — extend this capability-handshake mechanism to canvas per-frame draw ops without waiting for a benchmark — is now implemented as a **sister contract**, gated OFF, JSON default intact. Delivered: (i) the wire contract [`canvas-wire.json`](./canvas-wire.json) with **distinct magic** `RCNV` `0x564e4352` (vs op-batch `RILL`), a flat per-frame envelope (16-byte header with a u32 `opCount` pre-checked against `maxOps`), 21 opcodes, per-frame color intern table, and a fail-closed `reasons` vocabulary; (ii) a **Rust encoder** (`crates/rill-guest/src/canvas_encode.rs`, `wip-binary-protocol`-gated), constants generated from the schema by `build.rs`; (iii) a **zero-DOM TS decoder** on the **public export surface** — `import { decodeCanvasBatch } from 'rill/wire'` (`src/host/wire/`), completing **R1.3** (the op-batch decoder also moved under `src/host/wire/` alongside it); (iv) the **capability handshake** `host:canvas.getInfo()` wired both sides with graceful JSON fallback for old hosts; (v) a **27-vector golden lock** ([`canvas-wire.golden.json`](./canvas-wire.golden.json)) with the Rust encoder as oracle and the TS decoder reconstructing structure-exact, incl. `at-limit-ops` (maxOps=20000) and multibyte fillText. Two-way conformance (no C++ canvas decoder yet — not required for the web-host path) is PASS: Rust 51 (wip) / 27 (default), TS canvas 52 decoder + 3 handshake fixtures, cross-magic rejection proven both directions, `tsc` clean. Full detail: [`canvas-wire.CONFORMANCE.md`](./canvas-wire.CONFORMANCE.md); handshake + JS/QuickJS forward-path spec: [`canvas-wire.DESIGN.md`](./canvas-wire.DESIGN.md). **Promotion (flip the guest default to binary) remains rill's call** under the platform's gradual-rollout model — same posture as op-batch. Next per the platform roadmap: R2 (store/net), R4/R5 (docs).
+
+> **R2 store/net binary-value envelope delivered (2026-07-08).** The platform's R2 directive — carry byte-stream fields (`store` blobs, `net` bodies) across the seam as raw bytes instead of the JSON number-array hack — is implemented as a **third sibling contract** ([`store-net-bytes.json`](./store-net-bytes.json), magic `RBS1` `0x31534252`, distinct from op-batch `RILL` and canvas `RCNV` at byte 1, so the host fork disambiguates on the full u32). Unlike op-batch/canvas this one is **not `wip`-gated and ships live** — but under the **same additive/back-compat posture**: a call or return with **no** byte-stream field is **byte-for-byte the unchanged raw JSON** (asserted by the `back-compat-no-segments` golden and the entire pre-existing suite taking the old path). Delivered: (i) the **RBS1 envelope codec** both sides — guest `crates/rill-guest/src/store_net_encode.rs` (`no_std`), host `src/host/wire/store-net-envelope.ts` live on `WasmGuestHost`'s receive/return fork — a generic two-plane frame (JSON control plane + length-prefixed segments) that is contract-agnostic via the self-describing `{"$b":N}` sentinel; (ii) an **additive `binary` field** on `src/contract/index.ts` rpc capabilities (compile-time-checked field names, `binaryCapabilities` manifest entry emitted only when non-empty, fail-closed dispatch backstop) driving type-gen (bytes → `Uint8Array`, see [`docs/guides/host-module-types.md`](../docs/guides/host-module-types.md)); (iii) **byte SDK wrappers** `store::put_bytes`/`get_bytes` and a new `net` module (`fetch_bytes`) on the guest; (iv) the **QuickJS `$b64` sidecar** on the JSON-string bridge (`quickjs-native-wasm-provider.ts`) with parity to the WASM index form; (v) a **return-path memory fix** — an oversized host→guest return that took the talc fallback in `rt::alloc` leaked; `rt::resolve` now frees the guest's own fallback buffer (no-leak test); (vi) a **6-vector golden lock** ([`store-net-bytes.golden.json`](./store-net-bytes.golden.json), Rust oracle, TS reproduces + reconstructs), incl. empty/`0x00`/`0xFF`/multi-segment/at-cap-1MiB. Conformance is green: Rust `rill-guest` 58, TS contract+wasm-guest+sandbox 193, TS wire 185, `tsc` clean. **rill owns the mechanism**; the **cut-over remains the platform's** — flip its downstream `host-store.ts` / `host-net.ts` from the number-array hack to declaring `binary` fields on the descriptors, at its own pace under the same gradual-rollout model. Full detail: [`store-net-bytes.CONFORMANCE.md`](./store-net-bytes.CONFORMANCE.md). Next per the platform roadmap: R4/R5 (docs).
+
+---
+
+## 1. Evidence-based gap inventory (hypotheses → verdict)
+
+| # | Hypothesis going into M1 | Verdict | Evidence |
+|---|---|---|---|
+| H1 | The old codecs (`binary-encoder.ts` / `binary-protocol.ts`) and the new schema-locked codecs are two *competing* binary formats. | **REFUTED (base format), then DIVERGED on FUNCTION in M2** | Byte-for-byte identical on every structural axis (magic `0x4c4c4952`, u16 version 1, 16-byte header, flags 0/1/2/4, full-intern-table framing, opcodes 1..9, value tags 0..15, LE, REF_CALL `refId` mirror) — same base format, later written as a contract + hardened + given a Rust encoder and streaming TS/C++ decoders. **M2 update:** the schema `$comment` no longer names the old files as authoritative (the Rust encoder + TS/C++ decoders are), and FUNCTION now carries name/sourceFile/sourceLine on the wire, so the old pair is SUPERSEDED and diverges on FUNCTION — see §4a. |
+| H2 | The old binary path is reachable in production. | **REFUTED (dormant)** | Fully wired but never enabled. Prod `OperationCollector` is constructed with no config (`host-config.ts:93`) → `binaryEncoder` is `null` → `flush()` always takes the `JSON.stringify` branch. Host `sendBinaryBatch` (`engine.ts:1200`) fires only on an `ArrayBuffer`, which the guest never produces in prod. `PayloadEncoding='binary'` / `binaryProtocol` / `binaryEncoding:true` appear in **zero** production files — only in `*.test.ts`. |
+| H3 | The old path is dead code. | **REFUTED (test/bench-only, load-bearing)** | Not dead: exported, plumbed, and covered by unit + e2e + perf tests, and it is the current TS reference the schema + golden vectors are pinned to. But not live. The new path is explicitly WIP and unwired on both ends. **Neither** binary path is live. |
+| H4 | The old and new TS encoders are byte-identical on all inputs. | **REFUTED (one quirk) → RESOLVED in M2 by putting FUNCTION metadata on the wire** | FUNCTION divergence: the old encoder's collect pre-pass interned a function's `__name`/`__sourceFile` (and always interns error `__stack`) though only `__fnId` was on the wire. **M2 resolution:** the schema now carries name/sourceFile/sourceLine after a FUNCTION flags byte; the Rust encoder emits them, TS + C++ decode and round-trip them, and new golden/matrix vectors pin the layout — binary is no longer lossy vs JSON for DevTools. The old TS pair still emits fnId-only + orphan intern and is the divergent side to retire (§2, §4a). |
+| H5 | All 9 opcodes + 16 value tags are actually exercised (not merely implemented). | **REFUTED at entry, CONFIRMED at exit** | At audit: golden exercised only STRING + a handful of ops; DELETE/INSERT/REMOVE/REF_CALL had zero coverage, 8 value tags (UNDEFINED, BOOL×2, FUNCTION, OBJECT, ERROR, REGEXP, PROMISE) had zero coverage anywhere. HARDEN closed this: **74-vector matrix (5,389 bytes)** covering all 9 ops × 16 tags + boundary/nested cells, generated by the Rust oracle and cross-checked on all three codecs. |
+| H6 | The two decoders (TS + C++) agree on the same bytes. | **REFUTED (3 strictness divergences) → RESOLVED in M2 (0 divergences)** | Decoded *values* always agreed; accept/reject strictness differed in three reproducible ways (§2). **M2:** all three fixed and re-proven at 0 divergences across 600,000 fuzz inputs (200,000 × 3 seeds), TS/C++ in perfect agreement, memory-safe under ASan+UBSan. |
+| H7 | HAS_TIMESTAMPS is a fully realized feature. | **REFUTED (decode-only) → RESOLVED in M2 (reserved + rejected)** | The Rust encoder could not emit it and no oracle existed. **M2 decision:** formally deferred — HAS_TIMESTAMPS is now a reserved bit that both decoders reject fail-closed, with matching negative tests both sides (§4e). No decode-only feature remains. |
+| H8 | DELTA_INTERN / STRUCTURAL_ONLY reserved flags fail closed consistently. | **CONFIRMED** | Rust never emits them; both decoders reject (TS distinct messages, C++ collapses to `BadFlags`) — same accept/reject outcome. Unknown high bits (≥0x08) also rejected by both. |
+| H9 | A JS/TS guest can already emit schema-conformant binary. | **REFUTED** | There is exactly **one** conformant encoder and it is Rust-only (`wire_encode.rs`). `binary-encoder.ts` is the legacy `InstructionFormat`-targeted encoder: shares magic/header/opcodes superficially, but is **not** validated against golden vectors, does **not** enforce the contract caps (`maxTotalElements`, `maxValueDepth`, non-finite Float64, `maxDateMs`, `maxOps`), and its named C++ `InstructionDecoder` does not exist. Not interoperable-by-guarantee. |
+| H10 | A binary route can round-trip end-to-end today. | **REFUTED (bytes yes, live no)** | Only the **Rust WASM guest → {TS host, C++ host}** pair is conformant on both decoder targets, and only at the codec-bytes level (golden vectors as shared oracle). Not live: `render()` (`lib.rs:1463`) emits JSON; host `onSendBatch` (`wasm-guest-host.ts:219`) does `JSON.parse`. Glue is required at both ends. Every JS-guest route is blocked at the missing conformant encoder (H9). |
+| H11 | The C++ decoder is memory-safe on hostile input. | **CONFIRMED** | 200k×3 seeds (~650k inputs) under ASan+UBSan `-fno-sanitize-recover`: 0 crashes, 0 OOB/UAF/UB. TS side: 0 non-typed errors (always `WireDecodeError` or a full batch). Fail-closed contract holds on both sides. |
+
+---
+
+## 2. Bugs found (harden + fuzz) — ALL RESOLVED in M2
+
+All three were **validation-strictness divergences** between the TS and C++ decoders on the same untrusted bytes. No memory-safety defect and no value divergence on mutual-accept was ever found. **All three are now fixed and re-proven closed** (post-fix fuzz below); each row records the original M1 divergence and the M2 resolution.
+
+**Post-fix differential fuzz (M2, unweakened check — TS-accepts iff C++-accepts, plus canonical-value equality on mutual accept):**
+
+| seed | inputs | TS accepts | C++ accepts | both-accept | accept/reject divergences | value divergences | crash/ASan/UBSan |
+|---|---|---|---|---|---|---|---|
+| 0 | 200,000 | 53,811 | 53,811 | 53,811 | **0** | **0** | **0** |
+| 12345 | 200,000 | 53,708 | 53,708 | 53,708 | **0** | **0** | **0** |
+| 7 | 200,000 | 53,754 | 53,754 | 53,754 | **0** | **0** | **0** |
+
+Every seed: TS accepts == C++ accepts == both-accept (perfect agreement), `confirmedDefects=0`, `defectClasses={}`, `sample=[]`. The C++ generator ran under ASan+UBSan with `abort_on_error` and never aborted across all 600,000 inputs. The M1 baseline's **41,826** accept/reject divergences across these three classes are now **ZERO**; no harness change was needed (the canonical-form/comparison already matched the fixed decoders).
+
+| Rank | Bug (M1) | Volume (M1, seed 0) | Resolution (M2) — RESOLVED |
+|---|---|---|---|
+| **1 — SECURITY** | **C++ accepted non-UTF-8 intern strings; TS rejected.** C++ stored each intern string as a raw `string_view` with no validation; native (closest to host/DOM) failed OPEN on the guest→host trust boundary — the worst direction. | 1,743 | **Both reject.** TS `WireDecodeError('invalid UTF-8 in intern string')` via fatal `TextDecoder`; C++ `isValidUtf8` → `InvalidUtf8`. Matching negative tests added both sides. |
+| **2 — SPEC VIOLATION** | **C++ rejected nonzero header `reserved[3]`; TS ignored per spec.** C++ raised `BadReserved` — objectively wrong vs the SSoT ("MUST be written 0, ignored on read"). | 21,699 | **Both read past / ignore.** TS `wire-decoder.ts:260`; C++ `WireDecoder.cpp:512` — no longer `BadReserved`. Reserved is now a live forward-compat field on both. |
+| **3 — CONTRACT DRIFT → STRICT** | **C++ rejected trailing bytes; TS silently ignored.** Contract was silent; the two disagreed. Decision: **strict** — a batch is exactly its declared ops. | 18,384 | **Both reject.** TS `'trailing bytes after batch'` (strict full consumption); C++ `TrailingBytes`. Schema `ops.$comment` now mandates zero trailing bytes. |
+
+**FUNCTION debug metadata (H4) — RESOLVED, now on the wire.** The M1 cross-encoder quirk (old TS encoder interned `__name`/`__sourceFile` as orphan entries though only `__fnId` was on the wire) is closed by carrying the metadata for real: FUNCTION now encodes a flags byte after `fnId`, then the present optional `__name` (internRef), `__sourceFile` (internRef), `__sourceLine` (inline u32). The Rust encoder emits it; TS (`wire-decoder.test.ts:162`, decoder lines 54-69) and C++ both decode and round-trip it (`__name:'onPress'`, `__sourceFile:'App.tsx'`, `__sourceLine:42`). New golden/matrix vectors `create-value-function-debug`, `update-value-function-debug`, `refcall-arg-function-debug` pin the layout. **Binary is no longer lossy vs JSON for DevTools.** The single truth is now the schema + Rust encoder; the old TS pair still emits fnId-only + orphan intern and is therefore the divergent side to reconcile/retire (§4a).
+
+---
+
+## 3. Benchmark verdict — end-to-end gain is MARGINAL and engine-sensitive
+
+Harness: `/ext/rill/src/host/wasm-guest/__benchmarks__/op-batch-bench.ts` (gated, non-production, excluded from tsconfig + biome + the unit glob). Two faithfulness gates run before timing: the TS `BinaryEncoder` re-encodes all 4 golden vectors byte-identical to the Rust oracle (so it stands in for the Rust encoder), and every generated batch round-trips through `wire-decoder`. Measures the conformant pair (binary encode → TS `decodeBatchStreaming`) vs the incumbent `JSON.parse`.
+
+### V8 / node (the web host's real engine — the number that matters)
+| batch | ops | binary | json | size ratio | decode ratio | decode+apply ratio |
+|---|---|---|---|---|---|---|
+| typical | 125 | 5.7 KiB | 15.5 KiB | 2.75x | **2.7x** | **1.9x** |
+| medium | 1509 | 64.3 KiB | 189.1 KiB | 2.94x | **3.4x** | **2.2x** |
+| large | 30004 | 1.25 MiB | 3.74 MiB | 2.98x | **2.7x** | **1.7x** |
+
+### JSC / bun (~ the RN-host generic-JS profile — where a streaming-TS decoder helps least)
+| batch | size ratio | decode ratio | decode+apply ratio |
+|---|---|---|---|
+| typical | 2.75x | 1.5x | 1.3x |
+| medium | 2.94x | 1.8x | 1.5x |
+| large | 2.98x | 1.9x | 1.5x |
+
+**Read:**
+- The headline **2.7–3.4x is a decode-microbench ceiling**, not reality. `JSON.parse` is a heavily optimized C++ builtin; a hand-written streaming JS decoder only beats it moderately.
+- **End-to-end (decode+apply) on V8 is sub-2.2x**, and the apply/reconcile share — which no wire-format change touches — is the larger and growing cost (co-dominates at scale).
+- The win is **strongly engine-dependent**: on JSC it's 1.3–1.5x end-to-end. The RN engines (Hermes/JSC) are exactly where this helps least.
+- The one clean, engine-independent win is **~2.8–3x smaller payload**.
+- The native **C++ decoder path was NOT benchmarked** (no in-VM JSON competitor to A/B in one runtime); a native binary-vs-`JSON.parse`-in-C++ comparison would plausibly favor binary far more, but that is unmeasured and cannot be claimed here.
+
+**Verdict: MARGINAL on CPU, decisive only on size.** Not a slam-dunk ship on decode CPU. Ship-worthiness hinges on a live-path frame profile: if transfer/decode dominates or the transport is size-constrained (worker `postMessage`, network, mobile bridge copies) → the size win alone carries it. If apply/render dominates → binary barely moves the frame budget and the cost of maintaining a second conformant wire format (Rust + TS + C++, fuzz/golden upkeep) is hard to justify.
+
+---
+
+## 4. M2 decision list — status after the correctness fixes
+
+**Closed in M2 (no further human call needed):**
+- **FUNCTION debug metadata = DONE.** Now carried on the wire (name/sourceFile/sourceLine); binary is no longer lossy vs JSON for DevTools. Single truth = schema + Rust encoder; round-trips through TS + C++ decoders; pinned by new golden/matrix vectors. (Was §2 latent + §4a step 2 + §4d FUNCTION item.)
+- **Trailing bytes = STRICT.** Both decoders reject; schema `ops.$comment` mandates zero trailing bytes. (Was §2 bug #3 + §4d item.)
+- **HAS_TIMESTAMPS = reserved + rejected** by both decoders (formal defer, §4e option ii); no decode-only feature remains. (Was H7 + §4e.)
+- **non-UTF-8 intern = both reject; nonzero reserved bytes = both read-past/ignore.** (Was §2 bugs #1, #2.)
+- Differential fuzz re-proven at **0** divergences (600,000 inputs, §2).
+
+**Still open:** (a) reconcile/retire the old TS pair (now diverges on FUNCTION); (b) the per-route JS-guest conformant encoder; both are folded into the platform-directed R1 promotion (canvas extension + capability-handshake rollout), not blocked on a ship/no-ship call — that call is superseded (§4c).
+
+### (a) Reconcile / retire the old TS pair — OPEN
+- **Status:** The FUNCTION single-truth is settled (metadata on the wire per the schema + Rust encoder). What remains is housekeeping: the old TS pair `binary-encoder.ts` + `binary-protocol.ts` (`BinaryDecoder`) now **DIVERGE from the schema on FUNCTION** — they still emit fnId-only plus orphan intern entries for `__name`/`__sourceFile`, and do not carry `__sourceLine`. They are SUPERSEDED (the schema `$comment` no longer names them as authoritative) but not yet removed.
+- **Evidence:** Same base format byte-for-byte (H1); old path dormant but historically the schema/golden reference (H2, H3); only the new codecs are hardened with fail-closed caps and now the only schema-conformant ones on FUNCTION.
+- **Recommendation:** **Converge onto the new schema; do not keep both as "two layers."** Concretely: (1) short-term the old TS pair may stay while the JSON path is unaffected, but it must NOT be treated as an oracle for FUNCTION (the golden/matrix vectors are now pinned to the Rust encoder + new decoders); (2) once WIP flags promote, delete `BinaryDecoder` in favor of the hardened streaming `wire-decoder.ts`, and replace `BinaryEncoder` with the Rust encoder (or a schema-generated TS encoder). End state: one schema, one encoder per language, one hardened decoder per host, all conformance-tested against the contract; JSON remains the interoperable fallback.
+
+### (b) Build a JS-guest schema-conformant encoder? (yes/no)
+- **Evidence:** No conformant JS/TS encoder exists (H9). Every JS-guest route (RN QuickJS/Hermes/JSC → C++; web QuickJS → TS) is blocked at the encoder (H10). `binary-encoder.ts` is non-conformant (no cap enforcement, no golden validation, targets a nonexistent decoder).
+- **Recommendation:** **Conditional YES — gated on the (c) ship decision.** If binary ships to any JS-guest route, this is mandatory; the natural implementation is a direct port of `wire_encode.rs` (its `Op`/`Value` enums + the golden test's `json_to_op`/`json_to_value` are the template), enforcing the same caps and validated against the golden + matrix vectors. If binary ships only on the Rust route, defer. **Do NOT** promote `binary-encoder.ts` as-is.
+
+### (c) Ship / no-ship per the benchmark
+- **Evidence:** §3 — V8 end-to-end 1.7–2.2x, JSC 1.3–1.5x, size 2.75–2.98x everywhere; apply/render is engine-neutral and co-dominates; native C++ path unmeasured.
+- **Superseded by a platform decision (2026-07-07).** The consuming platform has made this binary mechanism the *sole* wire protocol and directed that it be **promoted at rill's own pace** and **extended to canvas draw ops without waiting for a benchmark**. So promotion is no longer gated on a profile; it proceeds via a **capability-handshake gradual rollout** (the host advertises binary support, the guest encoder picks binary vs JSON, old hosts keep JSON, promotion = flip the default — no `rill_abi_version` bump, no flag-day). **The canvas extension is now DELIVERED under WIP (R1, 2026-07-08)** — sister contract + Rust encoder + zero-DOM exported TS decoder + capability handshake + JSON fallback + 27-vector golden lock; see the R1 note at the top and [`canvas-wire.CONFORMANCE.md`](./canvas-wire.CONFORMANCE.md). Promotion of both op-batch and canvas (flip the default) remains rill's call.
+- **The benchmark below remains the honest CPU picture, but re-scoped:** the marginal end-to-end gain (1.3–2.2x) is for the **op-batch UI-tree-diff** path only. It does **not** describe the **canvas per-frame** path (up to 20k JSON draw instructions/frame parsed every frame), which is the platform's actual hot path and where binary + the ~3x size win pay off most — and which the M1 benchmark did not measure. The native C++ decoder bench is still worth running to quantify the RN routes, but it no longer gates promotion.
+
+### (d) Promotion-to-non-WIP criteria checklist
+Promote off `wip-binary-protocol` / `RILL_WIP_BINARY_PROTOCOL` only when **all** hold:
+- [x] **Bug #1 (UTF-8) fixed** — C++ validates intern-string UTF-8 (`isValidUtf8` → `InvalidUtf8`); matching C++ negative test added. Both decoders reject. (M2)
+- [x] **Bug #2 (reserved bytes) reconciled** — C++ relaxed to "ignore on read" per the contract (`WireDecoder.cpp:512`, no longer `BadReserved`); both decoders read past. C++ accept-test added. (M2)
+- [x] **Bug #3 (trailing bytes) reconciled** — chose **strict: both reject** (TS `atEnd` full-consumption check added); schema `ops.$comment` mandates zero trailing bytes; missing TS negative test added. (M2)
+- [x] **FUNCTION encoder quirk (H4) resolved** — single truth = metadata on the wire (schema + Rust encoder); new golden/matrix vectors (`create-value-function-debug`, `update-value-function-debug`, `refcall-arg-function-debug`) pin the layout; TS + C++ decode and round-trip it. (M2)
+- [x] **HAS_TIMESTAMPS resolved** — formally deferred to reserved + rejected by both decoders; no decode-only feature remains. (M2, §4e option ii)
+- [ ] **A conformant encoder exists for every route being promoted** — Rust for the Rust route; the (b) TS encoder if any JS route is promoted.
+- [ ] **Old TS pair reconciled/retired** — `binary-encoder.ts` + `binary-protocol.ts` diverge on FUNCTION; supersede/remove per (a).
+- [ ] **Live glue exists and is tested end-to-end** — guest-side binary emit + host-side decode slot on the promoted route, A/B green vs JSON.
+- [ ] **Ship decision (c) is affirmative** for the route being promoted.
+- [x] Full matrix + golden + fail-closed suites green on all three codecs (**Rust 40 / TS 111 / C++ 336** — all pass); differential fuzz shows **0** divergences after the three fixes (600,000 inputs, §2). (M2)
+
+### (e) Spec completion — HAS_TIMESTAMPS / DELTA_INTERN / STRUCTURAL_ONLY — RESOLVED
+- **Decision (M2): HAS_TIMESTAMPS = reserved + rejected** — took option (ii), formal defer. It is now a reserved bit that both decoders reject fail-closed (schema `batchFlags`/`ops.$comment` state it is NOT decoded in v1: no u64 trailer emitted or read), with matching negative tests on both sides (TS `wire-decoder.test.ts:206` flags byte `0x04`; C++ "fail-closed: HAS_TIMESTAMPS flag rejected"). All three codecs agree; no unencodable, untested feature sits in the spec. Revisit only if a concrete per-op timestamp consumer appears (then implement option (i) with a golden vector).
+- **DELTA_INTERN / STRUCTURAL_ONLY — remain reserved/rejected.** Consistent and fail-closed; only build them out if a delta-interning optimization is actually pursued in M3+.
+
+---
+
+## 5. Recommended M3 sequence (if M2 says proceed)
+
+1. ~~**Fix the three fuzz divergences (§2)** and add the missing tests on both sides. Re-run `bash scripts/fuzz-wire-differential.sh 200000 0` to 0 divergences.~~ **DONE (M2)** — 0 divergences across 600,000 inputs (§2).
+2. ~~**Resolve the FUNCTION encoder quirk (H4)** in the contract + add a named-function golden vector.~~ **DONE (M2)** — metadata on the wire; three new debug vectors pin it (§2, §4a).
+3. ~~**Close HAS_TIMESTAMPS (§4e)** — implement-with-golden, or formally defer to reserved.~~ **DONE (M2)** — formally deferred to reserved + rejected.
+4. **Run the native C++ decoder bench + a live-path frame profile** to quantify the RN routes — informational now, no longer a promotion gate (platform directs promotion regardless; §4c).
+5. **If ship — write the live glue on the chosen route:** feature-gated `render_binary()` in `rill-guest` (mirror the golden test's `json_to_op`, call `Encoder::encode_batch`, ship the `Vec<u8>` over `rill_send_batch`); host-side decode slot replacing/paralleling `onSendBatch`'s `JSON.parse` with `decodeBatchStreaming(buffer, apply)` forwarding to the receiver. A/B driver, variance-aware, golden vectors as the fixed decoder-microbench corpus.
+6. **If any JS-guest route ships — build the conformant TS encoder (§4b)** as a `wire_encode.rs` port with cap enforcement, validated against golden + matrix.
+7. **Converge codecs (§4a):** one encoder per language, one hardened decoder per host; delete the legacy `BinaryDecoder`/`BinaryEncoder` once superseded; keep JSON as the interoperable fallback.
+8. **Promote off the WIP flags** once the (d) checklist is fully green.
+
+---
+
+### Key files
+- Contract + oracles: `contracts/op-batch-wire.json`, `contracts/op-batch-wire.golden.json`, `contracts/op-batch-wire.matrix.json` (74 vectors).
+- Conformant codecs: `crates/rill-guest/src/wire_encode.rs` (Rust encoder, feature `wip-binary-protocol`), `src/host/wasm-guest/wire-decoder.ts` (TS decoder), `native/core/src/protocol/WireDecoder.{h,cpp}` (C++ decoder, `RILL_WIP_BINARY_PROTOCOL`).
+- Legacy (non-conformant): `src/guest/runtime/reconciler/binary-encoder.ts`, `src/shared/bridge/binary-protocol.ts`.
+- Live JSON plumbing: `src/guest/runtime/reconciler/operation-collector.ts` (line 28 gate), `host-config.ts:93` (prod, no binary), `engine.ts:1200` (dispatch), `crates/rill-guest/src/lib.rs:1463` (`render`→JSON), `src/host/wasm-guest/wasm-guest-host.ts:219` (`JSON.parse`).
+- Harnesses (gated/non-prod): `native/core/test/fuzz_wire_decoder.cpp`, `native/core/test/fuzz.mk`, `scripts/wire-decoder-fuzz-differential.ts`, `scripts/fuzz-wire-differential.sh`, `src/host/wasm-guest/__benchmarks__/op-batch-bench.ts`.
+- Regenerate matrix: `RILL_REGEN_MATRIX=1 cargo test -p rill-guest --features wip-binary-protocol matrix_fixture_in_sync`.

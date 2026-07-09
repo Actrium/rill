@@ -1,9 +1,74 @@
 #import "JSCSandboxJSI.h"
 #import <Foundation/Foundation.h>
 #import <JavaScriptCore/JavaScriptCore.h>
+#import <dlfcn.h>
 #import <os/log.h>
 
 namespace jsc_sandbox {
+
+// MARK: - Execution time limit (private JSC API, resolved via dlsym)
+//
+// JavaScriptCore's ONLY mechanism to interrupt running JS is
+// JSContextGroupSetExecutionTimeLimit / JSContextGroupClearExecutionTimeLimit,
+// declared in the PRIVATE header JSContextRefPrivate.h. Referencing them
+// statically would embed private symbols in the binary and trip App Store
+// review, so they are looked up at runtime with dlsym(RTLD_DEFAULT, ...) and
+// only used when the embedder explicitly opts in via
+// createRuntime({ enableExecutionTimeLimit: true }). Default builds never
+// touch the symbols beyond the (legal) dlsym probe guarded by that flag.
+//
+// Function pointer types mirror WebKit's JSContextRefPrivate.h:
+//   typedef bool (*JSShouldTerminateCallback)(JSContextRef ctx, void* context);
+//   JS_EXPORT void JSContextGroupSetExecutionTimeLimit(
+//       JSContextGroupRef group, double limit /* SECONDS */,
+//       JSShouldTerminateCallback callback, void* context);
+//   JS_EXPORT void JSContextGroupClearExecutionTimeLimit(JSContextGroupRef);
+// Note the limit is in SECONDS (double), while our public option is in ms.
+
+namespace {
+
+using JSCShouldTerminateCallback = bool (*)(JSContextRef ctx, void *context);
+using JSCSetExecutionTimeLimitFn = void (*)(JSContextGroupRef group,
+                                            double limitSeconds,
+                                            JSCShouldTerminateCallback callback,
+                                            void *context);
+using JSCClearExecutionTimeLimitFn = void (*)(JSContextGroupRef group);
+
+struct TimeLimitAPI {
+  JSCSetExecutionTimeLimitFn set = nullptr;
+  JSCClearExecutionTimeLimitFn clear = nullptr;
+};
+
+// Resolve both symbols once, process-wide. Either both resolve or the API is
+// treated as unavailable — we must never arm a limit we cannot clear.
+const TimeLimitAPI &timeLimitAPI() {
+  static const TimeLimitAPI api = [] {
+    TimeLimitAPI a;
+    a.set = reinterpret_cast<JSCSetExecutionTimeLimitFn>(
+        dlsym(RTLD_DEFAULT, "JSContextGroupSetExecutionTimeLimit"));
+    a.clear = reinterpret_cast<JSCClearExecutionTimeLimitFn>(
+        dlsym(RTLD_DEFAULT, "JSContextGroupClearExecutionTimeLimit"));
+    if (!a.set || !a.clear) {
+      a.set = nullptr;
+      a.clear = nullptr;
+    }
+    return a;
+  }();
+  return api;
+}
+
+// Invoked by JSC on the JS-executing thread once the armed limit expires.
+// Returning true terminates execution (script throws an uncatchable
+// termination exception); `context` is the owning JSCSandboxContext's
+// timeLimitFired_ flag.
+bool timeLimitShouldTerminate(JSContextRef ctx, void *context) {
+  (void)ctx;
+  auto *fired = static_cast<std::atomic<bool> *>(context);
+  fired->store(true, std::memory_order_release);
+  return true;
+}
+
+} // namespace
 
 // Safe extraction of error message from a JSValue without triggering
 // toString recursion. [JSValue toString] executes JS code which can throw,
@@ -25,13 +90,50 @@ static NSString *safeExceptionMessage(JSValue *exception) {
 
 // MARK: - JSCSandboxContext Implementation
 
-JSCSandboxContext::JSCSandboxContext(jsi::Runtime &hostRuntime, double timeout)
-    : jsContext_(nullptr), hostRuntime_(&hostRuntime), disposed_(false) {
-  (void)timeout; // Reserved for future use
+JSCSandboxContext::JSCSandboxContext(jsi::Runtime &hostRuntime,
+                                     double timeoutMs,
+                                     bool enableExecutionTimeLimit)
+    : jsContext_(nullptr), contextGroup_(nullptr), hostRuntime_(&hostRuntime),
+      timeoutMs_(timeoutMs), timeLimitEnabled_(false), timeLimitDepth_(0),
+      timeLimitFired_(false), disposed_(false) {
+  // Execution timeout has TWO states:
+  // - Default (enableExecutionTimeLimit == false): NOT ENFORCED.
+  //   JavaScriptCore's public API has no way to interrupt running JS (no
+  //   equivalent of QuickJS's JS_SetInterruptHandler), so the
+  //   createRuntime({timeout}) option is accepted but ignored and a tenant
+  //   infinite loop blocks the calling (host) thread indefinitely. Callers
+  //   must not rely on this engine for CPU isolation in this state.
+  // - Opt-in (enableExecutionTimeLimit == true): ENFORCED via the private
+  //   JSContextGroupSetExecutionTimeLimit API resolved through dlsym (see
+  //   timeLimitAPI() above). Each top-level eval / host->sandbox call gets a
+  //   wall-clock budget of timeoutMs; on expiry JSC terminates the script and
+  //   the call throws a clear timeout error while the context stays usable.
+  //   If the private symbols cannot be resolved, this logs and falls back to
+  //   the unenforced behavior above.
   @autoreleasepool {
     JSContext *ctx = [[JSContext alloc] init];
     if (!ctx) {
       throw jsi::JSError(hostRuntime, "Failed to create JSContext");
+    }
+
+    if (enableExecutionTimeLimit) {
+      if (timeLimitAPI().set != nullptr) {
+        // JSContextGetGroup is public API; the group is owned by the
+        // context's VM, which we keep alive via jsContext_ until dispose().
+        contextGroup_ =
+            const_cast<void *>((const void *)JSContextGetGroup(
+                [ctx JSGlobalContextRef]));
+        timeLimitEnabled_ = (contextGroup_ != nullptr);
+      }
+      if (!timeLimitEnabled_) {
+        // WARNING-level: the caller explicitly asked for enforcement but this
+        // JSC build does not export the private API — timeouts will NOT be
+        // enforced and a tenant loop can hang the host thread.
+        os_log_error(OS_LOG_DEFAULT,
+                     "[JSCSandbox] enableExecutionTimeLimit requested but "
+                     "JSContextGroupSetExecutionTimeLimit is unavailable; "
+                     "falling back to UNENFORCED timeouts");
+      }
     }
 
     // Set up exception handler - must store exception for later checking.
@@ -127,7 +229,45 @@ void JSCSandboxContext::dispose() {
     }
     jsContext_ = nullptr;
   }
+  // The group was owned by the released context's VM; never touch it again.
+  contextGroup_ = nullptr;
+  timeLimitEnabled_ = false;
   callbacks_.clear();
+}
+
+// MARK: - TimeLimitScope
+
+JSCSandboxContext::TimeLimitScope::TimeLimitScope(JSCSandboxContext &ctx)
+    : ctx_(ctx) {
+  // Guard the budget before handing it to JSC: NaN and <= 0 are rejected by
+  // the `> 0` comparison, and non-finite / absurdly large values (Infinity,
+  // Number.MAX_VALUE, ...) are treated as "no limit" rather than armed.
+  // Only the outermost entry arms, so nested host<->sandbox bounces keep the
+  // original deadline.
+  constexpr double kMaxTimeoutMs = 9.0e15; // ~285k years; clearly "unlimited"
+  if (ctx_.timeLimitEnabled_ && ctx_.timeoutMs_ > 0 &&
+      ctx_.timeoutMs_ < kMaxTimeoutMs && ctx_.timeLimitDepth_ == 0) {
+    ctx_.timeLimitFired_.store(false, std::memory_order_relaxed);
+    // The private API takes the limit in SECONDS; our option is milliseconds.
+    timeLimitAPI().set((JSContextGroupRef)ctx_.contextGroup_,
+                       ctx_.timeoutMs_ / 1000.0, &timeLimitShouldTerminate,
+                       &ctx_.timeLimitFired_);
+    armedHere_ = true;
+  }
+  ctx_.timeLimitDepth_++;
+}
+
+JSCSandboxContext::TimeLimitScope::~TimeLimitScope() {
+  ctx_.timeLimitDepth_--;
+  // contextGroup_ can only go null via dispose(); guard against a dispose()
+  // issued from a host callback while this scope was still armed.
+  if (armedHere_ && ctx_.contextGroup_) {
+    timeLimitAPI().clear((JSContextGroupRef)ctx_.contextGroup_);
+  }
+}
+
+bool JSCSandboxContext::TimeLimitScope::timedOut() const {
+  return armedHere_ && ctx_.timeLimitFired_.load(std::memory_order_acquire);
 }
 
 jsi::Value JSCSandboxContext::get(jsi::Runtime &rt,
@@ -232,7 +372,21 @@ jsi::Value JSCSandboxContext::eval(jsi::Runtime &rt, const std::string &code) {
     JSContext *ctx = (__bridge JSContext *)jsContext_;
     NSString *nsCode = [NSString stringWithUTF8String:code.c_str()];
 
+    // Arm the wall-clock execution deadline for this top-level eval. No-op
+    // unless enableExecutionTimeLimit was requested at createRuntime and the
+    // private JSC API resolved (timeLimitEnabled_), and timeoutMs_ > 0.
+    TimeLimitScope timeLimit(*this);
     JSValue *result = [ctx evaluateScript:nsCode];
+
+    // Translate JSC's opaque termination exception into a clear timeout
+    // error. The context itself stays valid and usable for later evals.
+    if (timeLimit.timedOut()) {
+      ctx.exception = nil;
+      throw jsi::JSError(
+          rt, "JSC eval timed out after " +
+                  std::to_string(static_cast<long long>(timeoutMs_)) +
+                  "ms (execution interrupted)");
+    }
 
     // Check for exceptions
     if (ctx.exception) {
@@ -933,8 +1087,19 @@ jsi::Value JSCSandboxContext::jsValueToJSI(jsi::Runtime &rt, void *jsValue,
                                   ?: [JSValue valueWithUndefinedInContext:ctx]];
               }
 
-              // Call the sandbox function
+              // Host->sandbox function calls execute tenant JS too: same
+              // budget as eval (nested entries keep the outermost deadline).
+              TimeLimitScope timeLimit(*self);
               JSValue *result = [sandboxFunc callWithArguments:jsArgs];
+
+              if (timeLimit.timedOut()) {
+                ctx.exception = nil;
+                throw jsi::JSError(
+                    rt, "JSC sandbox function timed out after " +
+                            std::to_string(
+                                static_cast<long long>(self->timeoutMs_)) +
+                            "ms (execution interrupted)");
+              }
 
               // Check for exceptions
               if (ctx.exception) {
@@ -1020,8 +1185,10 @@ jsi::Value JSCSandboxContext::jsValueToJSI(jsi::Runtime &rt, void *jsValue,
 
 // MARK: - JSCSandboxRuntime Implementation
 
-JSCSandboxRuntime::JSCSandboxRuntime(jsi::Runtime &hostRuntime, double timeout)
-    : hostRuntime_(&hostRuntime), timeout_(timeout), disposed_(false) {}
+JSCSandboxRuntime::JSCSandboxRuntime(jsi::Runtime &hostRuntime, double timeout,
+                                     bool enableExecutionTimeLimit)
+    : hostRuntime_(&hostRuntime), timeout_(timeout),
+      enableExecutionTimeLimit_(enableExecutionTimeLimit), disposed_(false) {}
 
 JSCSandboxRuntime::~JSCSandboxRuntime() { dispose(); }
 
@@ -1093,7 +1260,8 @@ jsi::Value JSCSandboxRuntime::createContext(jsi::Runtime &rt) {
     throw jsi::JSError(rt, "Runtime has been disposed");
   }
 
-  auto context = std::make_shared<JSCSandboxContext>(*hostRuntime_, timeout_);
+  auto context = std::make_shared<JSCSandboxContext>(
+      *hostRuntime_, timeout_, enableExecutionTimeLimit_);
   contexts_.push_back(context);
 
   return jsi::Object::createFromHostObject(rt, context);
@@ -1118,6 +1286,9 @@ jsi::Value JSCSandboxModule::get(jsi::Runtime &rt,
            size_t count) -> jsi::Value {
           (void)thisVal;
           double timeout = 30000; // default 30s
+          // Default OFF: enforcement uses a private JSC API (via dlsym) that
+          // enterprise/internal builds may opt into; see header comment.
+          bool enableExecutionTimeLimit = false;
 
           if (count > 0 && args[0].isObject()) {
             jsi::Object opts = args[0].asObject(rt);
@@ -1127,9 +1298,17 @@ jsi::Value JSCSandboxModule::get(jsi::Runtime &rt,
                 timeout = timeoutVal.getNumber();
               }
             }
+            if (opts.hasProperty(rt, "enableExecutionTimeLimit")) {
+              jsi::Value enableVal =
+                  opts.getProperty(rt, "enableExecutionTimeLimit");
+              if (enableVal.isBool()) {
+                enableExecutionTimeLimit = enableVal.getBool();
+              }
+            }
           }
 
-          auto runtime = std::make_shared<JSCSandboxRuntime>(rt, timeout);
+          auto runtime = std::make_shared<JSCSandboxRuntime>(
+              rt, timeout, enableExecutionTimeLimit);
           return jsi::Object::createFromHostObject(rt, runtime);
         });
   }

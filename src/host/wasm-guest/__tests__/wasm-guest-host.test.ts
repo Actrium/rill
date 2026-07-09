@@ -6,24 +6,32 @@ import { ComponentRegistry } from '../../registry';
 import { Receiver } from '../../receiver';
 import { WasmGuestHost } from '../wasm-guest-host';
 
-// A tiny host module defined IN the test: rill knows nothing about specific
-// capabilities, so this proves the native-guest ABI generically.
-function kvDispatch(options: { throwOnPut?: boolean } = {}) {
+// A tiny host module defined IN the test, mirroring the platform's host:store
+// contract (putText/getText shapes from host-store.ts): rill knows nothing
+// about specific capabilities, so this proves the native-guest ABI generically.
+function storeDispatch(options: { throwOnPut?: boolean } = {}) {
   const store = new Map<string, string>();
   const contract = defineRillContract({
     version: '1',
     hostModules: {
-      'host:kv': {
-        put: rpc<{ k: string; v: string }, { version: number }>({
+      'host:store': {
+        putText: rpc<{ key: string; text: string }, { version: number }>({
           schema: {
-            parseInput: (x) => ({ k: String((x as { k?: unknown })?.k ?? ''), v: String((x as { v?: unknown })?.v ?? '') }),
+            parseInput: (x) => ({
+              key: String((x as { key?: unknown })?.key ?? ''),
+              text: String((x as { text?: unknown })?.text ?? ''),
+            }),
             parseOutput: (x) => ({ version: Number((x as { version?: unknown })?.version) || 0 }),
           },
         }),
-        get: rpc<{ k: string }, { v: string }>({
+        getText: rpc<{ key: string }, { text: string; version: number } | null>({
           schema: {
-            parseInput: (x) => ({ k: String((x as { k?: unknown })?.k ?? '') }),
-            parseOutput: (x) => ({ v: String((x as { v?: unknown })?.v ?? '') }),
+            parseInput: (x) => ({ key: String((x as { key?: unknown })?.key ?? '') }),
+            parseOutput: (x) => {
+              if (x == null) return null;
+              const r = x as { text?: unknown; version?: unknown };
+              return { text: String(r.text ?? ''), version: Number(r.version) || 0 };
+            },
           },
         }),
       },
@@ -31,13 +39,16 @@ function kvDispatch(options: { throwOnPut?: boolean } = {}) {
     guestExports: {},
   });
   const impl = implementHostModules(contract, {
-    'host:kv': {
-      put: async (i: { k: string; v: string }) => {
+    'host:store': {
+      putText: async (i: { key: string; text: string }) => {
         if (options.throwOnPut) throw new Error('put exploded');
-        store.set(i.k, i.v);
+        store.set(i.key, i.text);
         return { version: store.size };
       },
-      get: async (i: { k: string }) => ({ v: store.get(i.k) ?? '' }),
+      getText: async (i: { key: string }) => {
+        const text = store.get(i.key);
+        return text === undefined ? null : { text, version: store.size };
+      },
     },
   });
   return { table: createHostModuleDispatch(contract, impl), store };
@@ -58,12 +69,15 @@ const BAD_BATCH = readFileSync(join(import.meta.dir, 'fixtures/bad-batch.wasm'))
 const EVENT_GUEST = readFileSync(join(import.meta.dir, 'fixtures/event-guest.wasm'));
 // Guest authored in C via the C SDK (sdk/c) — proves the ABI is language-neutral.
 const C_GUEST = readFileSync(join(import.meta.dir, 'fixtures/c-guest.wasm'));
-// Adversarial guest that over-allocates past its bump heap (allocation trap).
-const HEAP_EXHAUST = readFileSync(join(import.meta.dir, 'fixtures/heap-exhaust-guest.wasm'));
+// Guest that churns alloc/free far past the old 1 MiB heap cap; its `heap_churn`
+// export drives the fragmentation/plateau proof (talc reclaims freed frames).
+const HEAP_CHURN = readFileSync(join(import.meta.dir, 'fixtures/heap-churn-guest.wasm'));
 // Adversarial guest that imports an undeclared function (must be rejected).
 const BAD_IMPORT = readFileSync(join(import.meta.dir, 'fixtures/bad-import.wasm'));
 // Adversarial guest whose rill_on_event traps.
 const EVENT_TRAP = readFileSync(join(import.meta.dir, 'fixtures/event-trap.wasm'));
+// Adversarial guest whose rill_alloc always returns 0 (exhausted allocator).
+const ALLOC_ZERO = readFileSync(join(import.meta.dir, 'fixtures/alloc-zero.wasm'));
 
 // --- tiny seeded PRNG + JSON generator for fuzzing (reproducible, no deps) ---
 type Json = string | number | boolean | null | Json[] | { [k: string]: Json };
@@ -119,7 +133,7 @@ const readResolve = (host: WasmGuestHost) => {
 
 describe('WasmGuestHost — native (non-JS) guest host:* ABI', () => {
   it('round-trips a host call through linear memory (guest -> host:* -> guest resolve)', async () => {
-    const { table, store } = kvDispatch();
+    const { table, store } = storeDispatch();
     const host = new WasmGuestHost({ dispatch: table });
     await host.load(WASM);
     await host.drain();
@@ -131,7 +145,7 @@ describe('WasmGuestHost — native (non-JS) guest host:* ABI', () => {
   });
 
   it('is fail-closed: an undeclared host module resolves ok=0 (the seal)', async () => {
-    const host = new WasmGuestHost({ dispatch: {} }); // test:kv not registered
+    const host = new WasmGuestHost({ dispatch: {} }); // host:store not registered
     await host.load(WASM);
     await host.drain();
 
@@ -143,7 +157,7 @@ describe('WasmGuestHost — native (non-JS) guest host:* ABI', () => {
 
 describe('WasmGuestHost — real Rust guest via the rill-guest SDK', () => {
   it('drives an async Rust guest (store::put("a","b").await) end to end', async () => {
-    const { table, store } = kvDispatch();
+    const { table, store } = storeDispatch();
     const host = new WasmGuestHost({ dispatch: table });
     await host.load(RUST_GUEST);
     await host.drain();
@@ -191,7 +205,7 @@ describe('WasmGuestHost — native guest renders UI via the receiver', () => {
 
 describe('WasmGuestHost — adversarial / boundary (the trust boundary)', () => {
   it('fails closed (ok=0) on malformed JSON input, does not crash', async () => {
-    const { table } = kvDispatch();
+    const { table } = storeDispatch();
     const host = new WasmGuestHost({ dispatch: table });
     await host.load(BAD_JSON);
     await host.drain();
@@ -199,7 +213,7 @@ describe('WasmGuestHost — adversarial / boundary (the trust boundary)', () => 
   });
 
   it('fails closed (ok=0) on an out-of-bounds guest pointer, never reads OOB', async () => {
-    const { table } = kvDispatch();
+    const { table } = storeDispatch();
     const host = new WasmGuestHost({ dispatch: table });
     await host.load(OOB);
     await host.drain();
@@ -219,7 +233,7 @@ describe('WasmGuestHost — adversarial / boundary (the trust boundary)', () => 
   });
 
   it('fails closed (ok=0) when a host handler throws', async () => {
-    const { table } = kvDispatch({ throwOnPut: true });
+    const { table } = storeDispatch({ throwOnPut: true });
     const host = new WasmGuestHost({ dispatch: table });
     await host.load(WASM);
     await host.drain();
@@ -229,7 +243,7 @@ describe('WasmGuestHost — adversarial / boundary (the trust boundary)', () => 
   });
 
   it('fails closed (ok=0) when the module exists but the method does not', async () => {
-    const host = new WasmGuestHost({ dispatch: { 'host:kv': {} } }); // put missing
+    const host = new WasmGuestHost({ dispatch: { 'host:store': {} } }); // putText missing
     await host.load(WASM);
     await host.drain();
     const { ok, result } = readResolve(host);
@@ -238,9 +252,39 @@ describe('WasmGuestHost — adversarial / boundary (the trust boundary)', () => 
   });
 });
 
+describe('WasmGuestHost — allocation failure (rill_alloc returns 0)', () => {
+  // Address 0 is INSIDE linear memory, so a returned NULL passes a pure bounds
+  // check. The host must treat ptr 0 + len > 0 as allocation failure and never
+  // write there — the SDK's bump allocator returns NULL exactly when a
+  // long-running guest (e.g. two allocations per event at 60fps) exhausts its
+  // heap, and the guest keeps live data at the bottom of memory.
+  it('abandons a host-call resolution instead of writing the result over address 0', async () => {
+    const { table } = storeDispatch();
+    const host = new WasmGuestHost({ dispatch: table });
+    await host.load(ALLOC_ZERO);
+    await host.drain();
+
+    // rill_resolve never ran (the cb was abandoned, fail-closed) ...
+    expect((host.exports.resolve_ok as () => number)()).toBe(-1);
+    // ... and the guest's request bytes at address 0 were NOT overwritten.
+    expect(new TextDecoder().decode(host.readBytes(0, 10))).toBe('host:store');
+  });
+
+  it('drops an event instead of delivering pointers into corrupted memory', async () => {
+    const host = new WasmGuestHost({ dispatch: {} });
+    await host.load(ALLOC_ZERO);
+
+    // emitEvent absorbs the allocation failure (same fail-closed contract as a
+    // trapping guest) — but rill_on_event must NOT have been invoked.
+    expect(() => host.emitEvent('ping', { n: 1 })).not.toThrow();
+    expect((host.exports.event_count as () => number)()).toBe(0);
+    expect(new TextDecoder().decode(host.readBytes(0, 10))).toBe('host:store');
+  });
+});
+
 describe('WasmGuestHost — SDK executor: sequential awaits + escaping', () => {
   it('drives two sequential host awaits (put then get) and round-trips escaped chars', async () => {
-    const { table, store } = kvDispatch();
+    const { table, store } = storeDispatch();
     const host = new WasmGuestHost({ dispatch: table });
     await host.load(SEQ_GUEST);
     await host.drain();
@@ -249,14 +293,17 @@ describe('WasmGuestHost — SDK executor: sequential awaits + escaping', () => {
     expect((host.exports.step as () => number)()).toBe(2);
     // put escaped the value guest->host correctly: b " \ c
     expect(store.get('a')).toBe('b"\\c');
-    // get round-tripped it host->guest.
+    // get round-tripped it host->guest (host:store.getText response shape).
     const ptr = (host.exports.got_ptr as () => number)();
     const len = (host.exports.got_len as () => number)();
-    expect(JSON.parse(new TextDecoder().decode(host.readBytes(ptr, len)))).toEqual({ v: 'b"\\c' });
+    expect(JSON.parse(new TextDecoder().decode(host.readBytes(ptr, len)))).toEqual({
+      text: 'b"\\c',
+      version: 1,
+    });
   });
 
   it('takes the guest Err branch (ok=0) when the capability is unavailable', async () => {
-    const host = new WasmGuestHost({ dispatch: {} }); // host:kv not registered
+    const host = new WasmGuestHost({ dispatch: {} }); // host:store not registered
     await host.load(RUST_GUEST);
     await host.drain();
     expect((host.exports.last_ok as () => number)()).toBe(0); // Rust matched Err(_)
@@ -411,18 +458,61 @@ describe('WasmGuestHost — fuzz + resilience (trust boundary)', () => {
     }
   });
 
-  it('a heap-exhausted guest fails to load with a catchable error; the host survives', async () => {
-    const bad = new WasmGuestHost({ dispatch: {} });
-    let threw = false;
-    try {
-      await bad.load(HEAP_EXHAUST);
-    } catch {
-      threw = true; // guest trapped -> catchable JS error, not a process crash
-    }
-    expect(threw).toBe(true);
+  it('churns hundreds of MiB through the heap yet linear memory plateaus (talc reclaims freed frames)', async () => {
+    // R3 acceptance. The guest allocator is talc (memory.grow-backed, real free
+    // list), NOT the retired fixed 1 MiB bump heap. `heap_churn(frames, bytes,
+    // window)` allocates one `bytes`-sized buffer per frame and frees the OLDEST
+    // once more than `window` are live (FIFO -> non-LIFO reclamation). Cumulative
+    // bytes = frames*bytes; peak live = window*bytes (kept tiny). A leaking or
+    // grow-only allocator would push linear memory past the cumulative total; a
+    // correct reclaiming allocator grows once during warm-up, then PLATEAUS.
+    const host = new WasmGuestHost({ dispatch: {} });
+    await host.load(HEAP_CHURN);
+    const memory = host.exports.memory as WebAssembly.Memory;
+    const churn = host.exports.heap_churn as (f: number, b: number, w: number) => number;
 
-    // The host process survived: a normal guest still loads and works.
-    const { table, store } = kvDispatch();
+    const FRAME = 64 * 1024; // 64 KiB per frame
+    const WINDOW = 4; // <= 256 KiB ever live
+    const bytesAtStart = memory.buffer.byteLength;
+
+    // Warm-up: fill the window and let talc claim its steady-state pages.
+    churn(64, FRAME, WINDOW); // 4 MiB cumulative
+    const bytesAfterWarmup = memory.buffer.byteLength;
+
+    // Now pour hundreds of MiB through the same heap. Each call's cumulative
+    // allocation alone dwarfs the old 1 MiB cap.
+    churn(256, FRAME, WINDOW); // +16 MiB
+    const bytesAfter16 = memory.buffer.byteLength;
+    churn(1024, FRAME, WINDOW); // +64 MiB
+    const bytesAfter64 = memory.buffer.byteLength;
+    churn(4096, FRAME, WINDOW); // +256 MiB
+    const bytesAfter256 = memory.buffer.byteLength;
+
+    const cumulative = (64 + 256 + 1024 + 4096) * FRAME; // ~340 MiB
+
+    // Sanity: we really did churn far more than the old 1 MiB cap.
+    expect(cumulative).toBeGreaterThan(256 * 1024 * 1024);
+
+    // PLATEAU: after warm-up, 336 MiB more churn grows linear memory by ZERO —
+    // every freed frame is reused. (The old bump heap would have trapped at
+    // 1 MiB; a grow-only bump would have leaked to hundreds of MiB.)
+    expect(bytesAfterWarmup).toBeGreaterThan(bytesAtStart); // warm-up grew once
+    expect(bytesAfter16).toBe(bytesAfterWarmup);
+    expect(bytesAfter64).toBe(bytesAfterWarmup);
+    expect(bytesAfter256).toBe(bytesAfterWarmup);
+
+    // BOUNDED: total footprint stayed a tiny fraction of what was churned.
+    expect(bytesAfter256 - bytesAtStart).toBeLessThan(2 * 1024 * 1024);
+    expect(bytesAfter256).toBeLessThan(cumulative / 100);
+
+    // Fragmentation: varied-size frames (16..48 KiB) over a wider window mix bins
+    // and interleave lifetimes; memory must still hold the plateau, not creep.
+    for (let i = 0; i < 2048; i++) churn(1, 16 * 1024 + (i % 32) * 1024, 8);
+    expect(memory.buffer.byteLength).toBe(bytesAfterWarmup);
+
+    // The host process survived a hostile-scale workload: a normal guest still
+    // loads and works.
+    const { table, store } = storeDispatch();
     const ok = new WasmGuestHost({ dispatch: table });
     await ok.load(RUST_GUEST);
     await ok.drain();

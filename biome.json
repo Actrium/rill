@@ -32,6 +32,15 @@
       "assist": {
         "enabled": false
       }
+    },
+    {
+      "includes": ["contracts/*.golden.json", "contracts/*.matrix.json"],
+      "formatter": {
+        "enabled": false
+      },
+      "assist": {
+        "enabled": false
+      }
     }
   ],
   "formatter": {

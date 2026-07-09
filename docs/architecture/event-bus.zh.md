@@ -1,6 +1,6 @@
 # Event Bus
 
-Event Bus 是一个在 C++ 中实现的跨租户发布/订阅系统。它用基于通道的模型替换了点对点 `sendEvent`,支持系统广播、受控的租户间通信、速率限制和持久事件缓冲。
+Event Bus 是一个在 C++ 中实现的跨租户发布/订阅系统。它以基于通道的模型对点对点 `sendEvent`(该方法在 `RillTenantManager` 上仍然可用)形成补充,支持系统广播、受控的租户间通信、速率限制和持久事件缓冲。
 
 ## 设计
 
@@ -54,9 +54,13 @@ struct ChannelPolicy {
 };
 ```
 
+> **注意:** `requirePermission` 虽然在 `ChannelPolicy` 中声明,但**当前并未被执行** —— `subscribe()` 只检查通道是否存在以及是否超过 `maxSubscribers`,`EventBus.cpp` 中没有任何权限检查逻辑。
+
 ### 内置通道
 
-| 通道 | systemOnly | persistent | 描述 |
+> **状态: 规划中 —— 尚未实现。** 下表仅为设计草案。Event Bus 目前启动时**没有任何**预注册通道(`EventBus::EventBus() = default;`),`native/core` 中也没有任何代码创建这些通道。所有通道都必须显式创建 —— C++ 侧调用 `createChannel()`,或 JSI 侧调用 `busCreateChannel(policy)` —— 之后才能发布或订阅。
+
+| 通道(规划中) | systemOnly | persistent | 描述 |
 |---|---|---|---|
 | `system` | 是 | 是 | 系统生命周期事件(启动、关闭、OOM) |
 | `lifecycle` | 是 | 是 | 应用状态转换(前台、后台、内存警告) |
@@ -191,11 +195,11 @@ struct Stats {
   uint64_t totalDelivered;        // 单个处理程序调用
   uint64_t totalDropped;          // 丢弃的事件(速率限制、策略)
   size_t activeSubscriptions;     // 当前活动的订阅
-  size_t activeChannels;          // 至少有一个订阅者的通道
+  size_t activeChannels;          // 已创建的通道(所有已创建通道,无论是否有订阅者)
 };
 ```
 
-统计信息使用 `std::atomic` 计数器进行无锁读访问。
+发布/投递/丢弃计数器为 `std::atomic`,更新时无需阻塞;`getStats()` 本身会持有共享锁,以对通道数和订阅数做一致快照。
 
 ## JSI 集成
 

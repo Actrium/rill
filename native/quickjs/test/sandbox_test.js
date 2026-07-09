@@ -438,6 +438,92 @@
   assert(ctx.eval('-0') === 0, 'Negative zero'); // Note: -0 === 0 in JS
   assert(ctx.eval("''") === '', 'Empty string literal');
 
+  // 30. Execution timeout (wall-clock interrupt)
+  console.log('\n30. Execution Timeout');
+  var timeoutRt = sandbox.createRuntime({ timeout: 250 });
+  var timeoutCtx = timeoutRt.createContext();
+  var start = Date.now();
+  var threw = false;
+  var errMsg = '';
+  try {
+    timeoutCtx.eval('while (true) {}');
+  } catch (e) {
+    threw = true;
+    errMsg = String(e?.message || e);
+  }
+  var elapsed = Date.now() - start;
+  assert(threw, 'Infinite loop eval throws instead of hanging');
+  assert(errMsg.indexOf('timed out') !== -1, 'Timeout error message is explicit', `got: ${errMsg}`);
+  assert(elapsed >= 200, 'Interrupt fires no earlier than the deadline', `elapsed: ${elapsed}`);
+  assert(elapsed < 5000, 'Interrupt fires promptly after the deadline', `elapsed: ${elapsed}`);
+  assert(timeoutCtx.eval('1 + 1') === 2, 'Context stays usable after a timeout');
+  timeoutRt.dispose();
+
+  var unlimitedRt = sandbox.createRuntime({ timeout: 0 });
+  var unlimitedCtx = unlimitedRt.createContext();
+  assert(
+    unlimitedCtx.eval('var s = 0; for (var i = 0; i < 100000; i++) s += i; s') === 4999950000,
+    'timeout: 0 means unlimited (long loop completes)'
+  );
+  unlimitedRt.dispose();
+
+  // timeout: Infinity must mean "no limit" — not a bogus int64 deadline in
+  // the past (double->int64 overflow) that kills every non-trivial eval.
+  var infinityRt = sandbox.createRuntime({ timeout: Infinity });
+  var infinityCtx = infinityRt.createContext();
+  assert(
+    infinityCtx.eval('var s = 0; for (var i = 0; i < 100000; i++) s += i; s') === 4999950000,
+    'timeout: Infinity means unlimited (long loop completes)'
+  );
+  infinityRt.dispose();
+
+  // dispose() must return even when a timed-out tenant left a self-requeueing
+  // promise job in the queue (the drain loop is bounded, leftovers are freed
+  // with the runtime).
+  var drainRt = sandbox.createRuntime({ timeout: 200 });
+  var drainCtx = drainRt.createContext();
+  try {
+    drainCtx.eval(
+      'Promise.resolve().then(function f() { Promise.resolve().then(f); }); while (true) {}'
+    );
+  } catch (_e) {
+    // expected: eval times out; the self-requeueing job stays queued
+  }
+  var disposeStart = Date.now();
+  drainRt.dispose();
+  assert(
+    Date.now() - disposeStart < 5000,
+    'dispose() returns despite a self-requeueing pending job'
+  );
+
+  // 31. Heap quota (maxHeapBytes -> JS_SetMemoryLimit)
+  console.log('\n31. Heap Quota');
+  var quotaRt = sandbox.createRuntime({ maxHeapBytes: 8 * 1024 * 1024 });
+  var quotaCtx = quotaRt.createContext();
+  var oomThrew = false;
+  var oomMsg = '';
+  try {
+    quotaCtx.eval('var big = new Uint8Array(64 * 1024 * 1024); big.length');
+  } catch (e) {
+    oomThrew = true;
+    oomMsg = String(e?.message || e);
+  }
+  assert(oomThrew, 'Allocation beyond maxHeapBytes throws', `got: ${oomMsg}`);
+  assert(quotaCtx.eval('1 + 1') === 2, 'Context stays usable after quota OOM');
+  assert(
+    quotaCtx.eval('new Uint8Array(1024 * 1024).length') === 1048576,
+    'Small allocations still work under the quota'
+  );
+  quotaRt.dispose();
+
+  var defaultHeapRt = sandbox.createRuntime({});
+  var defaultHeapCtx = defaultHeapRt.createContext();
+  assert(
+    defaultHeapCtx.eval('new Uint8Array(64 * 1024 * 1024).length') === 67108864,
+    'Default heap limit still allows a 64MB allocation'
+  );
+  defaultHeapRt.dispose();
+
   // Summary
   console.log('\n=== Test Summary ===');
   console.log(`Total: ${testsRun}`);

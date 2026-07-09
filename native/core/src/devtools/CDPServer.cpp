@@ -1,3 +1,6 @@
+// WIP subsystem — gated behind RILL_WIP_CDP_DEVTOOLS (off by default in production builds).
+// Rationale, goals, current status, and completion TODO live in devtools/CDPServer.h.
+#if RILL_WIP_CDP_DEVTOOLS
 /**
  * CDPServer.cpp
  *
@@ -995,3 +998,4 @@ std::optional<int> parseJSONInt(const std::string& json, const std::string& key)
 } // namespace cdp
 
 } // namespace rill::devtools
+#endif // RILL_WIP_CDP_DEVTOOLS

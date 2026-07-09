@@ -112,7 +112,7 @@ export default function MyGuest() {
 bunx rill build src/guest.tsx -o dist/bundle.js
 
 # 开发模式
-bunx rill build src/guest.tsx --watch --no-minify --sourcemap
+bunx rill build src/guest.tsx --no-minify --sourcemap
 
 # 分析 bundle
 bunx rill analyze dist/bundle.js
@@ -178,7 +178,7 @@ engine.sendEvent('EVENT_NAME', payload);
 engine.on('message', (msg) => console.log(msg.event, msg.payload));
 
 // 健康检查
-const health = engine.getHealth();
+const { health } = engine.getDiagnostics();
 
 // 销毁
 engine.destroy();

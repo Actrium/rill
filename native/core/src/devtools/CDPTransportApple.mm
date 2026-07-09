@@ -1,3 +1,6 @@
+// WIP subsystem — gated behind RILL_WIP_CDP_DEVTOOLS (off by default in production builds).
+// Rationale, goals, current status, and completion TODO live in devtools/CDPServer.h.
+#if RILL_WIP_CDP_DEVTOOLS
 /**
  * CDPTransportApple.mm
  *
@@ -334,3 +337,4 @@ void CDPTransportApple::removeConnection(ConnectionId connId) {
 } // namespace rill::devtools
 
 #endif // __APPLE__
+#endif // RILL_WIP_CDP_DEVTOOLS

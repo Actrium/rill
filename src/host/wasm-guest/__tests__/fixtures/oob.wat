@@ -5,8 +5,8 @@
   (import "env" "rill_host_call"
     (func $host_call (param i32 i32 i32 i32 i32 i32 i32)))
   (memory (export "memory") 1)
-  (data (i32.const 0)  "host:kv")
-  (data (i32.const 16) "put")
+  (data (i32.const 0)  "host:store")
+  (data (i32.const 16) "putText")
 
   (global $bump (mut i32) (i32.const 1024))
   (global $r_ok (mut i32) (i32.const -1))
@@ -20,8 +20,8 @@
     (global.set $r_ok (local.get $ok)))
   (func (export "rill_init")
     (call $host_call
-      (i32.const 0) (i32.const 7)
-      (i32.const 16) (i32.const 3)
+      (i32.const 0) (i32.const 10)
+      (i32.const 16) (i32.const 7)
       (i32.const 5000000) (i32.const 10)   ;; input ptr out of bounds
       (i32.const 1)))
   (func (export "resolve_ok") (result i32) (global.get $r_ok))

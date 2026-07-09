@@ -128,6 +128,61 @@ export function registerRillSandboxTests(
     },
   });
 
+  registerTest({
+    id: 'sandbox/self-referential-value',
+    name: 'Safety: self-referential extract does not crash the host',
+    tags: ['sandbox', 'safety'],
+    run() {
+      const mod = getModule(target);
+      const runtime = mod.createRuntime({ timeout: 5000 });
+      const ctx = runtime.createContext();
+      // Cross-runtime conversion is guarded per engine (depth cap and/or
+      // ancestor-path cycle detection). Engines differ in the sentinel they
+      // substitute — and may legitimately throw — so the invariant asserted
+      // here is: the host process survives and the context stays usable.
+      try {
+        const v = ctx.eval('var a = {}; a.self = a; a');
+        nativeLog(`[rill-e2e][cycle] eval returned, typeof=${typeof v}`);
+      } catch (e) {
+        nativeLog(`[rill-e2e][cycle] eval threw (acceptable): ${String(e)}`);
+      }
+      expect(ctx.eval('1 + 1')).toBe(2);
+      ctx.dispose();
+      runtime.dispose();
+    },
+  });
+
+  // JSC has no public interrupt API (see docs/reference/sandbox-comparison.md)
+  // — a runaway loop there would hang the suite, so the timeout test only
+  // runs on engines that enforce the budget.
+  if (target === 'hermes' || target === 'quickjs') {
+    registerTest({
+      id: 'sandbox/timeout-interrupt',
+      name: 'Safety: eval timeout aborts a runaway loop',
+      tags: ['sandbox', 'safety'],
+      run() {
+        const mod = getModule(target);
+        const runtime = mod.createRuntime({ timeout: 300 });
+        const ctx = runtime.createContext();
+        let threw = false;
+        const start = Date.now();
+        try {
+          ctx.eval('while (true) {}');
+        } catch (e) {
+          threw = true;
+          nativeLog(
+            `[rill-e2e][timeout] threw after ${Date.now() - start}ms: ${String(e)}`
+          );
+        }
+        expect(threw).toBe(true);
+        // The aborted eval must not poison the context.
+        expect(ctx.eval('1 + 1')).toBe(2);
+        ctx.dispose();
+        runtime.dispose();
+      },
+    });
+  }
+
   // ============================================
   // Callback bidirectional tests (host ↔ guest)
   // ============================================

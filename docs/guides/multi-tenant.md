@@ -183,7 +183,7 @@ Each channel can be configured with a policy object:
 | Policy | Type | Description |
 |---|---|---|
 | `systemOnly` | `boolean` | Only the host can publish to this channel. |
-| `requirePermission` | `boolean` | Tenants must be granted explicit access. |
+| `requirePermission` | `boolean` | Tenants must be granted explicit access. **Not currently enforced** — see [Event Bus](../architecture/event-bus.md). |
 | `maxSubscribers` | `number` | Maximum concurrent subscribers. |
 | `maxEventsPerSecond` | `number` | Rate limit for published events. |
 | `maxPayloadBytes` | `number` | Maximum serialized payload size. |
@@ -191,7 +191,9 @@ Each channel can be configured with a policy object:
 
 ### Built-in Channels
 
-| Channel | Direction | Description |
+> **Status: planned — not implemented.** The Event Bus starts with **zero** pre-registered channels; none of the channels below exist today. Every channel must be created explicitly before use. See [Event Bus](../architecture/event-bus.md) for details.
+
+| Channel (planned) | Direction | Description |
 |---|---|---|
 | `system` | Host to tenants | System-level notifications (memory warnings, etc.). |
 | `lifecycle` | Host to tenants | App lifecycle events (foreground, background). |

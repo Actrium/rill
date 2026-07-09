@@ -10,7 +10,20 @@ import type { ReviewedUnknown } from '../../types';
 declare global {
   var __JSCSandboxJSI:
     | {
-        createRuntime(options?: { timeout?: number }): JSCRuntimeNative;
+        /**
+         * `timeout` (ms) is only enforced when `enableExecutionTimeLimit` is
+         * explicitly true: JSC then arms the private
+         * JSContextGroupSetExecutionTimeLimit API, resolved at runtime via
+         * dlsym so no private symbol is statically referenced. Default is
+         * false — zero App Store review risk, but timeouts are NOT enforced
+         * and a tenant loop blocks the host thread. Opting in is meant for
+         * enterprise/internal distribution; if the private symbols are
+         * unavailable at runtime, JSC logs and falls back to not enforcing.
+         */
+        createRuntime(options?: {
+          timeout?: number;
+          enableExecutionTimeLimit?: boolean;
+        }): JSCRuntimeNative;
         isAvailable(): boolean;
       }
     | undefined;

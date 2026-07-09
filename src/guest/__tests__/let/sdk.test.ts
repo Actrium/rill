@@ -528,6 +528,16 @@ describe('Zero Runtime Dependencies', () => {
 
 // ============ React Native APIs Tests ============
 describe('React Native APIs', () => {
+  // Platform-info APIs read the optional host-injected __rill_platform channel;
+  // keep the global clean around every test in this block.
+  beforeEach(() => {
+    delete (globalThis as Record<string, unknown>).__rill_platform;
+  });
+
+  afterEach(() => {
+    delete (globalThis as Record<string, unknown>).__rill_platform;
+  });
+
   describe('StyleSheet', () => {
     it('should have create method that returns styles as-is', async () => {
       const { StyleSheet } = await sdkImport;
@@ -538,46 +548,73 @@ describe('React Native APIs', () => {
   });
 
   describe('Platform', () => {
-    it('should have OS property', async () => {
+    it('OS should be "unknown" and isInjected false without host injection', async () => {
       const { Platform } = await sdkImport;
-      expect(typeof Platform.OS).toBe('string');
+      expect(Platform.OS).toBe('unknown');
+      expect(Platform.isInjected).toBe(false);
+      expect(Platform.Version).toBeUndefined();
     });
 
-    it('should have select method', async () => {
+    it('should read OS from host-injected __rill_platform object', async () => {
       const { Platform } = await sdkImport;
-      expect(typeof Platform.select).toBe('function');
+      (globalThis as Record<string, unknown>).__rill_platform = { os: 'web', version: '1.2' };
+      expect(Platform.OS).toBe('web');
+      expect(Platform.Version).toBe('1.2');
+      expect(Platform.isInjected).toBe(true);
     });
 
-    it('select should return default when available', async () => {
+    it('should read OS from host-injected __rill_platform function', async () => {
+      const { Platform } = await sdkImport;
+      (globalThis as Record<string, unknown>).__rill_platform = () => ({ os: 'ios' });
+      expect(Platform.OS).toBe('ios');
+    });
+
+    it('select should return default when OS is not injected', async () => {
       const { Platform } = await sdkImport;
       const result = Platform.select({ ios: 'iOS', android: 'Android', default: 'Default' });
       expect(result).toBe('Default');
     });
+
+    it('select should pick the injected OS branch', async () => {
+      const { Platform } = await sdkImport;
+      (globalThis as Record<string, unknown>).__rill_platform = { os: 'android' };
+      const result = Platform.select({ ios: 'iOS', android: 'Android', default: 'Default' });
+      expect(result).toBe('Android');
+    });
   });
 
   describe('Dimensions', () => {
-    it('should have get method', async () => {
+    it('get() should return neutral 0x0 fallback and isInjected false without injection', async () => {
       const { Dimensions } = await sdkImport;
-      expect(typeof Dimensions.get).toBe('function');
+      expect(Dimensions.isInjected).toBe(false);
+      expect(Dimensions.get('window')).toEqual({ width: 0, height: 0, scale: 1, fontScale: 1 });
     });
 
-    it('get() should return dimension object', async () => {
+    it('get() should return host-injected window metrics', async () => {
       const { Dimensions } = await sdkImport;
-      const dims = Dimensions.get('window');
-      expect(typeof dims.width).toBe('number');
-      expect(typeof dims.height).toBe('number');
+      (globalThis as Record<string, unknown>).__rill_platform = {
+        window: { width: 390, height: 844, scale: 3, fontScale: 1.2 },
+      };
+      expect(Dimensions.isInjected).toBe(true);
+      expect(Dimensions.get('window')).toEqual({
+        width: 390,
+        height: 844,
+        scale: 3,
+        fontScale: 1.2,
+      });
     });
 
-    it('should have addEventListener method', async () => {
+    it('get("screen") should fall back to window metrics when screen is absent', async () => {
       const { Dimensions } = await sdkImport;
-      expect(typeof Dimensions.addEventListener).toBe('function');
+      (globalThis as Record<string, unknown>).__rill_platform = {
+        window: { width: 390, height: 844 },
+      };
+      expect(Dimensions.get('screen').width).toBe(390);
     });
 
-    it('addEventListener should return subscription with remove', async () => {
+    it('addEventListener should throw (no host change events)', async () => {
       const { Dimensions } = await sdkImport;
-      const subscription = Dimensions.addEventListener('change', () => {});
-      expect(typeof subscription.remove).toBe('function');
-      subscription.remove(); // Should not throw
+      expect(() => Dimensions.addEventListener()).toThrow(/Dimensions\.addEventListener is not available/);
     });
   });
 
@@ -602,112 +639,136 @@ describe('React Native APIs', () => {
   });
 
   describe('PixelRatio', () => {
-    it('should have get method', async () => {
+    it('get() should return neutral 1 and isInjected false without injection', async () => {
       const { PixelRatio } = await sdkImport;
-      expect(typeof PixelRatio.get).toBe('function');
+      expect(PixelRatio.isInjected).toBe(false);
+      expect(PixelRatio.get()).toBe(1);
+      expect(PixelRatio.getFontScale()).toBe(1);
     });
 
-    it('get() should return a number', async () => {
+    it('should read pixel ratio from injected info (pixelRatio or window.scale)', async () => {
       const { PixelRatio } = await sdkImport;
-      expect(typeof PixelRatio.get()).toBe('number');
+      (globalThis as Record<string, unknown>).__rill_platform = {
+        window: { width: 390, height: 844, scale: 3 },
+      };
+      expect(PixelRatio.isInjected).toBe(true);
+      expect(PixelRatio.get()).toBe(3);
+      expect(PixelRatio.getPixelSizeForLayoutSize(10)).toBe(30);
     });
   });
 
   describe('Appearance', () => {
-    it('should have getColorScheme method', async () => {
+    it('getColorScheme should return null (unknown) without injection', async () => {
       const { Appearance } = await sdkImport;
-      expect(typeof Appearance.getColorScheme).toBe('function');
+      expect(Appearance.isInjected).toBe(false);
+      expect(Appearance.getColorScheme()).toBeNull();
     });
 
-    it('getColorScheme should return light, dark, or null', async () => {
+    it('getColorScheme should return the injected scheme', async () => {
       const { Appearance } = await sdkImport;
-      const scheme = Appearance.getColorScheme();
-      expect(['light', 'dark', null]).toContain(scheme);
+      (globalThis as Record<string, unknown>).__rill_platform = { colorScheme: 'dark' };
+      expect(Appearance.isInjected).toBe(true);
+      expect(Appearance.getColorScheme()).toBe('dark');
+    });
+
+    it('addChangeListener should throw (no host change events)', async () => {
+      const { Appearance } = await sdkImport;
+      expect(() => Appearance.addChangeListener()).toThrow(/not available/);
     });
   });
 
   describe('I18nManager', () => {
-    it('should have isRTL property', async () => {
+    it('isRTL should default to false and isInjected false without injection', async () => {
       const { I18nManager } = await sdkImport;
-      expect(typeof I18nManager.isRTL).toBe('boolean');
+      expect(I18nManager.isInjected).toBe(false);
+      expect(I18nManager.isRTL).toBe(false);
+    });
+
+    it('isRTL should reflect injected value', async () => {
+      const { I18nManager } = await sdkImport;
+      (globalThis as Record<string, unknown>).__rill_platform = { isRTL: true };
+      expect(I18nManager.isInjected).toBe(true);
+      expect(I18nManager.isRTL).toBe(true);
+    });
+
+    it('allowRTL/forceRTL should throw (sandbox cannot change host layout)', async () => {
+      const { I18nManager } = await sdkImport;
+      expect(() => I18nManager.allowRTL()).toThrow(/not available/);
+      expect(() => I18nManager.forceRTL()).toThrow(/not available/);
     });
   });
 
   describe('AppState', () => {
-    it('should have currentState property', async () => {
+    it('currentState should be "unknown" without injection', async () => {
       const { AppState } = await sdkImport;
-      expect(typeof AppState.currentState).toBe('string');
+      expect(AppState.isInjected).toBe(false);
+      expect(AppState.currentState).toBe('unknown');
     });
 
-    it('should have addEventListener method', async () => {
+    it('currentState should reflect injected value', async () => {
       const { AppState } = await sdkImport;
-      expect(typeof AppState.addEventListener).toBe('function');
+      (globalThis as Record<string, unknown>).__rill_platform = { appState: 'active' };
+      expect(AppState.isInjected).toBe(true);
+      expect(AppState.currentState).toBe('active');
+    });
+
+    it('addEventListener should throw (no host app-state events)', async () => {
+      const { AppState } = await sdkImport;
+      expect(() => AppState.addEventListener()).toThrow(/AppState\.addEventListener is not available/);
     });
   });
 
   describe('Keyboard', () => {
-    it('should have dismiss method', async () => {
+    it('dismiss should throw (capability not provided by any host)', async () => {
       const { Keyboard } = await sdkImport;
-      expect(typeof Keyboard.dismiss).toBe('function');
-      expect(() => Keyboard.dismiss()).not.toThrow();
+      expect(() => Keyboard.dismiss()).toThrow(/Keyboard\.dismiss is not available/);
     });
 
-    it('should have addListener method', async () => {
+    it('addListener should throw (no host keyboard events)', async () => {
       const { Keyboard } = await sdkImport;
-      expect(typeof Keyboard.addListener).toBe('function');
+      expect(() => Keyboard.addListener()).toThrow(/not available/);
     });
   });
 
   describe('Alert', () => {
-    it('should have alert method', async () => {
+    it('alert and prompt should throw (capability not provided by any host)', async () => {
       const { Alert } = await sdkImport;
-      expect(typeof Alert.alert).toBe('function');
+      expect(() => Alert.alert()).toThrow(/Alert\.alert is not available/);
+      expect(() => Alert.prompt()).toThrow(/Alert\.prompt is not available/);
     });
   });
 
   describe('Linking', () => {
-    it('should have openURL method', async () => {
+    it('promise methods reject; addEventListener throws (capability not provided)', async () => {
       const { Linking } = await sdkImport;
-      expect(typeof Linking.openURL).toBe('function');
-    });
-
-    it('should have canOpenURL method', async () => {
-      const { Linking } = await sdkImport;
-      expect(typeof Linking.canOpenURL).toBe('function');
+      // Promise-returning APIs reject (catchable) rather than throw synchronously.
+      await expect(Linking.openURL('https://example.com')).rejects.toThrow(/Linking\.openURL is not available/);
+      await expect(Linking.canOpenURL('https://example.com')).rejects.toThrow(/not available/);
+      await expect(Linking.getInitialURL()).rejects.toThrow(/not available/);
+      // Synchronous API still throws synchronously.
+      expect(() => Linking.addEventListener()).toThrow(/not available/);
     });
   });
 
   describe('Share', () => {
-    it('should have share method', async () => {
+    it('share rejects (capability not provided)', async () => {
       const { Share } = await sdkImport;
-      expect(typeof Share.share).toBe('function');
-    });
-
-    it('share should return a promise', async () => {
-      const { Share } = await sdkImport;
-      const result = Share.share({ message: 'test' });
-      expect(result).toBeInstanceOf(Promise);
+      await expect(Share.share({ message: 'test' })).rejects.toThrow(/Share\.share is not available/);
     });
   });
 
   describe('Vibration', () => {
-    it('should have vibrate method', async () => {
+    it('vibrate and cancel should throw (capability not provided by any host)', async () => {
       const { Vibration } = await sdkImport;
-      expect(typeof Vibration.vibrate).toBe('function');
-      expect(() => Vibration.vibrate()).not.toThrow();
-    });
-
-    it('should have cancel method', async () => {
-      const { Vibration } = await sdkImport;
-      expect(typeof Vibration.cancel).toBe('function');
-      expect(() => Vibration.cancel()).not.toThrow();
+      expect(() => Vibration.vibrate()).toThrow(/Vibration\.vibrate is not available/);
+      expect(() => Vibration.cancel()).toThrow(/Vibration\.cancel is not available/);
     });
   });
 
   describe('Animated', () => {
-    it('should be exported', async () => {
-      const { Animated } = await sdkImport;
-      expect(Animated).toBeDefined();
+    it('should not be exported (no animation runtime in the sandbox)', async () => {
+      const sdk = await sdkImport;
+      expect('Animated' in sdk).toBe(false);
     });
   });
 });
