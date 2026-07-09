@@ -27,13 +27,14 @@ extern "C" void rill_qjs_capture_sink(void* user, const void* token, int line,
 }
 }  // namespace
 
-QuickJSDebugCore::QuickJSDebugCore(JSRuntime* rt, JSContext* ctx)
-    : rt_(rt), ctx_(ctx) {
-  rill_qjs_set_debug_hook(rt_, &rill_qjs_hook_thunk, this);
+QuickJSDebugCore::QuickJSDebugCore(JSRuntime* rt, JSContext* ctx) : ctx_(ctx) {
+  (void)rt;  // runtime no longer needed: the hook is keyed per-context
+  // The hook is keyed per-context, so each tenant attaches/detaches on its own.
+  rill_qjs_set_debug_hook(ctx_, &rill_qjs_hook_thunk, this);
 }
 
 QuickJSDebugCore::~QuickJSDebugCore() {
-  rill_qjs_set_debug_hook(rt_, nullptr, nullptr);
+  rill_qjs_set_debug_hook(ctx_, nullptr, nullptr);
 }
 
 void QuickJSDebugCore::setPausedCallback(PausedFn fn) {

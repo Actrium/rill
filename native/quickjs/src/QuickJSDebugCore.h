@@ -93,7 +93,6 @@ public:
 private:
   std::string resolveScript(JSContext* ctx, const void* scriptToken);
 
-  JSRuntime* rt_;
   JSContext* ctx_;
 
   enum class StepMode { None, Into, Over, Out };

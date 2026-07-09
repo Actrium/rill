@@ -30,8 +30,13 @@ extern "C" {
 typedef void (*RillQjsDebugHook)(JSContext *ctx, const void *script_token,
                                  int line, int depth, void *opaque);
 
-/* Attach (or, with hook == NULL, detach) the debug hook. */
-void rill_qjs_set_debug_hook(JSRuntime *rt, RillQjsDebugHook hook, void *opaque);
+/*
+ * Attach (or, with hook == NULL, detach) the debug hook for one JSContext.
+ * Keyed per-context so several tenants can be debugged independently: detaching
+ * one leaves the others attached. Detached contexts (and non-debug builds) keep
+ * the interpreter's zero-cost dispatch path.
+ */
+void rill_qjs_set_debug_hook(JSContext *ctx, RillQjsDebugHook hook, void *opaque);
 
 /*
  * Resolve a script token's source filename. Allocates a C string owned by the

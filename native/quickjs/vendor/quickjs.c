@@ -16483,14 +16483,52 @@ typedef enum {
  * build without RILL_QJS_DEBUG pays nothing at all.
  */
 #include "quickjs-debug.h"
-static RillQjsDebugHook rill_qjs_debug_hook_fn;
-static void *rill_qjs_debug_hook_opaque;
+#include <pthread.h>
 
-void rill_qjs_set_debug_hook(JSRuntime *rt, RillQjsDebugHook hook, void *opaque)
+/*
+ * Per-context hook registry. `rill_qjs_debug_active` is the fast-path gate the
+ * per-instruction SWITCH check reads (0 in a non-debug or fully-detached state,
+ * so the interpreter pays a single predictable branch and nothing else). The
+ * table is a fixed static array (QuickJS forbids raw malloc, and a debugger is
+ * dev-only) walked only while a debugger is attached, under a mutex. An entry is
+ * free iff its hook is NULL.
+ */
+#define RILL_QJS_MAX_HOOKS 64
+static struct {
+    JSContext *ctx;
+    RillQjsDebugHook hook;
+    void *opaque;
+} rill_qjs_hooks[RILL_QJS_MAX_HOOKS];
+static volatile int rill_qjs_debug_active;
+static pthread_mutex_t rill_qjs_hooks_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+void rill_qjs_set_debug_hook(JSContext *ctx, RillQjsDebugHook hook, void *opaque)
 {
-    (void)rt;
-    rill_qjs_debug_hook_fn = hook;
-    rill_qjs_debug_hook_opaque = opaque;
+    int i, found = -1, free_slot = -1;
+    pthread_mutex_lock(&rill_qjs_hooks_mtx);
+    for (i = 0; i < RILL_QJS_MAX_HOOKS; i++) {
+        if (rill_qjs_hooks[i].hook) {
+            if (rill_qjs_hooks[i].ctx == ctx) { found = i; break; }
+        } else if (free_slot < 0) {
+            free_slot = i;
+        }
+    }
+    if (hook) {
+        if (found >= 0) {  /* re-attach: update in place */
+            rill_qjs_hooks[found].hook = hook;
+            rill_qjs_hooks[found].opaque = opaque;
+        } else if (free_slot >= 0) {
+            rill_qjs_hooks[free_slot].ctx = ctx;
+            rill_qjs_hooks[free_slot].hook = hook;
+            rill_qjs_hooks[free_slot].opaque = opaque;
+            rill_qjs_debug_active++;
+        }  /* else: table full (dev-only cap) — not attached */
+    } else if (found >= 0) {  /* detach this context only */
+        rill_qjs_hooks[found].hook = NULL;
+        rill_qjs_hooks[found].ctx = NULL;
+        rill_qjs_debug_active--;
+    }
+    pthread_mutex_unlock(&rill_qjs_hooks_mtx);
 }
 
 const char *rill_qjs_script_filename(JSContext *ctx, const void *script_token)
@@ -16560,13 +16598,30 @@ static void rill_qjs_on_step(JSContext *ctx, JSFunctionBytecode *b,
     depth = 0;
     for (f = ctx->rt->current_stack_frame; f != NULL; f = f->prev_frame)
         depth++;
-    rill_qjs_debug_hook_fn(ctx, b, line, depth, rill_qjs_debug_hook_opaque);
+    /* Resolve this context's hook, then release the lock BEFORE calling it: the
+       hook may block for the whole pause, and other contexts must stay free to
+       attach/detach and run. */
+    RillQjsDebugHook hook = NULL;
+    void *opaque = NULL;
+    int i;
+    pthread_mutex_lock(&rill_qjs_hooks_mtx);
+    for (i = 0; i < RILL_QJS_MAX_HOOKS; i++) {
+        if (rill_qjs_hooks[i].hook && rill_qjs_hooks[i].ctx == ctx) {
+            hook = rill_qjs_hooks[i].hook;
+            opaque = rill_qjs_hooks[i].opaque;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&rill_qjs_hooks_mtx);
+    if (hook)
+        hook(ctx, b, line, depth, opaque);
 }
 
 /* An EXPRESSION (not a statement) so it can ride inside SWITCH's dispatch
-   without splitting `if (...) BREAK;` — BREAK must stay a single statement. */
+   without splitting `if (...) BREAK;` — BREAK must stay a single statement.
+   Gated on the attached-count so a detached interpreter pays one branch. */
 #define RILL_QJS_STEP(ctx, b, sf, pc) \
-    (unlikely(rill_qjs_debug_hook_fn) ? rill_qjs_on_step(ctx, b, sf, pc) : (void)0)
+    (unlikely(rill_qjs_debug_active) ? rill_qjs_on_step(ctx, b, sf, pc) : (void)0)
 #else
 #define RILL_QJS_STEP(ctx, b, sf, pc) ((void)0)
 #endif

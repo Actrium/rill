@@ -302,6 +302,77 @@ int main() {
     JS_FreeRuntime(frt);
   }
 
+  // --- Multi-tenant (M3.5): two contexts on one runtime, independent hooks. ---
+  static const char* kMtCode =
+      "globalThis.log = (globalThis.log || []);\n"  // line 1
+      "log.push('x');\n"                             // line 2  <-- breakpoint
+      "globalThis.done = 1;\n";                      // line 3
+  {
+    JSRuntime* mrt = JS_NewRuntime();
+    JSContext* ctxA = JS_NewContext(mrt);
+    JSContext* ctxB = JS_NewContext(mrt);
+    auto coreA = std::make_unique<QuickJSDebugCore>(mrt, ctxA);
+    auto coreB = std::make_unique<QuickJSDebugCore>(mrt, ctxB);
+
+    std::atomic<int> pausesA{0}, pausesB{0};
+    coreA->setPausedCallback(
+        [&](const std::string&, int, PauseReason) { pausesA++; });
+    coreB->setPausedCallback(
+        [&](const std::string&, int, PauseReason) { pausesB++; });
+
+    // A has a breakpoint; B does not. Running B must NOT pause (its own hook is
+    // independent and empty) even though A is attached to the same runtime.
+    coreA->addBreakpoint("mt.js", 2);
+
+    std::promise<void> bDone;
+    auto bFut = bDone.get_future();
+    std::thread bThread([&] {
+      JS_UpdateStackTop(mrt);
+      JSValue v = JS_Eval(ctxB, kMtCode, std::strlen(kMtCode), "mt.js",
+                          JS_EVAL_TYPE_GLOBAL);
+      JS_FreeValue(ctxB, v);
+      bDone.set_value();
+    });
+    check(bFut.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+          "context B ran to completion (no breakpoint of its own)");
+    bThread.join();
+    check(pausesB.load() == 0, "context B never paused on A's breakpoint");
+
+    // Detach B: A must stay attached and still pause on its breakpoint.
+    coreB.reset();
+
+    std::promise<int> aPausedLine;
+    auto aFut = aPausedLine.get_future();
+    std::atomic<bool> aOnce{false};
+    coreA->setPausedCallback([&](const std::string&, int line, PauseReason) {
+      pausesA++;
+      if (!aOnce.exchange(true)) aPausedLine.set_value(line);
+    });
+    std::promise<void> aDone;
+    auto aDoneFut = aDone.get_future();
+    std::thread aThread([&] {
+      JS_UpdateStackTop(mrt);
+      JSValue v = JS_Eval(ctxA, kMtCode, std::strlen(kMtCode), "mt.js",
+                          JS_EVAL_TYPE_GLOBAL);
+      JS_FreeValue(ctxA, v);
+      aDone.set_value();
+    });
+    int al = aFut.wait_for(std::chrono::seconds(5)) == std::future_status::ready
+                 ? aFut.get()
+                 : -1;
+    check(al == 2, "context A still pauses after B detached (line " +
+                       std::to_string(al) + ")");
+    coreA->resume();
+    check(aDoneFut.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+          "context A resumed to completion");
+    aThread.join();
+
+    coreA.reset();
+    JS_FreeContext(ctxA);
+    JS_FreeContext(ctxB);
+    JS_FreeRuntime(mrt);
+  }
+
   std::cout << "=== " << (g_failures == 0 ? "ALL PASS" : "FAILURES") << " ("
             << g_failures << " failed) ===\n";
   return g_failures == 0 ? 0 : 1;
