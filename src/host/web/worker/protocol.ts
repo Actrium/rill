@@ -95,6 +95,25 @@ export interface DbgEvalResult {
   error?: string;
 }
 
+/**
+ * One property of an object/scope (mirrors native `PropertyDescriptor` built in
+ * QuickJSEngineDebugger::getProperties). `value` is the same clone-safe shape a
+ * `DbgEvalResult.value` carries — a primitive inline, or an object placeholder.
+ */
+export interface DbgPropertyDescriptor {
+  name: string;
+  // Reason: a guest property value is an arbitrary serializable value
+  value?: unknown;
+  writable: boolean;
+  configurable: boolean;
+  enumerable: boolean;
+}
+
+/** Result of a `dbgGetProperties` — the own properties of one objectId. */
+export interface DbgPropertiesResult {
+  properties: DbgPropertyDescriptor[];
+}
+
 /** Options accepted by {@link DbgSetBreakpointMessage}/`dbgSetBreakpoint`. */
 export interface DbgSetBreakpointOptions {
   scriptId?: string;
@@ -118,7 +137,11 @@ export type MainToWorkerDbgMessage =
   | { type: 'dbg.pause'; requestId: number }
   | { type: 'dbg.resume'; requestId: number }
   | { type: 'dbg.step'; requestId: number; action: DbgStepAction }
-  | { type: 'dbg.evaluateOnCallFrame'; requestId: number; callFrameId: string; expression: string };
+  | { type: 'dbg.evaluateOnCallFrame'; requestId: number; callFrameId: string; expression: string }
+  // getProperties expands a scope/object handle WHILE paused. Like evaluateOnCallFrame
+  // it is a control-plane sub-operation of the already-suspended turn, never a new
+  // eval turn — the worker routes it BYPASSING the guest-eval gate (see worker-dispatch).
+  | { type: 'dbg.getProperties'; requestId: number; objectId: string };
 
 /** Worker→main debugger replies (correlated by `requestId`) and async events (by `turnId`). */
 export type WorkerToMainDbgMessage =
@@ -145,6 +168,7 @@ export type WorkerToMainDbgMessage =
       value?: unknown;
       error?: string;
     }
+  | { type: 'dbg.propertiesResult'; requestId: number; properties: DbgPropertyDescriptor[] }
   | { type: 'dbg.ack'; requestId: number };
 
 /** Main thread → worker. */

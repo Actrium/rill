@@ -31,6 +31,7 @@ import {
   type DbgCallFrame,
   type DbgEvalResult,
   type DbgPauseReason,
+  type DbgPropertyDescriptor,
   type DbgScript,
   type DbgSetBreakpointOptions,
   type DbgStepAction,
@@ -367,6 +368,20 @@ export class WorkerEngine {
     })) as Promise<DbgEvalResult>;
   }
 
+  /**
+   * Read the own properties of a paused scope/object handle (expands a scope in
+   * DevTools). Like {@link dbgEvaluateOnCallFrame} this is a control-plane query
+   * against the already-suspended turn: it does not open a new guest-eval turn,
+   * so it resolves even while the guest is parked at a breakpoint.
+   */
+  dbgGetProperties(objectId: string): Promise<DbgPropertyDescriptor[]> {
+    return this.#dbgRequest((requestId) => ({
+      type: 'dbg.getProperties',
+      requestId,
+      objectId,
+    })) as Promise<DbgPropertyDescriptor[]>;
+  }
+
   on<K extends keyof WorkerEngineEventMap>(
     event: K,
     listener: WorkerEngineEventMap[K] extends () => void
@@ -602,6 +617,9 @@ export class WorkerEngine {
           value: message.value,
           error: message.error,
         });
+        break;
+      case 'dbg.propertiesResult':
+        this.#resolveDbg(message.requestId, message.properties);
         break;
       case 'dbg.paused': {
         // A breakpoint is an intentional, unbounded pause: disarm the offending

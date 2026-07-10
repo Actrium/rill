@@ -132,6 +132,48 @@ describe('WorkerEngine debugger surface', () => {
     expect(await p).toEqual({ ok: true, value: 84, error: undefined });
   });
 
+  it('resolves dbgGetProperties with the reported property descriptors', async () => {
+    const s = setup();
+    engine = s.engine;
+    const p = s.engine.dbgGetProperties('0:local');
+    const req = s.mock.last('dbg.getProperties');
+    expect(req?.objectId).toBe('0:local');
+    const properties = [
+      { name: 'x', value: 42, writable: true, configurable: true, enumerable: true },
+    ];
+    s.mock.emit({ type: 'dbg.propertiesResult', requestId: req?.requestId ?? -1, properties });
+    expect(await p).toEqual(properties);
+  });
+
+  it('control-plane dbg ops round-trip while a turn is paused (never queued behind it)', async () => {
+    // The routing invariant, main-thread half: evaluateOnCallFrame / getProperties are
+    // plain request/reply that never arm a turn/watchdog, so a paused (suspended) turn
+    // does not block them — proven here by resolving both while a load turn is paused.
+    const s = setup({ watchdogTimeout: 60 });
+    engine = s.engine;
+
+    const loadP = s.engine.loadBundle('noop');
+    loadP.catch(() => undefined);
+    await flush();
+    const turnId = s.mock.last('load')?.turnId ?? -1;
+    // Park the load turn at a breakpoint (its watchdog is disarmed by dbg.paused).
+    s.mock.emit({ type: 'dbg.paused', turnId, reason: 'breakpoint', callFrames: [], hitBreakpoints: [] });
+
+    const evalP = s.engine.dbgEvaluateOnCallFrame('0', 'x');
+    const evalReq = s.mock.last('dbg.evaluateOnCallFrame');
+    s.mock.emit({ type: 'dbg.evalResult', requestId: evalReq?.requestId ?? -1, ok: true, value: 7 });
+    expect(await evalP).toEqual({ ok: true, value: 7, error: undefined });
+
+    const propsP = s.engine.dbgGetProperties('0:local');
+    const propsReq = s.mock.last('dbg.getProperties');
+    const properties = [{ name: 'x', value: 7, writable: true, configurable: true, enumerable: true }];
+    s.mock.emit({ type: 'dbg.propertiesResult', requestId: propsReq?.requestId ?? -1, properties });
+    expect(await propsP).toEqual(properties);
+
+    // The paused turn is still parked (no completion arrived), and the engine is alive.
+    expect(s.engine.isDestroyed).toBe(false);
+  });
+
   it('emits paused / resumed / scriptParsed from worker dbg events', () => {
     const s = setup();
     engine = s.engine;

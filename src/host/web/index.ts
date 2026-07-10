@@ -59,6 +59,8 @@ export type {
   DbgEvalResult,
   DbgLocation,
   DbgPauseReason,
+  DbgPropertiesResult,
+  DbgPropertyDescriptor,
   DbgScope,
   DbgScript,
   DbgSetBreakpointOptions,
@@ -67,8 +69,14 @@ export type {
   WorkerSandbox,
   WorkerToMainMessage,
 } from './worker/protocol';
-// Guest-eval entry gate (Milestone B web-debug side)
+// Guest-eval entry gate + in-worker dispatch (Milestone B web-debug side)
 export { TurnGate } from './worker/turn-gate';
+export {
+  type GuestEngineLike,
+  isControlPlaneDbg,
+  WorkerDispatch,
+  type WorkerDispatchDeps,
+} from './worker/worker-dispatch';
 // Off-main-thread engine (issue #19, L1)
 export {
   createWorkerEngine,

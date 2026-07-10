@@ -49,6 +49,7 @@ describe('dbg.* protocol', () => {
       { type: 'dbg.resume', requestId: 7 },
       { type: 'dbg.step', requestId: 8, action: 'over' },
       { type: 'dbg.evaluateOnCallFrame', requestId: 9, callFrameId: '0', expression: 'x * 2' },
+      { type: 'dbg.getProperties', requestId: 10, objectId: '0:local' },
     ];
     for (const m of messages) {
       expect(structuredClone(m)).toEqual(m);
@@ -63,6 +64,14 @@ describe('dbg.* protocol', () => {
       { type: 'dbg.breakpointResolved', requestId: 3, breakpointId: 'bp-1', location: { scriptId: 's1', line: 3, column: 0 } },
       { type: 'dbg.evalResult', requestId: 9, ok: true, value: { n: 42, s: 'ok' } },
       { type: 'dbg.evalResult', requestId: 9, ok: false, error: 'ReferenceError: x is not defined' },
+      {
+        type: 'dbg.propertiesResult',
+        requestId: 10,
+        properties: [
+          { name: 'x', value: 42, writable: true, configurable: true, enumerable: true },
+          { name: 'obj', value: { __objectId: 'obj:2' }, writable: false, configurable: false, enumerable: true },
+        ],
+      },
       { type: 'dbg.ack', requestId: 1 },
     ];
     for (const m of messages) {

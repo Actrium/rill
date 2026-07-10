@@ -21,6 +21,7 @@
 
 import type {
   DbgCallFrame,
+  DbgPropertyDescriptor,
   DbgScript,
   MainToWorkerDbgMessage,
   WorkerToMainDbgMessage,
@@ -99,6 +100,19 @@ export class CdpTranslator {
     const dot = method.indexOf('.');
     const domain = dot === -1 ? method : method.slice(0, dot);
     const command = dot === -1 ? method : method.slice(dot + 1);
+
+    // `Runtime.getProperties` is nominally a Runtime-domain method, but while the
+    // guest is paused it expands a scope/object handle that only the debugger owns
+    // (exactly as native routes it into `DebuggerAdapter::getProperties`). Claim
+    // just this one Runtime method so the paused-scope expansion reaches the worker
+    // as a control-plane `dbg.getProperties`; all other Runtime methods stay local.
+    if (method === 'Runtime.getProperties') {
+      const gpParams = asObject(parsed.params) ?? {};
+      const objectId = asString(gpParams.objectId);
+      if (objectId === undefined) return this.#error(id, 'Missing objectId');
+      return { message: { type: 'dbg.getProperties', requestId: id, objectId }, response: null };
+    }
+
     if (!this.owns(domain)) return { message: null, response: null };
 
     const params = asObject(parsed.params) ?? {};
@@ -189,6 +203,8 @@ export class CdpTranslator {
           },
         });
       }
+      case 'dbg.propertiesResult':
+        return okResponse(message.requestId, { result: message.properties.map(propertyToCdp) });
       case 'dbg.paused': {
         const params: Json = {
           callFrames: message.callFrames.map(callFrameToCdp),
@@ -288,6 +304,16 @@ function callFrameToCdp(frame: DbgCallFrame): Json {
     this: frame.thisObjectId
       ? { type: 'object', objectId: frame.thisObjectId }
       : { type: 'object' },
+  };
+}
+
+function propertyToCdp(prop: DbgPropertyDescriptor): Json {
+  return {
+    name: prop.name,
+    value: remoteObject(prop.value),
+    writable: prop.writable,
+    configurable: prop.configurable,
+    enumerable: prop.enumerable,
   };
 }
 

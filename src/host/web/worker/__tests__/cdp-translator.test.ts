@@ -101,6 +101,26 @@ describe('CdpTranslator — inbound CDP -> dbg.*', () => {
     ).toEqual({ type: 'dbg.evaluateOnCallFrame', requestId: 11, callFrameId: '0', expression: 'x * 2' });
   });
 
+  it('claims Runtime.getProperties (paused-scope expansion) as a control-plane dbg op', () => {
+    expect(
+      inbound({ id: 14, method: 'Runtime.getProperties', params: { objectId: '0:local', ownProperties: true } })
+        .message
+    ).toEqual({ type: 'dbg.getProperties', requestId: 14, objectId: '0:local' });
+  });
+
+  it('errors on Runtime.getProperties without an objectId', () => {
+    const r = inbound({ id: 15, method: 'Runtime.getProperties', params: {} });
+    expect(r.message).toBeNull();
+    expect(JSON.parse(r.response ?? '').error.message).toBe('Missing objectId');
+  });
+
+  it('leaves other Runtime methods for the local handler', () => {
+    expect(inbound({ id: 16, method: 'Runtime.callFunctionOn', params: {} })).toEqual({
+      message: null,
+      response: null,
+    });
+  });
+
   it('answers setPauseOnExceptions immediately as a no-op', () => {
     const r = inbound({ id: 12, method: 'Debugger.setPauseOnExceptions', params: { state: 'none' } });
     expect(r.message).toBeNull();
@@ -224,6 +244,30 @@ describe('CdpTranslator — outbound dbg.* -> CDP', () => {
     expect(JSON.parse(t.translateOutbound({ type: 'dbg.evalResult', requestId: 3, ok: true, value: 42 }) ?? '')).toEqual(
       { id: 3, result: { result: { type: 'number', value: 42 } } }
     );
+  });
+
+  it('translates dbg.propertiesResult to a Runtime.getProperties result payload', () => {
+    const parsed = JSON.parse(
+      t.translateOutbound({
+        type: 'dbg.propertiesResult',
+        requestId: 7,
+        properties: [
+          { name: 'x', value: 42, writable: true, configurable: true, enumerable: true },
+          { name: 'obj', value: { a: 1 }, writable: false, configurable: false, enumerable: true },
+        ],
+      }) ?? ''
+    );
+    expect(parsed.id).toBe(7);
+    expect(parsed.result.result).toEqual([
+      { name: 'x', value: { type: 'number', value: 42 }, writable: true, configurable: true, enumerable: true },
+      {
+        name: 'obj',
+        value: { type: 'object', value: { a: 1 } },
+        writable: false,
+        configurable: false,
+        enumerable: true,
+      },
+    ]);
   });
 
   it('maps a failed eval to exceptionDetails', () => {
