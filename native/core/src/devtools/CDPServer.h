@@ -176,6 +176,11 @@ public:
    * cannot surface a plain GET (e.g. an auto-upgrading WebSocket listener) simply
    * never invoke it; CDPServer works either way (unit code calls
    * handleDiscoveryRequest directly).
+   *
+   * On Apple, the ws listener auto-upgrades and never yields a plain GET, so the
+   * transport surfaces this callback from a sibling loopback plain-TCP listener
+   * on port + 1 (see CDPTransportApple's startHttpListener); the ws port itself
+   * only ever speaks WebSocket.
    */
   using OnHttpGetCallback =
       std::function<HttpResponse(const std::string& method, const std::string& path)>;
@@ -795,6 +800,19 @@ std::string buildErrorJSON(int id, int code, const std::string& message);
  * only).
  */
 std::string buildHttpResponse(const HttpResponse& resp);
+
+/**
+ * Extract the method and path from the first line of an HTTP/1.1 request.
+ *
+ * Scans `requestBytes` up to the first CRLF (or end of string when the CRLF is
+ * absent), splits the request line on spaces into [method, target, version],
+ * and truncates `target` at the first '?' (query) or '#' (fragment) to yield
+ * `path`. The HTTP-version token is ignored. Returns false when the line has
+ * fewer than two whitespace-separated tokens or either method or target is
+ * empty; on false, `method` and `path` are left unspecified.
+ */
+bool parseRequestLine(const std::string& requestBytes, std::string& method,
+                      std::string& path);
 
 /**
  * Insert a top-level "sessionId" member into a raw CDP message object if it does

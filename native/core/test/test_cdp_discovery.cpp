@@ -103,6 +103,46 @@ TestSuite createCDPDiscoveryTests() {
     assertTrue(wire.find("Content-Length: 0\r\n") != std::string::npos, "zero length");
   }});
 
+  // --- parseRequestLine (HTTP request-line parsing) -------------------------
+
+  suite.cases.push_back({"parseRequestLine extracts method and path from a full request", []() {
+    std::string method, path;
+    bool ok = cdp::parseRequestLine("GET /json/list HTTP/1.1\r\nHost: x\r\n\r\n", method, path);
+    assertTrue(ok, "parsed");
+    assertEqual(method, std::string("GET"), "method GET");
+    assertEqual(path, std::string("/json/list"), "path /json/list");
+  }});
+
+  suite.cases.push_back({"parseRequestLine strips a query string from the path", []() {
+    std::string method, path;
+    bool ok = cdp::parseRequestLine("GET /json?foo=1 HTTP/1.1", method, path);
+    assertTrue(ok, "parsed");
+    assertEqual(method, std::string("GET"), "method GET");
+    assertEqual(path, std::string("/json"), "query stripped");
+  }});
+
+  suite.cases.push_back({"parseRequestLine strips a fragment from the path", []() {
+    std::string method, path;
+    bool ok = cdp::parseRequestLine("GET /json/version#frag HTTP/1.1", method, path);
+    assertTrue(ok, "parsed");
+    assertEqual(path, std::string("/json/version"), "fragment stripped");
+  }});
+
+  suite.cases.push_back({"parseRequestLine keeps the method verb (POST)", []() {
+    std::string method, path;
+    bool ok = cdp::parseRequestLine("POST /json", method, path);
+    assertTrue(ok, "parsed (missing CRLF and version tolerated)");
+    assertEqual(method, std::string("POST"), "method POST");
+    assertEqual(path, std::string("/json"), "path /json");
+  }});
+
+  suite.cases.push_back({"parseRequestLine rejects malformed request lines", []() {
+    std::string method, path;
+    assertTrue(!cdp::parseRequestLine("GET", method, path), "single token -> false");
+    assertTrue(!cdp::parseRequestLine("", method, path), "empty -> false");
+    assertTrue(!cdp::parseRequestLine("   \r\n", method, path), "spaces only -> false");
+  }});
+
   // --- handleDiscoveryRequest routing ---------------------------------------
 
   suite.cases.push_back({"handleDiscoveryRequest rejects non-GET with 405", []() {

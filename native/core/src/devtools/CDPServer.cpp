@@ -1086,6 +1086,40 @@ std::string buildHttpResponse(const HttpResponse& resp) {
   return ss.str();
 }
 
+bool parseRequestLine(const std::string& requestBytes, std::string& method,
+                      std::string& path) {
+  // Isolate the request line: everything up to the first CRLF. Tolerate a
+  // missing CRLF (a bare request line) by falling back to the whole string.
+  size_t lineEnd = requestBytes.find("\r\n");
+  std::string line = (lineEnd == std::string::npos)
+                         ? requestBytes
+                         : requestBytes.substr(0, lineEnd);
+
+  // Split the line on runs of spaces into up to three tokens:
+  //   [method, target, version]. Only method and target are required.
+  std::string tokens[3];
+  int count = 0;
+  size_t i = 0;
+  while (i < line.size() && count < 3) {
+    while (i < line.size() && line[i] == ' ') ++i;  // skip leading spaces
+    if (i >= line.size()) break;
+    size_t start = i;
+    while (i < line.size() && line[i] != ' ') ++i;
+    tokens[count++] = line.substr(start, i - start);
+  }
+
+  if (count < 2 || tokens[0].empty() || tokens[1].empty()) {
+    return false;
+  }
+
+  method = tokens[0];
+  // Path is the target with any query ('?') or fragment ('#') stripped.
+  const std::string& target = tokens[1];
+  size_t cut = target.find_first_of("?#");
+  path = (cut == std::string::npos) ? target : target.substr(0, cut);
+  return true;
+}
+
 std::string injectSessionId(const std::string& rawCdp, const SessionId& sessionId) {
   // Already tagged, or not a JSON object we can splice into: pass through.
   if (rawCdp.find("\"sessionId\"") != std::string::npos) return rawCdp;
