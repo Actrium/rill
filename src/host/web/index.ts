@@ -48,14 +48,32 @@ export {
 } from './keyboard';
 export { type EngineViewMount, mountEngineView } from './mount';
 export { toWebStyle, type WebStyleInput, withBaseStyle } from './style';
+export {
+  type CdpDomainSet,
+  CdpTranslator,
+  type TranslatedInbound,
+} from './worker/cdp-translator';
 export type {
+  DbgBreakpointResult,
+  DbgCallFrame,
+  DbgEvalResult,
+  DbgLocation,
+  DbgPauseReason,
+  DbgScope,
+  DbgScript,
+  DbgSetBreakpointOptions,
+  DbgStepAction,
   MainToWorkerMessage,
   WorkerSandbox,
   WorkerToMainMessage,
 } from './worker/protocol';
+// Guest-eval entry gate (Milestone B web-debug side)
+export { TurnGate } from './worker/turn-gate';
 // Off-main-thread engine (issue #19, L1)
 export {
   createWorkerEngine,
+  type DbgPausedEvent,
+  type DbgResumedEvent,
   type WatchdogKillInfo,
   WorkerEngine,
   type WorkerEngineEventMap,

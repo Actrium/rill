@@ -27,11 +27,31 @@ import { Receiver } from '../../receiver';
 import { type ComponentMap, ComponentRegistry } from '../../registry';
 import type { BridgeValueObject, OperationBatch, SerializedOperationBatch } from '../../types';
 import {
+  type DbgBreakpointResult,
+  type DbgCallFrame,
+  type DbgEvalResult,
+  type DbgPauseReason,
+  type DbgScript,
+  type DbgSetBreakpointOptions,
+  type DbgStepAction,
   deserializeWorkerError,
   type MainToWorkerMessage,
   type WorkerSandbox,
   type WorkerToMainMessage,
 } from './protocol';
+
+/** Payload of the {@link WorkerEngineEventMap.paused} event. */
+export interface DbgPausedEvent {
+  turnId: number;
+  reason: DbgPauseReason;
+  callFrames: DbgCallFrame[];
+  hitBreakpoints: string[];
+}
+
+/** Payload of the {@link WorkerEngineEventMap.resumed} event. */
+export interface DbgResumedEvent {
+  turnId: number;
+}
 
 /** Events emitted by a {@link WorkerEngine}. Mirrors the subset of the core engine's events. */
 export interface WorkerEngineEventMap {
@@ -43,6 +63,12 @@ export interface WorkerEngineEventMap {
   // Reason: guest->host message payload is any serializable value
   message: (message: { event: string; payload: unknown }) => void;
   operation: (batch: OperationBatch) => void;
+  /** Guest execution paused at a breakpoint (distinct from the clock-freeze `pause()`). */
+  paused: (info: DbgPausedEvent) => void;
+  /** Guest execution resumed from a breakpoint pause. */
+  resumed: (info: DbgResumedEvent) => void;
+  /** A guest script was parsed (Debugger.scriptParsed source). */
+  scriptParsed: (script: DbgScript) => void;
 }
 
 /** Information passed to {@link WorkerEngineOptions.onWatchdogKill}. */
@@ -128,6 +154,17 @@ export class WorkerEngine {
   #onWatchdogKill?: (info: WatchdogKillInfo) => void;
   #receiverMaxBatchSize?: number;
   #warnedReceiverToSandbox = false;
+
+  // Debugger (dbg.*) sub-protocol state. requestId correlates a dbg request to its
+  // reply (ack/breakpointResolved/evalResult). Turns paused at a breakpoint have
+  // their watchdog kind parked here so it can be rearmed on resume.
+  #dbgSeq = 0;
+  // Reason: dbg replies resolve with differently-shaped serializable values
+  #dbgPending = new Map<
+    number,
+    { resolve: (value: unknown) => void; reject: (e: Error) => void }
+  >();
+  #pausedKinds = new Map<number, WatchdogKillInfo['kind']>();
 
   constructor(options: WorkerEngineOptions = {}) {
     _workerEngineSeq += 1;
@@ -252,6 +289,84 @@ export class WorkerEngine {
     this.#enqueue(() => this.#postRaw({ type: 'resume' }));
   }
 
+  // ============================================
+  // Debugger (dbg.*) surface — Milestone B web side
+  //
+  // These drive a Chrome DevTools Protocol Debugger conversation across the
+  // worker boundary. They are DISTINCT from the turn-level pause()/resume()
+  // above, which only freeze the guest clock (TimerManager). A breakpoint pause
+  // is an intentional, unbounded stop: on `dbg.paused` the offending turn's
+  // watchdog is disarmed so it is never mistaken for a runaway and terminated;
+  // on `dbg.resumed` it is rearmed.
+  //
+  // The suspend/resume the guest actually performs at a breakpoint is driven by
+  // the QuickJS-asyncify debug wasm (Milestone A) inside the worker; wiring that
+  // eval-entry gate is deferred (see worker-host.ts / TurnGate).
+  // ============================================
+
+  /** Enable the guest debugger. */
+  dbgEnable(): Promise<void> {
+    return this.#dbgRequest((requestId) => ({ type: 'dbg.enable', requestId })).then(
+      () => undefined
+    );
+  }
+
+  /** Disable the guest debugger and clear its breakpoints. */
+  dbgDisable(): Promise<void> {
+    return this.#dbgRequest((requestId) => ({ type: 'dbg.disable', requestId })).then(
+      () => undefined
+    );
+  }
+
+  /** Set a breakpoint; resolves once the worker reports the resolved location. */
+  dbgSetBreakpoint(options: DbgSetBreakpointOptions): Promise<DbgBreakpointResult> {
+    return this.#dbgRequest((requestId) => ({
+      type: 'dbg.setBreakpoint',
+      requestId,
+      ...options,
+    })) as Promise<DbgBreakpointResult>;
+  }
+
+  /** Remove a previously set breakpoint. */
+  dbgRemoveBreakpoint(breakpointId: string): Promise<void> {
+    return this.#dbgRequest((requestId) => ({
+      type: 'dbg.removeBreakpoint',
+      requestId,
+      breakpointId,
+    })).then(() => undefined);
+  }
+
+  /** Request that the guest pause at the next opportunity. */
+  dbgPause(): Promise<void> {
+    return this.#dbgRequest((requestId) => ({ type: 'dbg.pause', requestId })).then(
+      () => undefined
+    );
+  }
+
+  /** Resume the guest from a breakpoint pause. */
+  dbgResume(): Promise<void> {
+    return this.#dbgRequest((requestId) => ({ type: 'dbg.resume', requestId })).then(
+      () => undefined
+    );
+  }
+
+  /** Step the paused guest (over/into/out). */
+  dbgStep(action: DbgStepAction): Promise<void> {
+    return this.#dbgRequest((requestId) => ({ type: 'dbg.step', requestId, action })).then(
+      () => undefined
+    );
+  }
+
+  /** Evaluate an expression in the scope of a paused call frame. */
+  dbgEvaluateOnCallFrame(callFrameId: string, expression: string): Promise<DbgEvalResult> {
+    return this.#dbgRequest((requestId) => ({
+      type: 'dbg.evaluateOnCallFrame',
+      requestId,
+      callFrameId,
+      expression,
+    })) as Promise<DbgEvalResult>;
+  }
+
   on<K extends keyof WorkerEngineEventMap>(
     event: K,
     listener: WorkerEngineEventMap[K] extends () => void
@@ -285,7 +400,9 @@ export class WorkerEngine {
     if (this.#destroyed) return;
     this.#destroyed = true;
     this.#clearAllWatchdogs();
-    this.#rejectAllPendingLoads(new Error('[rill] WorkerEngine destroyed'));
+    const destroyError = new Error('[rill] WorkerEngine destroyed');
+    this.#rejectAllPendingLoads(destroyError);
+    this.#rejectAllDbgPending(destroyError);
     try {
       this.#postRaw({ type: 'destroy' });
     } catch {
@@ -304,6 +421,36 @@ export class WorkerEngine {
   #nextTurn(): number {
     this.#turnSeq += 1;
     return this.#turnSeq;
+  }
+
+  // Reason: dbg replies resolve with differently-shaped serializable values
+  #dbgRequest(build: (requestId: number) => MainToWorkerMessage): Promise<unknown> {
+    if (this.#destroyed) {
+      return Promise.reject(new Error('[rill] WorkerEngine is destroyed'));
+    }
+    // Reason: dbg replies resolve with differently-shaped serializable values
+    return new Promise<unknown>((resolve, reject) => {
+      this.#dbgSeq += 1;
+      const requestId = this.#dbgSeq;
+      this.#dbgPending.set(requestId, { resolve, reject });
+      this.#enqueue(() => this.#postRaw(build(requestId)));
+    });
+  }
+
+  // Reason: dbg replies resolve with differently-shaped serializable values
+  #resolveDbg(requestId: number, value: unknown): void {
+    const pending = this.#dbgPending.get(requestId);
+    if (!pending) return;
+    this.#dbgPending.delete(requestId);
+    pending.resolve(value);
+  }
+
+  #rejectAllDbgPending(error: Error): void {
+    for (const pending of this.#dbgPending.values()) {
+      pending.reject(error);
+    }
+    this.#dbgPending.clear();
+    this.#pausedKinds.clear();
   }
 
   /** Run now if the worker is ready, otherwise queue until the `ready` message arrives. */
@@ -376,6 +523,7 @@ export class WorkerEngine {
     this.#clearAllWatchdogs();
     this.#worker.terminate();
     this.#rejectAllPendingLoads(error);
+    this.#rejectAllDbgPending(error);
 
     this.#onWatchdogKill?.({ turnId, kind, timeoutMs: this.#watchdogTimeout });
     this.#emit('fatalError', error);
@@ -439,6 +587,47 @@ export class WorkerEngine {
         this.#emit('error', error);
         break;
       }
+      case 'dbg.ack':
+        this.#resolveDbg(message.requestId, undefined);
+        break;
+      case 'dbg.breakpointResolved':
+        this.#resolveDbg(message.requestId, {
+          breakpointId: message.breakpointId,
+          location: message.location,
+        });
+        break;
+      case 'dbg.evalResult':
+        this.#resolveDbg(message.requestId, {
+          ok: message.ok,
+          value: message.value,
+          error: message.error,
+        });
+        break;
+      case 'dbg.paused': {
+        // A breakpoint is an intentional, unbounded pause: disarm the offending
+        // turn's watchdog so it is not mistaken for a runaway and terminate()d.
+        // Park its kind so `dbg.resumed` can rearm the same budget.
+        const kind = this.#watchdogKinds.get(message.turnId);
+        this.#disarmWatchdog(message.turnId);
+        if (kind) this.#pausedKinds.set(message.turnId, kind);
+        this.#emit('paused', {
+          turnId: message.turnId,
+          reason: message.reason,
+          callFrames: message.callFrames,
+          hitBreakpoints: message.hitBreakpoints,
+        });
+        break;
+      }
+      case 'dbg.resumed': {
+        const kind = this.#pausedKinds.get(message.turnId);
+        this.#pausedKinds.delete(message.turnId);
+        if (kind) this.#armWatchdog(message.turnId, kind);
+        this.#emit('resumed', { turnId: message.turnId });
+        break;
+      }
+      case 'dbg.scriptParsed':
+        this.#emit('scriptParsed', message.script);
+        break;
     }
   }
 

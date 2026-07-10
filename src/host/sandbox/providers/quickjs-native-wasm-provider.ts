@@ -725,6 +725,14 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
           }
         };
 
+        // TODO(milestone-b/debug): a debug-build eval path belongs here, SEPARATE
+        // from the release `eval`/`evalAsync` below (which must stay untouched).
+        // When the QuickJS-asyncify DEBUG wasm is available (proven in
+        // native/quickjs/poc, Milestone A), add e.g. `evalDebug(code)` that calls
+        // the Emscripten export via `ccall(..., { async: true })` so a breakpoint
+        // can suspend the C stack, and install the `globalThis.__rillDbg =
+        // { onPaused, resume }` bridge from run-poc.mjs. Gated on the debug wasm;
+        // deferred from this headless milestone.
         return {
           eval: (code: string): unknown => {
             const resultPtr = evalCode(code);

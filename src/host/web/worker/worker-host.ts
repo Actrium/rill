@@ -119,5 +119,56 @@ scope.onmessage = (event) => {
       engine?.destroy();
       engine = null;
       break;
+    case 'dbg.enable':
+    case 'dbg.disable':
+    case 'dbg.setBreakpoint':
+    case 'dbg.removeBreakpoint':
+    case 'dbg.pause':
+    case 'dbg.resume':
+    case 'dbg.step':
+    case 'dbg.evaluateOnCallFrame':
+      handleDbg(message);
+      break;
   }
 };
+
+// ============================================
+// Debugger (dbg.*) worker-side handling — DEFERRED (Milestone B / native).
+//
+// TODO(milestone-b): the real implementation must
+//   1. Load the QuickJS-asyncify DEBUG wasm (proven in native/quickjs/poc,
+//      Milestone A) instead of the release wasm, and eval guest code through the
+//      Emscripten `ccall(..., { async: true })` path so a breakpoint can unwind
+//      the C stack and park a resume continuation.
+//   2. Install the `globalThis.__rillDbg = { onPaused, resume }` contract from
+//      run-poc.mjs: `onPaused` maps the suspended frame(s) to DbgCallFrame[] and
+//      posts `dbg.paused`; the parked `resume` is invoked on `dbg.resume`/`step`.
+//   3. Route ALL guest-eval entry (load/event/invoke AND TimerManager callbacks,
+//      which fire inside this worker's event loop) through a single TurnGate so a
+//      turn is never re-entered on top of a suspended stack.
+//   4. Translate setBreakpoint/evaluateOnCallFrame against the debug runtime's
+//      script table and scope objects.
+//
+// None of that can run without the asyncify debug wasm, which is out of scope for
+// this headless milestone. For now these commands are acknowledged so the
+// main-thread request/reply surface stays coherent, but no guest suspend occurs
+// and the release eval path is left completely untouched.
+// ============================================
+function handleDbg(message: Extract<MainToWorkerMessage, { type: `dbg.${string}` }>): void {
+  if (message.type === 'dbg.setBreakpoint') {
+    // TODO(milestone-b): resolve against the debug runtime's script table.
+    post({ type: 'dbg.breakpointResolved', requestId: message.requestId, breakpointId: '' });
+    return;
+  }
+  if (message.type === 'dbg.evaluateOnCallFrame') {
+    // TODO(milestone-b): evaluate in the paused frame's scope via __rillDbg.
+    post({
+      type: 'dbg.evalResult',
+      requestId: message.requestId,
+      ok: false,
+      error: 'debugger not wired (deferred: asyncify debug wasm)',
+    });
+    return;
+  }
+  post({ type: 'dbg.ack', requestId: message.requestId });
+}

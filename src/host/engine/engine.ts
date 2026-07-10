@@ -867,6 +867,12 @@ export class Engine implements IEngine {
 
         // Single eval for entire Guest bundle
         // evalCode returns void for sync providers (JSC), Promise<void> for async
+        //
+        // TODO(milestone-b/debug): when the web host runs with the QuickJS-asyncify
+        // DEBUG wasm, guest eval-entry (this call, host events, and worker-side
+        // TimerManager callbacks) must funnel through a single TurnGate so a turn is
+        // never re-entered while a breakpoint suspend is outstanding. That gate lives
+        // in the worker host; this release path is deliberately left unchanged.
         const evalResult = this.evalCode(GUEST_BUNDLE_CODE);
 
         if (evalResult instanceof Promise) {
