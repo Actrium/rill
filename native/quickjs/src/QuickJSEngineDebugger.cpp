@@ -18,43 +18,6 @@ namespace rill::qjs_debug {
 namespace rd = rill::devtools;
 
 namespace {
-// Serialize a JSValue as a CDP Runtime.RemoteObject (the value of the response's
-// "result" field). Global-scope MVP: primitives fully; objects by description.
-std::string toRemoteObjectJson(JSContext* ctx, JSValueConst v) {
-  if (JS_IsUndefined(v)) return R"({"type":"undefined"})";
-  if (JS_IsNull(v)) return R"({"type":"object","subtype":"null","value":null})";
-  if (JS_IsBool(v))
-    return std::string("{\"type\":\"boolean\",\"value\":") +
-           (JS_ToBool(ctx, v) ? "true" : "false") + "}";
-  if (JS_IsNumber(v)) {
-    double d = 0;
-    JS_ToFloat64(ctx, &d, v);
-    const char* s = JS_ToCString(ctx, v);
-    std::ostringstream ss;
-    if (std::isfinite(d))
-      ss << "{\"type\":\"number\",\"value\":" << (s ? s : "0")
-         << ",\"description\":\"" << (s ? s : "0") << "\"}";
-    else  // NaN / +-Infinity are not valid JSON numbers
-      ss << "{\"type\":\"number\",\"description\":\""
-         << (s ? s : "NaN") << "\"}";
-    if (s) JS_FreeCString(ctx, s);
-    return ss.str();
-  }
-  if (JS_IsString(v)) {
-    const char* s = JS_ToCString(ctx, v);
-    std::string out = "{\"type\":\"string\",\"value\":\"" +
-                      rd::cdp::escapeJSON(s ? s : "") + "\"}";
-    if (s) JS_FreeCString(ctx, s);
-    return out;
-  }
-  // Objects / functions: describe them (no remote object ids in this MVP).
-  const char* s = JS_ToCString(ctx, v);
-  std::string out = "{\"type\":\"object\",\"description\":\"" +
-                    rd::cdp::escapeJSON(s ? s : "") + "\"}";
-  if (s) JS_FreeCString(ctx, s);
-  return out;
-}
-
 // A frame variable collected during a paused enumeration. `value` is borrowed
 // from the live frame (valid only while paused); used transiently, never freed.
 struct QjsVar {
@@ -88,6 +51,90 @@ extern "C" void rill_qjs_var_collect_sink(void* user, const char* name,
       {name ? std::string(name) : std::string(), value});
 }
 
+std::string QuickJSEngineDebugger::registerObject(JSContext* ctx,
+                                                 JSValueConst v) {
+  std::string id = "obj:" + std::to_string(nextObjectId_++);
+  pauseObjects_.emplace(id, JS_DupValue(ctx, v));  // retained until pause exit
+  return id;
+}
+
+void QuickJSEngineDebugger::freePauseObjects(JSContext* ctx) {
+  for (auto& [id, val] : pauseObjects_) JS_FreeValue(ctx, val);
+  pauseObjects_.clear();
+  // ids are not reused across pauses (nextObjectId_ stays monotonic) so a stale
+  // client id from a previous pause can never collide with a fresh object.
+}
+
+std::string QuickJSEngineDebugger::toRemoteObjectJson(JSContext* ctx,
+                                                      JSValueConst v) {
+  if (JS_IsUndefined(v)) return R"({"type":"undefined"})";
+  if (JS_IsNull(v)) return R"({"type":"object","subtype":"null","value":null})";
+  if (JS_IsBool(v))
+    return std::string("{\"type\":\"boolean\",\"value\":") +
+           (JS_ToBool(ctx, v) ? "true" : "false") + "}";
+  if (JS_IsNumber(v)) {
+    double d = 0;
+    JS_ToFloat64(ctx, &d, v);
+    const char* s = JS_ToCString(ctx, v);
+    std::ostringstream ss;
+    if (std::isfinite(d))
+      ss << "{\"type\":\"number\",\"value\":" << (s ? s : "0")
+         << ",\"description\":\"" << (s ? s : "0") << "\"}";
+    else  // NaN / +-Infinity are not valid JSON numbers
+      ss << "{\"type\":\"number\",\"description\":\""
+         << (s ? s : "NaN") << "\"}";
+    if (s) JS_FreeCString(ctx, s);
+    return ss.str();
+  }
+  if (JS_IsString(v)) {
+    const char* s = JS_ToCString(ctx, v);
+    std::string out = "{\"type\":\"string\",\"value\":\"" +
+                      rd::cdp::escapeJSON(s ? s : "") + "\"}";
+    if (s) JS_FreeCString(ctx, s);
+    return out;
+  }
+  // Objects and functions: describe them and mint a pause-scoped objectId so the
+  // client can expand them via getProperties. Functions report type "function";
+  // arrays get subtype "array"; everything else is a plain object.
+  const char* s = JS_ToCString(ctx, v);
+  const std::string desc = rd::cdp::escapeJSON(s ? s : "");
+  if (s) JS_FreeCString(ctx, s);
+  const std::string oid = registerObject(ctx, v);
+  if (JS_IsFunction(ctx, v)) {
+    return "{\"type\":\"function\",\"className\":\"Function\",\"description\":\"" +
+           desc + "\",\"objectId\":\"" + oid + "\"}";
+  }
+  if (JS_IsArray(ctx, v) > 0) {
+    return "{\"type\":\"object\",\"subtype\":\"array\",\"className\":\"Array\","
+           "\"description\":\"" + desc + "\",\"objectId\":\"" + oid + "\"}";
+  }
+  return "{\"type\":\"object\",\"className\":\"Object\",\"description\":\"" +
+         desc + "\",\"objectId\":\"" + oid + "\"}";
+}
+
+void QuickJSEngineDebugger::emitOwnProps(JSContext* ctx, JSValueConst obj,
+                                         std::vector<std::string>& out) {
+  JSPropertyEnum* tab = nullptr;
+  uint32_t len = 0;
+  if (JS_GetOwnPropertyNames(ctx, &tab, &len, obj,
+                             JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) != 0)
+    return;
+  const uint32_t cap = len < 200 ? len : 200;  // bound the payload
+  for (uint32_t i = 0; i < cap; ++i) {
+    const char* nm = JS_AtomToCString(ctx, tab[i].atom);
+    JSValue pv = JS_GetProperty(ctx, obj, tab[i].atom);
+    if (nm && !JS_IsException(pv)) {
+      out.push_back(
+          "{\"name\":\"" + rd::cdp::escapeJSON(nm) +
+          "\",\"value\":" + toRemoteObjectJson(ctx, pv) +
+          ",\"configurable\":true,\"enumerable\":true,\"writable\":true}");
+    }
+    if (nm) JS_FreeCString(ctx, nm);
+    JS_FreeValue(ctx, pv);
+  }
+  JS_FreeEnumArray(ctx, tab, len);
+}
+
 QuickJSEngineDebugger::QuickJSEngineDebugger(QuickJSDebugCore* core,
                                              rd::TenantId tenantId)
     : core_(core), tenantId_(tenantId) {
@@ -98,6 +145,10 @@ QuickJSEngineDebugger::QuickJSEngineDebugger(QuickJSDebugCore* core,
   core_->setScriptSeenCallback(
       [this](const std::string& scriptId, const std::string& url,
              const std::string& source) { onScriptSeen(scriptId, url, source); });
+  // Pause-scoped objectIds are dropped on the runtime thread as each pause ends;
+  // freeing there is the only thread-safe point for the dup'd JSValues.
+  core_->setResumingCallback(
+      [this](JSContext* ctx) { freePauseObjects(ctx); });
 }
 
 QuickJSEngineDebugger::~QuickJSEngineDebugger() {
@@ -107,6 +158,7 @@ QuickJSEngineDebugger::~QuickJSEngineDebugger() {
   // after the debug target).
   core_->setPausedCallback(nullptr);
   core_->setScriptSeenCallback(nullptr);
+  core_->setResumingCallback(nullptr);
   std::lock_guard<std::mutex> lk(mutex_);
   for (const auto& [id, loc] : breakpoints_) {
     core_->removeBreakpoint(loc.first, loc.second);
@@ -258,60 +310,59 @@ std::string QuickJSEngineDebugger::evaluateOnCallFrame(
 
 std::string QuickJSEngineDebugger::getProperties(rd::TenantId,
                                                  const std::string& objectId) {
-  // objectId is "<frameIndex>:<kind>" (kind = local|closure|global), minted in
-  // onCorePaused's scopeChain. Enumerate that scope on the paused runtime thread
-  // into CDP PropertyDescriptors. Not paused / bad id -> empty.
-  auto colon = objectId.find(':');
-  if (colon == std::string::npos) return R"({"result":[]})";
-  int frameIndex = 0;
-  try {
-    frameIndex = std::stoi(objectId.substr(0, colon));
-  } catch (...) {
-    return R"({"result":[]})";
-  }
-  const std::string kind = objectId.substr(colon + 1);
-
+  // Two objectId shapes, both resolved on the paused runtime thread into CDP
+  // PropertyDescriptors. Not paused / bad id -> empty.
+  //   "obj:N"            a pause-scoped object minted by toRemoteObjectJson; its
+  //                      own enumerable properties (children get their own ids).
+  //   "<frameIndex>:kind" a scope from onCorePaused's scopeChain
+  //                      (kind = local|closure|global).
   std::vector<std::string> descriptors;
-  bool ran = core_->runOnPausedThread([&](JSContext* ctx) {
-    auto emit = [&](const std::string& name, JSValueConst val) {
-      descriptors.push_back(
-          "{\"name\":\"" + rd::cdp::escapeJSON(name) +
-          "\",\"value\":" + toRemoteObjectJson(ctx, val) +
-          ",\"configurable\":true,\"enumerable\":true,\"writable\":true}");
-    };
-    if (kind == "local") {
-      std::vector<QjsVar> vars;
-      rill_qjs_enumerate_frame_vars(ctx, frameIndex, RILL_QJS_VAR_ARG,
-                                    &rill_qjs_var_collect_sink, &vars);
-      rill_qjs_enumerate_frame_vars(ctx, frameIndex, RILL_QJS_VAR_LOCAL,
-                                    &rill_qjs_var_collect_sink, &vars);
-      for (auto& v : vars)
-        if (isBindableName(v.name)) emit(v.name, v.value);
-    } else if (kind == "closure") {
-      std::vector<QjsVar> vars;
-      rill_qjs_enumerate_frame_vars(ctx, frameIndex, RILL_QJS_VAR_CLOSURE,
-                                    &rill_qjs_var_collect_sink, &vars);
-      for (auto& v : vars)
-        if (isBindableName(v.name)) emit(v.name, v.value);
-    } else if (kind == "global") {
-      JSValue g = JS_GetGlobalObject(ctx);
-      JSPropertyEnum* tab = nullptr;
-      uint32_t len = 0;
-      if (JS_GetOwnPropertyNames(ctx, &tab, &len, g,
-                                 JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
-        const uint32_t cap = len < 200 ? len : 200;  // bound the payload
-        for (uint32_t i = 0; i < cap; ++i) {
-          const char* nm = JS_AtomToCString(ctx, tab[i].atom);
-          JSValue pv = JS_GetProperty(ctx, g, tab[i].atom);
-          if (nm && !JS_IsException(pv)) emit(nm, pv);
-          if (nm) JS_FreeCString(ctx, nm);
-          JS_FreeValue(ctx, pv);
-        }
-        JS_FreeEnumArray(ctx, tab, len);
-      }
-      JS_FreeValue(ctx, g);
+  bool ran = false;
+
+  if (objectId.rfind("obj:", 0) == 0) {
+    ran = core_->runOnPausedThread([&](JSContext* ctx) {
+      auto it = pauseObjects_.find(objectId);
+      if (it == pauseObjects_.end()) return;  // stale id from a previous pause
+      emitOwnProps(ctx, it->second, descriptors);
+    });
+  } else {
+    auto colon = objectId.find(':');
+    if (colon == std::string::npos) return R"({"result":[]})";
+    int frameIndex = 0;
+    try {
+      frameIndex = std::stoi(objectId.substr(0, colon));
+    } catch (...) {
+      return R"({"result":[]})";
     }
-  });
+    const std::string kind = objectId.substr(colon + 1);
+    ran = core_->runOnPausedThread([&](JSContext* ctx) {
+      auto emit = [&](const std::string& name, JSValueConst val) {
+        descriptors.push_back(
+            "{\"name\":\"" + rd::cdp::escapeJSON(name) +
+            "\",\"value\":" + toRemoteObjectJson(ctx, val) +
+            ",\"configurable\":true,\"enumerable\":true,\"writable\":true}");
+      };
+      if (kind == "local") {
+        std::vector<QjsVar> vars;
+        rill_qjs_enumerate_frame_vars(ctx, frameIndex, RILL_QJS_VAR_ARG,
+                                      &rill_qjs_var_collect_sink, &vars);
+        rill_qjs_enumerate_frame_vars(ctx, frameIndex, RILL_QJS_VAR_LOCAL,
+                                      &rill_qjs_var_collect_sink, &vars);
+        for (auto& v : vars)
+          if (isBindableName(v.name)) emit(v.name, v.value);
+      } else if (kind == "closure") {
+        std::vector<QjsVar> vars;
+        rill_qjs_enumerate_frame_vars(ctx, frameIndex, RILL_QJS_VAR_CLOSURE,
+                                      &rill_qjs_var_collect_sink, &vars);
+        for (auto& v : vars)
+          if (isBindableName(v.name)) emit(v.name, v.value);
+      } else if (kind == "global") {
+        JSValue g = JS_GetGlobalObject(ctx);
+        emitOwnProps(ctx, g, descriptors);
+        JS_FreeValue(ctx, g);
+      }
+    });
+  }
   if (!ran) return R"({"result":[]})";
 
   std::string out = R"({"result":[)";

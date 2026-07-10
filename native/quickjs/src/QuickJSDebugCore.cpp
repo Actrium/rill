@@ -53,6 +53,10 @@ void QuickJSDebugCore::setScriptSeenCallback(ScriptSeenFn fn) {
   onScriptSeen_ = std::move(fn);
 }
 
+void QuickJSDebugCore::setResumingCallback(ResumingFn fn) {
+  onResuming_ = std::move(fn);
+}
+
 std::vector<QuickJSDebugCore::FrameSnapshot> QuickJSDebugCore::captureFrames() {
   std::vector<RawFrame> raw;
   rill_qjs_capture_frames(ctx_, &rill_qjs_capture_sink, &raw);
@@ -218,6 +222,17 @@ void QuickJSDebugCore::onStep(JSContext* ctx, const void* token, int line,
     lk.lock();
   }
   suspendAtPause(ctx, lk);
+  // Pause exit, still on the runtime thread and under lk: let an observer free
+  // pause-scoped state (e.g. the engine's object registry of dup'd JSValues)
+  // here, where freeing is thread-safe. inEval_ suppresses a re-entrant onStep
+  // if freeing runs a finalizer; keep lk held (no unlock window) so a CDP
+  // runOnPausedThread cannot see paused_==true and enqueue a job after the pump
+  // has exited.
+  if (onResuming_) {
+    inEval_ = true;
+    onResuming_(ctx_);
+    inEval_ = false;
+  }
   paused_ = false;
 }
 

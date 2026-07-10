@@ -58,8 +58,15 @@ public:
     int line1Based;
   };
 
+  // Invoked on the runtime thread as a pause is torn down (resume or a step
+  // leaving the current stop), while the runtime thread is still the one running.
+  // Lets an observer free pause-scoped state (e.g. dup'd JSValues) on the correct
+  // thread — resume()/step are called from the CDP thread and must not free them.
+  using ResumingFn = std::function<void(JSContext*)>;
+
   void setPausedCallback(PausedFn fn);
   void setScriptSeenCallback(ScriptSeenFn fn);
+  void setResumingCallback(ResumingFn fn);
 
   // Snapshot the live call stack. Runtime-thread-only: valid only while paused
   // (the frame chain must be intact), i.e. called from within the paused
@@ -139,6 +146,7 @@ private:
 
   PausedFn onPaused_;         // set once before debugging starts
   ScriptSeenFn onScriptSeen_;  // set once before debugging starts
+  ResumingFn onResuming_;      // set once before debugging starts
 };
 
 }  // namespace rill::qjs_debug

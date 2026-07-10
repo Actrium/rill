@@ -17,6 +17,7 @@
 #include "devtools/DebuggerAdapter.h"  // IEngineDebugger + CDP types (native/core)
 
 #include "QuickJSDebugCore.h"
+#include "quickjs.h"  // JSValue (stored by value in the pause object registry)
 
 #include <cstdint>
 #include <functional>
@@ -80,6 +81,23 @@ private:
   void onScriptSeen(const std::string& scriptId, const std::string& url,
                     const std::string& source);
 
+  // Serialize a JSValue as a CDP Runtime.RemoteObject. Primitives are emitted by
+  // value; objects/functions get a pause-scoped objectId (via registerObject) so
+  // the client can expand them with getProperties. Runtime-thread-only.
+  std::string toRemoteObjectJson(JSContext* ctx, JSValueConst v);
+  // Mint an "obj:N" id for a JSValue and retain a dup of it until the pause ends.
+  // Runtime-thread-only.
+  std::string registerObject(JSContext* ctx, JSValueConst v);
+  // Free every retained pause-scoped object. Fired on the runtime thread as the
+  // pause tears down (QuickJSDebugCore::onResuming_) — the only thread that may
+  // free these JSValues.
+  void freePauseObjects(JSContext* ctx);
+  // Emit each own enumerable string property of `obj` (capped) as a CDP
+  // PropertyDescriptor into `out`. Runtime-thread-only. Shared by the object and
+  // global getProperties branches.
+  void emitOwnProps(JSContext* ctx, JSValueConst obj,
+                    std::vector<std::string>& out);
+
   QuickJSDebugCore* core_;
   rill::devtools::TenantId tenantId_;
   PausedNotifier notifier_;
@@ -93,6 +111,14 @@ private:
   // Script registry (scriptId == url == filename); guarded by mutex_.
   std::unordered_map<std::string, rill::devtools::ScriptInfo> scripts_;
   std::unordered_map<std::string, std::string> sources_;
+
+  // Pause-scoped object registry: objectId ("obj:N") -> a dup'd JSValue kept
+  // alive so the client can expand it after the value left the C++ stack. Touched
+  // only on the runtime thread (mint during a paused eval/getProperties job, free
+  // at pause exit), so it needs no lock. Every entry is dropped each time the
+  // pause ends; ids never survive a resume.
+  std::uint64_t nextObjectId_ = 1;
+  std::unordered_map<std::string, JSValue> pauseObjects_;
 };
 
 }  // namespace rill::qjs_debug
