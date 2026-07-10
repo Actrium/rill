@@ -29,8 +29,8 @@ CDP 客户端库经真 WebSocket 驱动的前端联调,以及真 Chrome DevTools
 | G | QuickJS-asyncify VM 级暂停/恢复 PoC(Milestone A) | `native/quickjs/poc/`(需 emsdk) | 任意(emcc+node) | 3/3 claims PASS | ✅ |
 | I | Milestone B 核心:asyncify 调试核心 + **跨 unwind evaluate**(debug wasm) | `native/quickjs/build-wasm-debug.sh` + `test/run-debug-wasm.mjs`(需 emsdk) | 任意(emcc+node) | 11/11 claims PASS | ✅ |
 | J | Milestone B web 端:worker `dbg.*` 协议 + TurnGate + CDP 翻译器 + 绕闸路由 | `src/host/web/worker/__tests__`(bun) | 任意 | 50/50 PASS | ✅ |
-| K | 胖 CDP debug wasm(直接讲原始 CDP)+ web 端 `CdpDebugSession`(真 wasm)+ 反向隧道 relay | `native/quickjs/test/run-cdp-wasm.mjs` + `src/host/web/{worker,tools}`(bun) | 任意(emcc+node/bun) | 8/8 + 65/65 + 4/4 PASS | ✅ |
-| L | **浏览器内 E2E**:无头 Chromium,原始 CDP 客户端 → relay → 页面 → worker → 胖 wasm 全链 | `tests/cdp-debug/`(`bun run test:e2e:cdp`) | 有 Chromium 的机 | 1/1 PASS | ✅ |
+| K | 胖 CDP debug wasm(直接讲原始 CDP,含 `Runtime.getProperties` 路由)+ web 端 `CdpDebugSession`(真 wasm)+ 反向隧道 relay | `native/quickjs/test/run-cdp-wasm.mjs` + `src/host/web/{worker,tools}`(bun) | 任意(emcc+node/bun) | 9/9 + 65/65 + 4/4 PASS | ✅ |
+| L | **浏览器内 E2E**:无头 Chromium,原始 CDP 客户端 → relay → 页面 → worker → 胖 wasm 全链(含作用域展开) | `tests/cdp-debug/`(`bun run test:e2e:cdp`) | 有 Chromium 的机 | 1/1 PASS | ✅ |
 | H | 真 Chrome DevTools GUI 实连 | 见 §8 人肉清单 | 有 GUI 的机 | 人肉核对 | ⏳ 待人肉 |
 
 A–G、I、J、K、L 已全自动化验证通过;H 需人肉(协议层已由 F 用 DevTools 前端所用同款
@@ -325,12 +325,15 @@ ssh leo@s67 'cd ~/rill-arch-check && clang++ -std=c++17 -fsyntax-only \
   **浏览器内 E2E**——无头 Chromium 跑通「原始 CDP 客户端 → relay → 页面 → 模块 worker →
   胖 wasm → 回」全链:asyncify 在浏览器引擎里 unwind/rewind、`evaluateOnCallFrame`
   暂停中经线传回实参/局部/闭包、resume 跑完 guest(`tests/cdp-debug/` Playwright,
-  `bun run test:e2e:cdp`,1/1 PASS)。
-- **后续 / 承诺项(仍未做)**:`Runtime.getProperties` 的 **CDP 路由**——`AdapterDebugTarget`
-  只认领 Debugger 域,故经 relay 的作用域/对象展开尚未 CDP 化(引擎侧 `getProperties`
-  已具备,仅差把 Runtime 域接进目标路由,供真 GUI 展开用);`awaitPromise`(挂起
-  期不能泵微任务,故返回未 await 的 Promise);Apple `/json` 监听的**真机 GUI 呈现**
-  (须 s67 GUI 或 webinspectord)。
+  `bun run test:e2e:cdp`,1/1 PASS);**`Runtime.getProperties` 的 CDP 路由**——
+  `AdapterDebugTarget.dispatch` 改为按域路由:Debugger 域走原处理链,Runtime 域把
+  `getProperties` 接到引擎(新增 `DebuggerAdapter::handleGetProperties`)、对前端 attach
+  握手(`enable`/`runIfWaitingForDebugger`)回 ack;仅在目标独占单引擎(胖 CDP wasm)
+  时生效,原生多目标路径仍由 `RuntimeAdapter` 认领 Runtime(裸 CDP 实证:
+  `run-cdp-wasm.mjs` `getProperties(0:local)` 列出帧局部 9/9;浏览器内 E2E 经线展开局部
+  作用域)。
+- **后续 / 承诺项(仍未做)**:`awaitPromise`(挂起期不能泵微任务,故返回未 await 的
+  Promise);Apple `/json` 监听的**真机 GUI 呈现**(须 s67 GUI 或 webinspectord)。
 - **留线外(非当前需求)**:原生/端上 wasm 调试(G6);Windows / N-API Hermes
   CDP;JSC 作为 CDP(接受 dev-only Safari、永不出货)
 - **剩余非阻断(需异机/GUI 人肉)**:§8 H 真 Chrome GUI;Chrome DWARF opt1 局部
