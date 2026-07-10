@@ -179,7 +179,20 @@ test.describe('In-browser CDP debug over the reverse-tunnel relay', () => {
       expect((await evalOnFrame('count')).value, 'count (local) != 11').toBe(11);
       expect((await evalOnFrame('base')).value, 'base (closure) != 10').toBe(10);
 
-      // 7. Resume: Asyncify rewinds the guest, which runs to completion.
+      // 7. Expand the local scope with Runtime.getProperties — the GUI's scope/object
+      //    expansion path, routed through the fat target's Runtime front.
+      const localScope = (frames[0].scopeChain as AnyWindow[])?.find((s) => s.type === 'local');
+      const scopeObjectId = (localScope?.object?.objectId as string) ?? '0:local';
+      const propsResp = await cdp.send('Runtime.getProperties', {
+        objectId: scopeObjectId,
+        ownProperties: true,
+      });
+      const propNames = (propsResp.result?.result ?? []).map((p: AnyWindow) => p.name);
+      expect(propNames, `local scope did not list count/msg: ${JSON.stringify(propNames)}`).toEqual(
+        expect.arrayContaining(['count', 'msg'])
+      );
+
+      // 8. Resume: Asyncify rewinds the guest, which runs to completion.
       const resumed = cdp.waitEvent('Debugger.resumed');
       await cdp.send('Debugger.resume');
       await resumed;

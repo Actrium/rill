@@ -321,6 +321,24 @@ CDPResponse DebuggerAdapter::handleGetScriptSource(TenantId tenantId, int reques
   return response;
 }
 
+CDPResponse DebuggerAdapter::handleGetProperties(TenantId tenantId, int requestId,
+                                                  const std::string& params) {
+  CDPResponse response;
+  response.id = requestId;
+
+  auto objectId = cdp::parseJSONString(params, "objectId");
+  if (!objectId) {
+    response.error = cdp::buildErrorJSON(requestId, CDPErrorCode::INVALID_PARAMS,
+                                         "Missing objectId parameter");
+    return response;
+  }
+
+  // The engine returns the full CDP payload {"result":[...]} already (unlike
+  // evaluateOnCallFrame, whose engine result is a bare RemoteObject).
+  response.result = engineDebugger_->getProperties(tenantId, *objectId);
+  return response;
+}
+
 CDPResponse DebuggerAdapter::handleSetPauseOnExceptions(TenantId tenantId, int requestId,
                                                          const std::string& params) {
   CDPResponse response;

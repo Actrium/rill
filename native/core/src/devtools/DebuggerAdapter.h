@@ -261,7 +261,14 @@ public:
                                      const std::string& params);
   CDPResponse handleSetPauseOnExceptions(TenantId tenantId, int requestId,
                                           const std::string& params);
-  
+  // Runtime.getProperties — scope / object expansion by objectId. The engine
+  // returns a full {"result":[...]} payload. On the multi-target native path the
+  // Runtime domain is owned by RuntimeAdapter, so this is reached only where the
+  // Debugger target also fronts Runtime.getProperties (the fat single-engine
+  // CDP wasm), letting a GUI expand paused scopes without a separate adapter.
+  CDPResponse handleGetProperties(TenantId tenantId, int requestId,
+                                   const std::string& params);
+
   // ============================================
   // Event Emitters
   // ============================================

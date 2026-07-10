@@ -124,10 +124,22 @@ const rBase = evalOnFrame(12, "base");
 claim(7, JSON.stringify(rBase || {}).includes("\"value\":10"),
     "evaluateOnCallFrame base -> 10 (closure capture)");
 
+// ---- Expand the paused frame's local scope with Runtime.getProperties. --------
+// A real DevTools GUI expands scope/object nodes through the Runtime domain, which
+// the fat target fronts alongside Debugger. The local scope objectId is "<frame>:local".
+dispatch(JSON.stringify({
+    id: 13, method: "Runtime.getProperties",
+    params: { objectId: "0:local", ownProperties: true },
+}));
+const rProps = responseFor(13);
+const propsStr = JSON.stringify(rProps || {});
+claim(8, propsStr.includes("\"count\"") && propsStr.includes("\"msg\""),
+    "Runtime.getProperties(0:local) lists the frame locals (count, msg)");
+
 // ---- Resume: Asyncify rewinds and the guest eval completes. ------------------
 dispatch(JSON.stringify({ id: 3, method: "Debugger.resume" }));
 const rc = await evalP;
-claim(8, rc === 0 && settled && !!eventFor("Debugger.resumed"),
+claim(9, rc === 0 && settled && !!eventFor("Debugger.resumed"),
     "Debugger.resume rewound the guest; eval completed and Debugger.resumed sent");
 
 console.log(failures === 0 ? "\nALL CLAIMS PASS" : `\n${failures} CLAIM(S) FAILED`);

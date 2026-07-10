@@ -103,31 +103,47 @@ void AdapterDebugTarget::dispatch(ConnectionId conn, const RawCdpMessage& raw) {
   if (!methodOpt) return;
   const std::string& method = *methodOpt;
   size_t dot = method.find('.');
+  const std::string domain = (dot == std::string::npos) ? std::string() : method.substr(0, dot);
   const std::string m = (dot == std::string::npos) ? method : method.substr(dot + 1);
   const std::string params = extractParams(raw);
 
   CDPResponse r;
   bool handled = true;
-  if (m == "enable") r = adapter_->handleEnable(tenantId_, id);
-  else if (m == "disable") r = adapter_->handleDisable(tenantId_, id);
-  else if (m == "setBreakpointByUrl") r = adapter_->handleSetBreakpointByUrl(tenantId_, id, params);
-  else if (m == "setBreakpoint") r = adapter_->handleSetBreakpoint(tenantId_, id, params);
-  else if (m == "removeBreakpoint") r = adapter_->handleRemoveBreakpoint(tenantId_, id, params);
-  else if (m == "pause") r = adapter_->handlePause(tenantId_, id);
-  else if (m == "resume") r = adapter_->handleResume(tenantId_, id);
-  else if (m == "stepOver") r = adapter_->handleStepOver(tenantId_, id);
-  else if (m == "stepInto") r = adapter_->handleStepInto(tenantId_, id);
-  else if (m == "stepOut") r = adapter_->handleStepOut(tenantId_, id);
-  else if (m == "evaluateOnCallFrame") r = adapter_->handleEvaluateOnCallFrame(tenantId_, id, params);
-  else if (m == "getScriptSource") r = adapter_->handleGetScriptSource(tenantId_, id, params);
-  else if (m == "setPauseOnExceptions") r = adapter_->handleSetPauseOnExceptions(tenantId_, id, params);
-  else handled = false;
+  if (domain == "Runtime") {
+    // Runtime is owned by RuntimeAdapter on the multi-target native path, so this
+    // branch is reached only where this target also fronts Runtime for a single
+    // engine (the fat CDP wasm). Scope/object expansion goes to the engine; the
+    // frontend's attach handshake (enable/runIfWaitingForDebugger) is acked so a
+    // GUI can drive the guest without a separate Runtime adapter.
+    if (m == "getProperties") r = adapter_->handleGetProperties(tenantId_, id, params);
+    else if (m == "enable" || m == "disable" || m == "runIfWaitingForDebugger") {
+      r.id = id;
+      r.result = "{}";
+    }
+    else handled = false;
+  } else {
+    // Debugger domain (the target's owned domain).
+    if (m == "enable") r = adapter_->handleEnable(tenantId_, id);
+    else if (m == "disable") r = adapter_->handleDisable(tenantId_, id);
+    else if (m == "setBreakpointByUrl") r = adapter_->handleSetBreakpointByUrl(tenantId_, id, params);
+    else if (m == "setBreakpoint") r = adapter_->handleSetBreakpoint(tenantId_, id, params);
+    else if (m == "removeBreakpoint") r = adapter_->handleRemoveBreakpoint(tenantId_, id, params);
+    else if (m == "pause") r = adapter_->handlePause(tenantId_, id);
+    else if (m == "resume") r = adapter_->handleResume(tenantId_, id);
+    else if (m == "stepOver") r = adapter_->handleStepOver(tenantId_, id);
+    else if (m == "stepInto") r = adapter_->handleStepInto(tenantId_, id);
+    else if (m == "stepOut") r = adapter_->handleStepOut(tenantId_, id);
+    else if (m == "evaluateOnCallFrame") r = adapter_->handleEvaluateOnCallFrame(tenantId_, id, params);
+    else if (m == "getScriptSource") r = adapter_->handleGetScriptSource(tenantId_, id, params);
+    else if (m == "setPauseOnExceptions") r = adapter_->handleSetPauseOnExceptions(tenantId_, id, params);
+    else handled = false;
+  }
 
   if (handled) {
     out(responseToRawCdp(r));
   } else {
     out(cdp::buildErrorJSON(id, CDPErrorCode::METHOD_NOT_FOUND,
-                            "Unknown Debugger method: " + method));
+                            "Unknown method: " + method));
   }
 }
 
