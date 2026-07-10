@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rill in-browser CDP debug E2E</title>
+  </head>
+  <body>
+    <h1>Rill in-browser CDP debug E2E</h1>
+    <p>Reverse-tunnel: this page dials the relay's /agent; a CDP client reaches the
+       in-worker fat CDP debug wasm through it.</p>
+    <div id="status"></div>
+    <!-- The page harness spawns the debug Worker and bridges relay <-> worker. -->
+    <script type="module" src="/dist/cdp-debug-page.js"></script>
+  </body>
+</html>

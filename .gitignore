@@ -95,3 +95,6 @@ crates/target/
 # DWARF-carrying debug guests (RILL_GUEST_DEBUG=1 crates/build.sh); dev-only,
 # never committed (they carry debug info + real source paths).
 crates/debug-artifacts/
+
+# In-browser CDP debug e2e: generated bundles + copied wasm (build artifacts)
+tests/cdp-debug/serve/
