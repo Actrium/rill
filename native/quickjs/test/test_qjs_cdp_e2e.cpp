@@ -290,6 +290,103 @@ int main() {
     JS_FreeRuntime(srt);
   }
 
+  // --- In-frame scope: scopeChain + evaluate against locals/args/closure. ------
+  {
+    JSRuntime* lrt = JS_NewRuntime();
+    JSContext* lctx = JS_NewContext(lrt);
+    QuickJSDebugCore lcore(lrt, lctx);
+    auto lEngine = std::make_shared<QuickJSEngineDebugger>(&lcore, 1);
+    auto lAdapter = std::make_shared<DebuggerAdapter>();
+    lAdapter->setEngineDebugger(lEngine);
+    AdapterDebugTarget lTarget(lAdapter, 1);
+    lEngine->setPausedNotifier(
+        [lAdapter](PauseReason r, const std::vector<CallFrame>& frames,
+                   const std::vector<std::string>& hits) {
+          lAdapter->onPaused(1, r, frames, hits);
+        });
+
+    Sink lsink;
+    lTarget.onClientConnect(1, [&lsink](const RawCdpMessage& m) { lsink.push(m); });
+    lTarget.dispatch(1, R"({"id":1,"method":"Debugger.enable"})");
+    // Breakpoint inside greet at source line 5 (CDP lineNumber 4): by then its
+    // argument (name), locals (count, msg) and captured closure var (base) all
+    // hold values.
+    lTarget.dispatch(
+        1,
+        R"({"id":2,"method":"Debugger.setBreakpoint","params":{"location":{"scriptId":"scope.js","lineNumber":4}}})");
+
+    std::promise<void> lDone;
+    auto lFut = lDone.get_future();
+    std::thread lThread([&] {
+      JS_UpdateStackTop(lrt);
+      static const char* kScope =
+          "function make(base) {\n"            // 1
+          "  return function greet(name) {\n"  // 2
+          "    var count = base + 1;\n"        // 3
+          "    var msg = 'hi ' + name;\n"      // 4
+          "    globalThis.out = msg;\n"        // 5 <- breakpoint
+          "    return msg;\n"                  // 6
+          "  };\n"                              // 7
+          "}\n"                                 // 8
+          "var g = make(10);\n"                // 9
+          "g('world');\n";                      // 10
+      JSValue v = JS_Eval(lctx, kScope, std::strlen(kScope), "scope.js",
+                          JS_EVAL_TYPE_GLOBAL);
+      JS_FreeValue(lctx, v);
+      lDone.set_value();
+    });
+
+    check(lsink.waitFor("\"Debugger.paused\"", "scope paused event"),
+          "in-frame scope: Debugger.paused delivered");
+    // The paused top frame advertises a Local/Closure/Global scope chain.
+    check(lsink.waitFor("\"type\":\"local\"", "local scope") &&
+              lsink.waitFor("\"type\":\"closure\"", "closure scope") &&
+              lsink.waitFor("\"type\":\"global\"", "global scope"),
+          "paused frame carries a local/closure/global scope chain");
+    check(lsink.waitFor("\"objectId\":\"0:local\"", "local objectId"),
+          "scope objects carry frame-scoped objectIds");
+
+    // evaluateOnCallFrame resolves the argument, a local, and the closure var.
+    lTarget.dispatch(
+        1,
+        R"({"id":10,"method":"Debugger.evaluateOnCallFrame","params":{"callFrameId":"0","expression":"name"}})");
+    check(lsink.waitFor("\"type\":\"string\",\"value\":\"world\"", "eval arg"),
+          "evaluateOnCallFrame name -> \"world\" (argument)");
+    lTarget.dispatch(
+        1,
+        R"({"id":11,"method":"Debugger.evaluateOnCallFrame","params":{"callFrameId":"0","expression":"count"}})");
+    check(lsink.waitFor("\"value\":11,\"description\":\"11\"", "eval local"),
+          "evaluateOnCallFrame count -> 11 (local)");
+    lTarget.dispatch(
+        1,
+        R"({"id":12,"method":"Debugger.evaluateOnCallFrame","params":{"callFrameId":"0","expression":"base"}})");
+    check(lsink.waitFor("\"value\":10,\"description\":\"10\"", "eval closure"),
+          "evaluateOnCallFrame base -> 10 (closure capture)");
+    lTarget.dispatch(
+        1,
+        R"({"id":13,"method":"Debugger.evaluateOnCallFrame","params":{"callFrameId":"0","expression":"name.length"}})");
+    check(lsink.waitFor("\"value\":5,\"description\":\"5\"", "eval member"),
+          "evaluateOnCallFrame name.length -> 5 (in-scope member access)");
+
+    // getProperties enumerates a scope object's variables while paused.
+    std::string localProps = lEngine->getProperties(1, "0:local");
+    check(localProps.find("\"name\":\"name\"") != std::string::npos &&
+              localProps.find("\"name\":\"count\"") != std::string::npos &&
+              localProps.find("\"name\":\"msg\"") != std::string::npos,
+          "getProperties(0:local) lists name/count/msg");
+    std::string closureProps = lEngine->getProperties(1, "0:closure");
+    check(closureProps.find("\"name\":\"base\"") != std::string::npos,
+          "getProperties(0:closure) lists base");
+
+    lTarget.dispatch(1, R"({"id":3,"method":"Debugger.resume"})");
+    check(lFut.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+          "in-frame scope case resumed to completion");
+    lThread.join();
+
+    JS_FreeContext(lctx);
+    JS_FreeRuntime(lrt);
+  }
+
   std::cout << "=== " << (g_failures == 0 ? "ALL PASS" : "FAILURES") << " ("
             << g_failures << " failed) ===\n";
   return g_failures == 0 ? 0 : 1;

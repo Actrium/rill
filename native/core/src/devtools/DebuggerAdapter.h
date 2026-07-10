@@ -172,7 +172,18 @@ public:
       TenantId tenantId,
       const std::string& callFrameId,
       const std::string& expression) = 0;
-  
+
+  /**
+   * Get the properties of an object/scope by objectId (Runtime.getProperties),
+   * e.g. a call frame's scope object. Returns a CDP result payload
+   * {"result":[<PropertyDescriptor>...]}. Non-pure so engines that do not
+   * support scope inspection inherit an empty result.
+   */
+  virtual std::string getProperties(TenantId /*tenantId*/,
+                                    const std::string& /*objectId*/) {
+    return R"({"result":[]})";
+  }
+
   /**
    * Get current call frames (when paused)
    */

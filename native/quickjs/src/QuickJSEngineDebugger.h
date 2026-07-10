@@ -63,6 +63,8 @@ public:
   std::string evaluateOnCallFrame(rill::devtools::TenantId,
                                   const std::string& callFrameId,
                                   const std::string& expression) override;
+  std::string getProperties(rill::devtools::TenantId,
+                            const std::string& objectId) override;
   std::vector<rill::devtools::CallFrame> getCallFrames(rill::devtools::TenantId) override;
   std::vector<rill::devtools::ScriptInfo> getScripts(rill::devtools::TenantId) override;
   std::string getScriptSource(rill::devtools::TenantId,

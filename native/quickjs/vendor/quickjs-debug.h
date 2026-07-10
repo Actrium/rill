@@ -70,6 +70,41 @@ int rill_qjs_capture_frames(JSContext *ctx, RillQjsFrameSink sink, void *user);
  */
 const char *rill_qjs_script_source(const void *script_token, size_t *out_len);
 
+/* Which set of a frame's variables to enumerate (see below). */
+typedef enum {
+    RILL_QJS_VAR_ARG = 0,      /* function arguments */
+    RILL_QJS_VAR_LOCAL = 1,    /* function-scoped local variables */
+    RILL_QJS_VAR_CLOSURE = 2,  /* variables captured from an enclosing scope */
+} RillQjsVarKind;
+
+/*
+ * Variable sink for rill_qjs_enumerate_frame_vars(). Called once per variable
+ * with its `name` (a borrowed C string valid only for the duration of the call —
+ * copy it if needed; do not free it) and its current `value` (borrowed; do not
+ * free, and treat as read-only — it aliases the live frame while paused).
+ */
+typedef void (*RillQjsVarSink)(void *user, const char *name, JSValueConst value);
+
+/*
+ * Enumerate one scope of the frame at `frame_index` (0 = top/innermost, using the
+ * same frame ordering as rill_qjs_capture_frames). `kind` selects arguments,
+ * locals, or closure variables. Emits each named variable to `sink`. Must run on
+ * the runtime thread while that frame is live on a paused stack. Returns the
+ * number of variables emitted (0 if the frame index is out of range or the scope
+ * carries no debug names).
+ */
+int rill_qjs_enumerate_frame_vars(JSContext *ctx, int frame_index,
+                                  RillQjsVarKind kind, RillQjsVarSink sink,
+                                  void *user);
+
+/*
+ * The `this` receiver of the frame at `frame_index` (same ordering as above), for
+ * binding `this` in evaluate-on-call-frame. Borrowed and read-only (valid only
+ * while the frame is live on a paused stack); do not free. Returns JS_UNDEFINED
+ * when the index is out of range.
+ */
+JSValue rill_qjs_frame_this(JSContext *ctx, int frame_index);
+
 #ifdef __cplusplus
 }
 #endif

@@ -4,10 +4,14 @@
 
 #include "devtools/CDPServer.h"  // rill::devtools::cdp::escapeJSON
 #include "quickjs.h"
+#include "quickjs-debug.h"  // rill_qjs_enumerate_frame_vars / rill_qjs_frame_this
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <set>
 #include <sstream>
+#include <vector>
 
 namespace rill::qjs_debug {
 
@@ -50,7 +54,39 @@ std::string toRemoteObjectJson(JSContext* ctx, JSValueConst v) {
   if (s) JS_FreeCString(ctx, s);
   return out;
 }
+
+// A frame variable collected during a paused enumeration. `value` is borrowed
+// from the live frame (valid only while paused); used transiently, never freed.
+struct QjsVar {
+  std::string name;
+  JSValueConst value;
+};
+
+// Only real source identifiers may be bound into the evaluate wrapper's parameter
+// list; QuickJS also carries compiler-internal slots (e.g. "<ret>") whose names
+// are not valid parameters.
+bool isBindableName(const std::string& n) {
+  auto isStart = [](char c) {
+    return std::isalpha((unsigned char)c) || c == '_' || c == '$';
+  };
+  auto isPart = [](char c) {
+    return std::isalnum((unsigned char)c) || c == '_' || c == '$';
+  };
+  if (n.empty() || !isStart(n[0])) return false;
+  for (char c : n)
+    if (!isPart(c)) return false;
+  return true;
+}
 }  // namespace
+
+// extern "C" sink for rill_qjs_enumerate_frame_vars; copies the borrowed name and
+// keeps the borrowed value (used only within the paused job that collected it).
+// Defined inside the namespace so it can name the anonymous-namespace QjsVar.
+extern "C" void rill_qjs_var_collect_sink(void* user, const char* name,
+                                          JSValueConst value) {
+  static_cast<std::vector<QjsVar>*>(user)->push_back(
+      {name ? std::string(name) : std::string(), value});
+}
 
 QuickJSEngineDebugger::QuickJSEngineDebugger(QuickJSDebugCore* core,
                                              rd::TenantId tenantId)
@@ -138,14 +174,70 @@ void QuickJSEngineDebugger::step(rd::TenantId, rd::StepAction action) {
 }
 
 std::string QuickJSEngineDebugger::evaluateOnCallFrame(
-    rd::TenantId, const std::string& /*callFrameId*/,
+    rd::TenantId, const std::string& callFrameId,
     const std::string& expression) {
-  // Global-scope MVP: the frame's locals are not yet addressable, so evaluate in
-  // global scope on the paused runtime thread. Not paused -> undefined.
+  // Evaluate in the paused frame's scope: gather the frame's arguments, locals,
+  // and captured closure variables, then run the expression inside a synthesized
+  // wrapper `(function(<names>){ return (<expr>); })` called with those current
+  // values and the frame's `this`. Inner bindings (args/locals) shadow closure
+  // bindings. Falls back to global scope if the wrapper cannot be built. Not
+  // paused -> undefined.
+  int frameIndex = 0;
+  try {
+    frameIndex = std::stoi(callFrameId);
+  } catch (...) {
+    frameIndex = 0;
+  }
   std::string result = R"({"type":"undefined"})";
   core_->runOnPausedThread([&](JSContext* ctx) {
-    JSValue v = JS_Eval(ctx, expression.c_str(), expression.size(),
-                        "<evaluate>", JS_EVAL_TYPE_GLOBAL);
+    std::vector<QjsVar> args, locals, closures;
+    rill_qjs_enumerate_frame_vars(ctx, frameIndex, RILL_QJS_VAR_ARG,
+                                  &rill_qjs_var_collect_sink, &args);
+    rill_qjs_enumerate_frame_vars(ctx, frameIndex, RILL_QJS_VAR_LOCAL,
+                                  &rill_qjs_var_collect_sink, &locals);
+    rill_qjs_enumerate_frame_vars(ctx, frameIndex, RILL_QJS_VAR_CLOSURE,
+                                  &rill_qjs_var_collect_sink, &closures);
+
+    std::vector<QjsVar> bindings;
+    std::set<std::string> seen;
+    auto take = [&](std::vector<QjsVar>& src) {
+      for (auto& v : src) {
+        if (!isBindableName(v.name) || seen.count(v.name)) continue;
+        seen.insert(v.name);
+        bindings.push_back(v);
+      }
+    };
+    take(args);
+    take(locals);
+    take(closures);  // outer scope: only names not already shadowed
+
+    std::string wrapper = "(function(";
+    for (std::size_t i = 0; i < bindings.size(); ++i) {
+      if (i) wrapper += ",";
+      wrapper += bindings[i].name;
+    }
+    wrapper += "){return (" + expression + ");})";
+
+    JSValue fn = JS_Eval(ctx, wrapper.c_str(), wrapper.size(), "<evaluate>",
+                         JS_EVAL_TYPE_GLOBAL);
+    JSValue v;
+    if (JS_IsException(fn)) {
+      // The wrapper itself failed to compile (e.g. an unexpected binding name);
+      // clear it and fall back to a plain global-scope evaluation.
+      JS_FreeValue(ctx, JS_GetException(ctx));
+      JS_FreeValue(ctx, fn);
+      v = JS_Eval(ctx, expression.c_str(), expression.size(), "<evaluate>",
+                  JS_EVAL_TYPE_GLOBAL);
+    } else {
+      std::vector<JSValue> argv;
+      argv.reserve(bindings.size());
+      for (auto& b : bindings) argv.push_back(b.value);
+      JSValue thisVal = rill_qjs_frame_this(ctx, frameIndex);
+      v = JS_Call(ctx, fn, thisVal, static_cast<int>(argv.size()),
+                  argv.empty() ? nullptr : argv.data());
+      JS_FreeValue(ctx, fn);
+    }
+
     if (JS_IsException(v)) {
       // Take and clear the pending exception so the paused program resumes
       // cleanly; report it as an error remote object.
@@ -162,6 +254,73 @@ std::string QuickJSEngineDebugger::evaluateOnCallFrame(
     JS_FreeValue(ctx, v);
   });
   return result;
+}
+
+std::string QuickJSEngineDebugger::getProperties(rd::TenantId,
+                                                 const std::string& objectId) {
+  // objectId is "<frameIndex>:<kind>" (kind = local|closure|global), minted in
+  // onCorePaused's scopeChain. Enumerate that scope on the paused runtime thread
+  // into CDP PropertyDescriptors. Not paused / bad id -> empty.
+  auto colon = objectId.find(':');
+  if (colon == std::string::npos) return R"({"result":[]})";
+  int frameIndex = 0;
+  try {
+    frameIndex = std::stoi(objectId.substr(0, colon));
+  } catch (...) {
+    return R"({"result":[]})";
+  }
+  const std::string kind = objectId.substr(colon + 1);
+
+  std::vector<std::string> descriptors;
+  bool ran = core_->runOnPausedThread([&](JSContext* ctx) {
+    auto emit = [&](const std::string& name, JSValueConst val) {
+      descriptors.push_back(
+          "{\"name\":\"" + rd::cdp::escapeJSON(name) +
+          "\",\"value\":" + toRemoteObjectJson(ctx, val) +
+          ",\"configurable\":true,\"enumerable\":true,\"writable\":true}");
+    };
+    if (kind == "local") {
+      std::vector<QjsVar> vars;
+      rill_qjs_enumerate_frame_vars(ctx, frameIndex, RILL_QJS_VAR_ARG,
+                                    &rill_qjs_var_collect_sink, &vars);
+      rill_qjs_enumerate_frame_vars(ctx, frameIndex, RILL_QJS_VAR_LOCAL,
+                                    &rill_qjs_var_collect_sink, &vars);
+      for (auto& v : vars)
+        if (isBindableName(v.name)) emit(v.name, v.value);
+    } else if (kind == "closure") {
+      std::vector<QjsVar> vars;
+      rill_qjs_enumerate_frame_vars(ctx, frameIndex, RILL_QJS_VAR_CLOSURE,
+                                    &rill_qjs_var_collect_sink, &vars);
+      for (auto& v : vars)
+        if (isBindableName(v.name)) emit(v.name, v.value);
+    } else if (kind == "global") {
+      JSValue g = JS_GetGlobalObject(ctx);
+      JSPropertyEnum* tab = nullptr;
+      uint32_t len = 0;
+      if (JS_GetOwnPropertyNames(ctx, &tab, &len, g,
+                                 JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
+        const uint32_t cap = len < 200 ? len : 200;  // bound the payload
+        for (uint32_t i = 0; i < cap; ++i) {
+          const char* nm = JS_AtomToCString(ctx, tab[i].atom);
+          JSValue pv = JS_GetProperty(ctx, g, tab[i].atom);
+          if (nm && !JS_IsException(pv)) emit(nm, pv);
+          if (nm) JS_FreeCString(ctx, nm);
+          JS_FreeValue(ctx, pv);
+        }
+        JS_FreeEnumArray(ctx, tab, len);
+      }
+      JS_FreeValue(ctx, g);
+    }
+  });
+  if (!ran) return R"({"result":[]})";
+
+  std::string out = R"({"result":[)";
+  for (std::size_t i = 0; i < descriptors.size(); ++i) {
+    if (i) out += ",";
+    out += descriptors[i];
+  }
+  out += "]}";
+  return out;
 }
 
 std::vector<rd::CallFrame> QuickJSEngineDebugger::getCallFrames(rd::TenantId) {
@@ -227,6 +386,14 @@ void QuickJSEngineDebugger::onCorePaused(const std::string& scriptId,
     f.url = s.scriptId;
     f.lineNumber = s.line1Based - 1;  // QuickJS 1-based -> CDP 0-based
     f.columnNumber = 0;
+    // Scope chain: Local (args + locals) and Closure resolve against this frame;
+    // Global is shared. objectIds are "<frameIndex>:<kind>" and are resolved
+    // lazily by getProperties() while still paused. Enumerating a scope that has
+    // no variables simply yields an empty property list.
+    const std::string idx = std::to_string(i);
+    f.scopeChain.push_back({"local", idx + ":local", f.functionName});
+    f.scopeChain.push_back({"closure", idx + ":closure", ""});
+    f.scopeChain.push_back({"global", idx + ":global", ""});
     frames.push_back(std::move(f));
   }
   if (frames.empty()) {
