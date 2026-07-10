@@ -66,6 +66,11 @@ public:
   // callback. Native/stripped frames (no source location) are skipped.
   std::vector<FrameSnapshot> captureFrames();
 
+  // Frames captured at the current pause. On the web (Asyncify) build the C call
+  // stack is UNWOUND while paused, so callers cannot walk it — they read this
+  // pre-unwind snapshot instead. Runtime-thread-only; valid only while paused.
+  const std::vector<FrameSnapshot>& pausedFrames() const { return snapshotFrames_; }
+
   // Breakpoint + control surface — all safe to call from any thread.
   void addBreakpoint(const std::string& scriptId, int line);
   void removeBreakpoint(const std::string& scriptId, int line);
@@ -93,6 +98,17 @@ public:
 private:
   std::string resolveScript(JSContext* ctx, const void* scriptToken);
 
+  // Block the runtime thread at a pause until resume()/step wakes it. Native:
+  // a condition_variable wait that also services runOnPausedThread jobs. Web
+  // (__EMSCRIPTEN__): snapshot the frames, then hand control to the JS event loop
+  // via an Asyncify stack unwind that returns only after wake + rewind.
+  void suspendAtPause(JSContext* ctx, std::unique_lock<std::mutex>& lk);
+  // Wake a suspended runtime. Native: cv_.notify_all(); web: the Asyncify wake.
+  void wakeFromPause();
+  // Capture / drop the pre-unwind frame snapshot (web pause path).
+  void buildSnapshot();
+  void freeSnapshot();
+
   JSContext* ctx_;
 
   enum class StepMode { None, Into, Over, Out };
@@ -114,6 +130,7 @@ private:
   int pausedLine_ = 0;   // source line at the current pause; guarded by mutex_
 
   // Runtime-thread-only state (touched only inside onStep / captureFrames).
+  std::vector<FrameSnapshot> snapshotFrames_;  // frames captured at the pause
   std::unordered_map<const void*, std::string> scriptNames_;
   std::set<std::string> seenScripts_;  // scripts already announced (by url)
   const void* lastToken_ = nullptr;

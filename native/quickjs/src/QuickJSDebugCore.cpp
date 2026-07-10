@@ -4,6 +4,14 @@
 
 #include "quickjs-debug.h"
 
+#if defined(__EMSCRIPTEN__)
+// The Asyncify suspend/wake shim (native/quickjs/src/qjs_dbg_suspend.c), compiled
+// only into the debug wasm. suspend unwinds the whole C stack back to the JS
+// event loop and returns only after wake + rewind.
+extern "C" void rill_qjs_dbg_suspend_async(void);
+extern "C" void rill_qjs_dbg_wake(void);
+#endif
+
 namespace rill::qjs_debug {
 
 namespace {
@@ -78,7 +86,7 @@ void QuickJSDebugCore::resume() {
     stepMode_ = StepMode::None;
     resumeRequested_ = true;
   }
-  cv_.notify_all();
+  wakeFromPause();
 }
 
 void QuickJSDebugCore::stepInto() {
@@ -89,7 +97,7 @@ void QuickJSDebugCore::stepInto() {
     stepLine_ = pausedLine_;
     resumeRequested_ = true;
   }
-  cv_.notify_all();
+  wakeFromPause();
 }
 
 void QuickJSDebugCore::stepOver() {
@@ -100,7 +108,7 @@ void QuickJSDebugCore::stepOver() {
     stepLine_ = pausedLine_;
     resumeRequested_ = true;
   }
-  cv_.notify_all();
+  wakeFromPause();
 }
 
 void QuickJSDebugCore::stepOut() {
@@ -111,7 +119,7 @@ void QuickJSDebugCore::stepOut() {
     stepLine_ = pausedLine_;
     resumeRequested_ = true;
   }
-  cv_.notify_all();
+  wakeFromPause();
 }
 
 bool QuickJSDebugCore::isPaused() {
@@ -120,6 +128,12 @@ bool QuickJSDebugCore::isPaused() {
 }
 
 bool QuickJSDebugCore::runOnPausedThread(const EvalJob& job) {
+#if defined(__EMSCRIPTEN__)
+  // Web: the pause unwinds the C stack, so there is no blocked runtime thread to
+  // dispatch a job onto. Consumers must read pausedFrames() instead.
+  (void)job;
+  return false;
+#else
   std::unique_lock<std::mutex> lk(mutex_);
   if (!paused_) return false;  // no blocked runtime thread to run the job
   pendingJob_ = &job;
@@ -127,6 +141,7 @@ bool QuickJSDebugCore::runOnPausedThread(const EvalJob& job) {
   cv_.notify_all();  // wake the pause loop to pick up the job
   jobCv_.wait(lk, [&] { return jobDone_; });
   return true;
+#endif
 }
 
 std::string QuickJSDebugCore::resolveScript(JSContext* ctx, const void* token) {
@@ -192,7 +207,7 @@ void QuickJSDebugCore::onStep(JSContext* ctx, const void* token, int line,
   stepMode_ = StepMode::None;
 
   // Enter the pause. Notify the observer (still holding nothing that resume
-  // needs), then block the runtime thread until resume() flips the flag.
+  // needs), then suspend the runtime until resume()/step wakes it.
   paused_ = true;
   pausedDepth_ = depth;
   pausedLine_ = line;
@@ -202,9 +217,28 @@ void QuickJSDebugCore::onStep(JSContext* ctx, const void* token, int line,
     onPaused_(scriptId, line, reason);
     lk.lock();
   }
-  // Block until resumed, but stay responsive to eval jobs from the CDP thread:
-  // run each on this (the runtime) thread with the hook suppressed, then keep
-  // waiting.
+  suspendAtPause(ctx, lk);
+  paused_ = false;
+}
+
+void QuickJSDebugCore::suspendAtPause(JSContext* ctx,
+                                     std::unique_lock<std::mutex>& lk) {
+#if defined(__EMSCRIPTEN__)
+  // Web (single JS thread, no real threads): capture the frames BEFORE the stack
+  // unwinds — after the Asyncify unwind ctx->rt->current_stack_frame is gone —
+  // then hand control back to the JS event loop. rill_qjs_dbg_suspend_async()
+  // returns only once resume()/step calls the stored resolver and Asyncify
+  // rewinds. runOnPausedThread is unavailable here, so no cv_/job pump.
+  (void)ctx;
+  (void)lk;
+  buildSnapshot();
+  rill_qjs_dbg_suspend_async();
+  freeSnapshot();
+#else
+  // Native: block the runtime thread on cv_, staying responsive to eval jobs
+  // dispatched from the CDP thread (run each here with the hook suppressed),
+  // until resume()/step flips resumeRequested_.
+  (void)ctx;
   while (true) {
     cv_.wait(lk, [&] { return resumeRequested_ || pendingJob_ != nullptr; });
     if (pendingJob_ != nullptr) {
@@ -221,8 +255,20 @@ void QuickJSDebugCore::onStep(JSContext* ctx, const void* token, int line,
     }
     break;  // resumeRequested_
   }
-  paused_ = false;
+#endif
 }
+
+void QuickJSDebugCore::wakeFromPause() {
+#if defined(__EMSCRIPTEN__)
+  rill_qjs_dbg_wake();
+#else
+  cv_.notify_all();
+#endif
+}
+
+void QuickJSDebugCore::buildSnapshot() { snapshotFrames_ = captureFrames(); }
+
+void QuickJSDebugCore::freeSnapshot() { snapshotFrames_.clear(); }
 
 }  // namespace rill::qjs_debug
 
