@@ -60,7 +60,7 @@ emcc "${SOURCES[@]}" "${DEFINES[@]}" \
     -sEXPORT_NAME=createQuickJSSandboxDebug \
     -sENVIRONMENT=node,web,worker \
     -sEXPORTED_RUNTIME_METHODS=ccall,cwrap,UTF8ToString \
-    -sEXPORTED_FUNCTIONS=_malloc,_free,_qjsd_init,_qjsd_add_breakpoint,_qjsd_eval,_qjsd_resume,_qjsd_step_into,_qjsd_step_over,_qjsd_step_out,_qjsd_request_pause,_qjsd_is_paused,_qjsd_paused_line,_qjsd_frame_count,_qjsd_frame_line \
+    -sEXPORTED_FUNCTIONS=_malloc,_free,_qjsd_init,_qjsd_add_breakpoint,_qjsd_remove_breakpoint,_qjsd_eval,_qjsd_evaluate_on_frame,_qjsd_resume,_qjsd_step_into,_qjsd_step_over,_qjsd_step_out,_qjsd_request_pause,_qjsd_is_paused,_qjsd_paused_line,_qjsd_frame_count,_qjsd_frame_line \
     -o "${OUTPUT}"
 
 WASM="${OUTPUT%.mjs}.wasm"

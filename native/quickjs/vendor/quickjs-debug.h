@@ -105,6 +105,18 @@ int rill_qjs_enumerate_frame_vars(JSContext *ctx, int frame_index,
  */
 JSValue rill_qjs_frame_this(JSContext *ctx, int frame_index);
 
+/*
+ * Save / restore the runtime's current-stack-frame pointer as an opaque token.
+ * Only needed by the web (Asyncify) debug path: after the C stack unwinds, that
+ * pointer dangles into the unwound frames, so evaluate-during-suspension nulls
+ * it (rill_qjs_set_current_frame(ctx, NULL)) before running a fresh JS_Eval/
+ * JS_Call — otherwise an exception backtrace would walk the dangling chain — and
+ * restores the saved token afterwards (it becomes valid again once Asyncify
+ * rewinds). The token is opaque: save it, restore it, never dereference it.
+ */
+void *rill_qjs_current_frame(JSContext *ctx);
+void rill_qjs_set_current_frame(JSContext *ctx, void *frame);
+
 #ifdef __cplusplus
 }
 #endif

@@ -18,7 +18,10 @@
 
 #include <climits>
 #include <cstring>
+#include <set>
 #include <string>
+#include <utility>
+#include <vector>
 
 using rill::qjs_debug::PauseReason;
 using rill::qjs_debug::QuickJSDebugCore;
@@ -51,6 +54,78 @@ int qjsd_init(void) {
 EMSCRIPTEN_KEEPALIVE
 void qjsd_add_breakpoint(const char* scriptId, int line) {
   if (g_core) g_core->addBreakpoint(scriptId ? scriptId : "", line);
+}
+
+EMSCRIPTEN_KEEPALIVE
+void qjsd_remove_breakpoint(const char* scriptId, int line) {
+  if (g_core) g_core->removeBreakpoint(scriptId ? scriptId : "", line);
+}
+
+// Evaluate an expression in the scope of the paused frame at frameIndex, reading
+// the pre-unwind binding snapshot (the live frame is gone after the Asyncify
+// unwind), and return its value as an int (INT_MIN on not-paused / exception).
+// This is the cross-unwind evaluate: a synchronous export that runs JS_Call
+// DURING the suspension, guarded by runOnPausedThread (nulls the dangling frame
+// pointer + suppresses the hook). Mirrors the lean core mechanism that
+// QuickJSEngineDebugger wraps into a CDP RemoteObject in the real web host.
+EMSCRIPTEN_KEEPALIVE
+int qjsd_evaluate_on_frame(int frameIndex, const char* expr) {
+  if (!g_core || !expr) return INT_MIN;
+  const std::string e(expr);
+  int out = INT_MIN;
+  const bool ran = g_core->runOnPausedThread([&](JSContext* ctx) {
+    const auto& all = g_core->pausedBindings();
+    // Build the wrapper param list from the frame's args/locals/closures
+    // (inner shadows outer); fall back to a bare global eval if the frame index
+    // is out of range.
+    std::vector<std::pair<std::string, JSValueConst>> binds;
+    JSValueConst thisVal = JS_UNDEFINED;
+    if (frameIndex >= 0 && static_cast<std::size_t>(frameIndex) < all.size()) {
+      const auto& fb = all[frameIndex];
+      std::set<std::string> seen;
+      auto take = [&](const std::vector<QuickJSDebugCore::CapturedVar>& src) {
+        for (const auto& v : src) {
+          if (v.name.empty() || seen.count(v.name)) continue;
+          seen.insert(v.name);
+          binds.push_back({v.name, v.value});
+        }
+      };
+      take(fb.args);
+      take(fb.locals);
+      take(fb.closures);
+      thisVal = fb.thisVal;
+    }
+    std::string w = "(function(";
+    for (std::size_t i = 0; i < binds.size(); ++i) {
+      if (i) w += ",";
+      w += binds[i].first;
+    }
+    w += "){return (" + e + ");})";
+    JSValue fn = JS_Eval(ctx, w.c_str(), w.size(), "<evaluate>",
+                         JS_EVAL_TYPE_GLOBAL);
+    JSValue v;
+    if (JS_IsException(fn)) {
+      JS_FreeValue(ctx, JS_GetException(ctx));
+      JS_FreeValue(ctx, fn);
+      v = JS_Eval(ctx, e.c_str(), e.size(), "<evaluate>", JS_EVAL_TYPE_GLOBAL);
+    } else {
+      std::vector<JSValue> argv;
+      argv.reserve(binds.size());
+      for (const auto& b : binds) argv.push_back(b.second);
+      v = JS_Call(ctx, fn, thisVal, static_cast<int>(argv.size()),
+                  argv.empty() ? nullptr : argv.data());
+      JS_FreeValue(ctx, fn);
+    }
+    if (JS_IsException(v)) {
+      JS_FreeValue(ctx, JS_GetException(ctx));  // clear so resume stays clean
+    } else {
+      int32_t n = 0;
+      JS_ToInt32(ctx, &n, v);
+      out = n;
+    }
+    JS_FreeValue(ctx, v);
+  });
+  return ran ? out : INT_MIN;
 }
 
 // Evaluate a program and return its completion value as an int (INT_MIN on

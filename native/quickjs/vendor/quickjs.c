@@ -16683,6 +16683,18 @@ int rill_qjs_enumerate_frame_vars(JSContext *ctx, int frame_index,
     return n;
 }
 
+/* Save / restore rt->current_stack_frame as an opaque token (web Asyncify path;
+   see quickjs-debug.h). Never dereferenced by the caller. */
+void *rill_qjs_current_frame(JSContext *ctx)
+{
+    return ctx->rt->current_stack_frame;
+}
+
+void rill_qjs_set_current_frame(JSContext *ctx, void *frame)
+{
+    ctx->rt->current_stack_frame = (JSStackFrame *)frame;
+}
+
 /* Resolve the current source line and forward it; pause policy is the hook's.
    Stamps sf->cur_pc so a frame walk triggered from the callback reads this live
    PC for the top frame instead of a stale call-site value (only ever runs while

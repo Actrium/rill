@@ -10,8 +10,15 @@
  *      while the eval Promise is still pending).
  *   3. The pre-unwind frame snapshot survives after the C stack is gone
  *      (qjsd_frame_count >= 2 and qjsd_frame_line(0) == breakpoint line).
- *   4. resume() rewinds and the eval completes past the breakpoint; not paused.
- *   5. step-over arms-then-wakes and lands on a NEW line, then resume completes.
+ *   4-5. CROSS-UNWIND EVALUATE: a synchronous export runs JS_Call DURING the
+ *      suspension (C stack unwound), reading the pre-unwind binding snapshot —
+ *      reads a frame arg (x==21) and computes over it (x*2+1==43).
+ *   6. resume() rewinds and the eval completes past the breakpoint even AFTER an
+ *      in-pause evaluate ran (proving evaluate did not corrupt the parked state).
+ *   7. step-over arms-then-wakes and lands on a NEW line, then resume completes.
+ *   8-10. Cross-unwind evaluate READS then MUTATES a captured object; the
+ *      mutation is visible to the guest after resume (the snapshot dup shares
+ *      object identity with the live frame across the unwind/rewind).
  *
  * Build first: `source /ext/emsdk/emsdk_env.sh && bash ../build-wasm-debug.sh`.
  * Exit code is non-zero if any claim fails.
@@ -100,11 +107,24 @@ claim(3,
     fc >= 2 && f0 === BP_LINE,
     `pre-unwind snapshot survived the unwind (frameCount=${fc}, frame0Line=${f0})`);
 
+// Cross-unwind evaluate: a synchronous export that runs JS_Call DURING the
+// suspension (the C stack is unwound), reading the pre-unwind binding snapshot
+// instead of the gone live frame. Frame 0 = bar(x=21); local y not yet assigned
+// at the line-3 breakpoint, so evaluate the arg and an expression over it.
+const evX = cc("qjsd_evaluate_on_frame", "number", ["number", "string"], [0, "x"]);
+claim(4,
+    evX === 21 && cc("qjsd_is_paused", "number", [], []) === 1,
+    `cross-unwind evaluate read a snapshot arg while suspended (x=${evX})`);
+const evY = cc("qjsd_evaluate_on_frame", "number", ["number", "string"], [0, "x * 2 + 1"]);
+claim(5,
+    evY === 43,
+    `cross-unwind evaluate computed in the frame scope (x*2+1=${evY})`);
+
 cc("qjsd_resume", null, [], []);
 const r1 = await p1;
-claim(4,
+claim(6,
     r1 === EXPECTED && cc("qjsd_is_paused", "number", [], []) === 0,
-    `resume rewound and completed the eval (result=${r1}, expected=${EXPECTED}, paused=${cc("qjsd_is_paused", "number", [], [])})`);
+    `resume rewound and completed the eval AFTER an in-pause evaluate (result=${r1}, expected=${EXPECTED})`);
 
 // ---- Run 2: step-over lands on a new line (arm-then-wake across rewind). ------
 pausedCount = 0;
@@ -116,11 +136,45 @@ const pausedAt = cc("qjsd_paused_line", "number", [], []);
 cc("qjsd_step_over", null, [], []);
 await tick();  // let the step re-pause on the next line
 const steppedTo = cc("qjsd_paused_line", "number", [], []);
-claim(5,
+claim(7,
     pausedAt === BP_LINE && steppedTo !== BP_LINE && cc("qjsd_is_paused", "number", [], []) === 1 && !settled2,
     `step-over advanced to a new line (from ${pausedAt} to ${steppedTo})`);
 cc("qjsd_resume", null, [], []);
 await p2;
+
+// ---- Run 3: cross-unwind evaluate READS then MUTATES a captured object; the
+//      mutation is visible to the guest after resume, proving the snapshot dup
+//      shares object identity with the live frame across the unwind/rewind. -----
+cc("qjsd_remove_breakpoint", null, ["string", "number"], ["guest.js", BP_LINE]);
+const OBJ_LINES = [
+    "function h(o) {",              // 1
+    "  var local = 7;",            // 2
+    "  globalThis.seen = o.x;",    // 3  <-- breakpoint (o built, local assigned)
+    "  return o.x;",               // 4  reflects any mutation done while paused
+    "}",                            // 5
+    "h({ x: 1 });",                // 6
+];
+const OBJ_BP = 3;
+cc("qjsd_add_breakpoint", null, ["string", "number"], ["guest.js", OBJ_BP]);
+let settled3 = false;
+const p3 = cc("qjsd_eval", "number", ["string"], [OBJ_LINES.join("\n")], { async: true });
+p3.then(() => { settled3 = true; }, () => { settled3 = true; });
+await tick();  // let the breakpoint suspend land
+
+const ev = (expr) => cc("qjsd_evaluate_on_frame", "number", ["number", "string"], [0, expr]);
+claim(8,
+    cc("qjsd_is_paused", "number", [], []) === 1 && !settled3 && ev("local") === 7,
+    `cross-unwind evaluate read a captured local (local=${ev("local")})`);
+const before = ev("o.x");
+const mutated = ev("(o.x = 5, o.x)");
+claim(9,
+    before === 1 && mutated === 5,
+    `cross-unwind evaluate read (o.x=${before}) then mutated (o.x=${mutated}) a captured object`);
+cc("qjsd_resume", null, [], []);
+const r3 = await p3;
+claim(10,
+    r3 === 5,
+    `object mutation propagated to the guest across resume (h returned o.x=${r3})`);
 
 console.log(failures === 0 ? "\nALL CLAIMS PASS" : `\n${failures} CLAIM(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

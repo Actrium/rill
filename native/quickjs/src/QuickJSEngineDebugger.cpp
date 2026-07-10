@@ -51,6 +51,47 @@ extern "C" void rill_qjs_var_collect_sink(void* user, const char* name,
       {name ? std::string(name) : std::string(), value});
 }
 
+// Collect one scope's (name, borrowed value) pairs for the paused frame at
+// frameIndex. The value source differs by build: on the web the live frame is
+// gone after the Asyncify unwind, so read QuickJSDebugCore's pre-unwind binding
+// snapshot; on native read the live frame through the engine seam. Either way the
+// values are borrowed and valid only for the current paused job.
+static void collectScopeVars(JSContext* ctx, const QuickJSDebugCore* core,
+                             int frameIndex, RillQjsVarKind kind,
+                             std::vector<QjsVar>& out) {
+#if defined(__EMSCRIPTEN__)
+  (void)ctx;
+  const auto& all = core->pausedBindings();
+  if (frameIndex < 0 || static_cast<std::size_t>(frameIndex) >= all.size())
+    return;
+  const auto& fb = all[frameIndex];
+  const std::vector<QuickJSDebugCore::CapturedVar>* src =
+      kind == RILL_QJS_VAR_ARG      ? &fb.args
+      : kind == RILL_QJS_VAR_LOCAL  ? &fb.locals
+                                    : &fb.closures;
+  for (const auto& v : *src) out.push_back({v.name, v.value});
+#else
+  (void)core;
+  rill_qjs_enumerate_frame_vars(ctx, frameIndex, kind, &rill_qjs_var_collect_sink,
+                                &out);
+#endif
+}
+
+// The `this` receiver of the paused frame — snapshot on web, live on native.
+static JSValueConst frameThisValue(JSContext* ctx, const QuickJSDebugCore* core,
+                                   int frameIndex) {
+#if defined(__EMSCRIPTEN__)
+  (void)ctx;
+  const auto& all = core->pausedBindings();
+  if (frameIndex < 0 || static_cast<std::size_t>(frameIndex) >= all.size())
+    return JS_UNDEFINED;
+  return all[frameIndex].thisVal;
+#else
+  (void)core;
+  return rill_qjs_frame_this(ctx, frameIndex);
+#endif
+}
+
 std::string QuickJSEngineDebugger::registerObject(JSContext* ctx,
                                                  JSValueConst v) {
   std::string id = "obj:" + std::to_string(nextObjectId_++);
@@ -243,12 +284,9 @@ std::string QuickJSEngineDebugger::evaluateOnCallFrame(
   std::string result = R"({"type":"undefined"})";
   core_->runOnPausedThread([&](JSContext* ctx) {
     std::vector<QjsVar> args, locals, closures;
-    rill_qjs_enumerate_frame_vars(ctx, frameIndex, RILL_QJS_VAR_ARG,
-                                  &rill_qjs_var_collect_sink, &args);
-    rill_qjs_enumerate_frame_vars(ctx, frameIndex, RILL_QJS_VAR_LOCAL,
-                                  &rill_qjs_var_collect_sink, &locals);
-    rill_qjs_enumerate_frame_vars(ctx, frameIndex, RILL_QJS_VAR_CLOSURE,
-                                  &rill_qjs_var_collect_sink, &closures);
+    collectScopeVars(ctx, core_, frameIndex, RILL_QJS_VAR_ARG, args);
+    collectScopeVars(ctx, core_, frameIndex, RILL_QJS_VAR_LOCAL, locals);
+    collectScopeVars(ctx, core_, frameIndex, RILL_QJS_VAR_CLOSURE, closures);
 
     std::vector<QjsVar> bindings;
     std::set<std::string> seen;
@@ -284,7 +322,7 @@ std::string QuickJSEngineDebugger::evaluateOnCallFrame(
       std::vector<JSValue> argv;
       argv.reserve(bindings.size());
       for (auto& b : bindings) argv.push_back(b.value);
-      JSValue thisVal = rill_qjs_frame_this(ctx, frameIndex);
+      JSValueConst thisVal = frameThisValue(ctx, core_, frameIndex);
       v = JS_Call(ctx, fn, thisVal, static_cast<int>(argv.size()),
                   argv.empty() ? nullptr : argv.data());
       JS_FreeValue(ctx, fn);
@@ -344,16 +382,13 @@ std::string QuickJSEngineDebugger::getProperties(rd::TenantId,
       };
       if (kind == "local") {
         std::vector<QjsVar> vars;
-        rill_qjs_enumerate_frame_vars(ctx, frameIndex, RILL_QJS_VAR_ARG,
-                                      &rill_qjs_var_collect_sink, &vars);
-        rill_qjs_enumerate_frame_vars(ctx, frameIndex, RILL_QJS_VAR_LOCAL,
-                                      &rill_qjs_var_collect_sink, &vars);
+        collectScopeVars(ctx, core_, frameIndex, RILL_QJS_VAR_ARG, vars);
+        collectScopeVars(ctx, core_, frameIndex, RILL_QJS_VAR_LOCAL, vars);
         for (auto& v : vars)
           if (isBindableName(v.name)) emit(v.name, v.value);
       } else if (kind == "closure") {
         std::vector<QjsVar> vars;
-        rill_qjs_enumerate_frame_vars(ctx, frameIndex, RILL_QJS_VAR_CLOSURE,
-                                      &rill_qjs_var_collect_sink, &vars);
+        collectScopeVars(ctx, core_, frameIndex, RILL_QJS_VAR_CLOSURE, vars);
         for (auto& v : vars)
           if (isBindableName(v.name)) emit(v.name, v.value);
       } else if (kind == "global") {

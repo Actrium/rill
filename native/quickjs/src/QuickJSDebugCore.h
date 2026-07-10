@@ -24,7 +24,8 @@
 #include <utility>
 #include <vector>
 
-struct JSContext;
+#include "quickjs.h"  // JSValue, held by value in the web pause-binding snapshot
+
 struct JSRuntime;
 
 namespace rill::qjs_debug {
@@ -58,6 +59,25 @@ public:
     int line1Based;
   };
 
+  // A variable captured from a frame at pause time: its name and an owned dup of
+  // its value (freed when the pause ends). Objects share identity with the live
+  // frame's value, so mutating an object property through the dup is observed by
+  // the frame after resume.
+  struct CapturedVar {
+    std::string name;
+    JSValue value;  // owned (JS_DupValue'd); freed by freeSnapshot()
+  };
+
+  // A frame's full binding set, captured BEFORE the web Asyncify unwind so an
+  // evaluate arriving after the unwind can reconstruct the frame's scope. Empty
+  // on native (which reads live frames instead).
+  struct FrameBindings {
+    std::vector<CapturedVar> args;
+    std::vector<CapturedVar> locals;
+    std::vector<CapturedVar> closures;
+    JSValue thisVal;  // owned; JS_UNDEFINED when the frame has no receiver
+  };
+
   // Invoked on the runtime thread as a pause is torn down (resume or a step
   // leaving the current stop), while the runtime thread is still the one running.
   // Lets an observer free pause-scoped state (e.g. dup'd JSValues) on the correct
@@ -77,6 +97,13 @@ public:
   // stack is UNWOUND while paused, so callers cannot walk it — they read this
   // pre-unwind snapshot instead. Runtime-thread-only; valid only while paused.
   const std::vector<FrameSnapshot>& pausedFrames() const { return snapshotFrames_; }
+
+  // Per-frame bindings captured at the current pause (web only; empty on native).
+  // Parallel to pausedFrames() by index. An evaluate arriving after the unwind
+  // reads these instead of the (gone) live frame. Valid only while paused.
+  const std::vector<FrameBindings>& pausedBindings() const {
+    return snapshotBindings_;
+  }
 
   // Breakpoint + control surface — all safe to call from any thread.
   void addBreakpoint(const std::string& scriptId, int line);
@@ -138,6 +165,7 @@ private:
 
   // Runtime-thread-only state (touched only inside onStep / captureFrames).
   std::vector<FrameSnapshot> snapshotFrames_;  // frames captured at the pause
+  std::vector<FrameBindings> snapshotBindings_;  // per-frame vars (web only)
   std::unordered_map<const void*, std::string> scriptNames_;
   std::set<std::string> seenScripts_;  // scripts already announced (by url)
   const void* lastToken_ = nullptr;

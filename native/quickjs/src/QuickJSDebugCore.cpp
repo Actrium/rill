@@ -33,6 +33,21 @@ extern "C" void rill_qjs_capture_sink(void* user, const void* token, int line,
   static_cast<std::vector<RawFrame>*>(user)->push_back(
       {token, line, name ? std::string(name) : std::string()});
 }
+
+#if defined(__EMSCRIPTEN__)
+// Sink for the web binding capture: dup each borrowed frame value into an owned
+// CapturedVar so it outlives the imminent Asyncify unwind.
+struct VarCapture {
+  JSContext* ctx;
+  std::vector<QuickJSDebugCore::CapturedVar>* out;
+};
+extern "C" void rill_qjs_dup_var_sink(void* user, const char* name,
+                                      JSValueConst value) {
+  auto* c = static_cast<VarCapture*>(user);
+  c->out->push_back(
+      {name ? std::string(name) : std::string(), JS_DupValue(c->ctx, value)});
+}
+#endif
 }  // namespace
 
 QuickJSDebugCore::QuickJSDebugCore(JSRuntime* rt, JSContext* ctx) : ctx_(ctx) {
@@ -133,10 +148,26 @@ bool QuickJSDebugCore::isPaused() {
 
 bool QuickJSDebugCore::runOnPausedThread(const EvalJob& job) {
 #if defined(__EMSCRIPTEN__)
-  // Web: the pause unwinds the C stack, so there is no blocked runtime thread to
-  // dispatch a job onto. Consumers must read pausedFrames() instead.
-  (void)job;
-  return false;
+  // Web: there is no blocked runtime thread — the pause unwound the C stack. But
+  // while paused we ARE on the single JS thread inside the Asyncify await window
+  // (unwind complete, Asyncify idle), so we run the job right here. Two guards:
+  //  - rt->current_stack_frame dangles into the unwound C stack; null it so a
+  //    fresh JS_Eval/JS_Call, and any exception backtrace (build_backtrace) it
+  //    walks, never touches the freed frames. Restore the saved token after — it
+  //    becomes valid again once Asyncify rewinds on resume.
+  //  - suppress the debug hook (inEval_) so the job's own execution cannot
+  //    re-pause; a nested Asyncify unwind is impossible and would corrupt state.
+  // The job reads the pre-unwind binding snapshot (pausedBindings()), not the
+  // gone live frames.
+  if (!paused_) return false;
+  void* savedFrame = rill_qjs_current_frame(ctx_);
+  rill_qjs_set_current_frame(ctx_, nullptr);
+  const bool savedInEval = inEval_;
+  inEval_ = true;
+  job(ctx_);
+  inEval_ = savedInEval;
+  rill_qjs_set_current_frame(ctx_, savedFrame);
+  return true;
 #else
   std::unique_lock<std::mutex> lk(mutex_);
   if (!paused_) return false;  // no blocked runtime thread to run the job
@@ -281,9 +312,44 @@ void QuickJSDebugCore::wakeFromPause() {
 #endif
 }
 
-void QuickJSDebugCore::buildSnapshot() { snapshotFrames_ = captureFrames(); }
+void QuickJSDebugCore::buildSnapshot() {
+  snapshotFrames_ = captureFrames();
+#if defined(__EMSCRIPTEN__)
+  // Web only: capture every frame's bindings (dup'd) BEFORE the Asyncify unwind,
+  // so an evaluate arriving after the unwind — when the live frames are gone —
+  // can reconstruct the frame scope from this immutable snapshot. Native reads
+  // live frames instead and never populates this. Frame indexing matches
+  // captureFrames()/rill_qjs_nth_frame (located JS frames, top first).
+  snapshotBindings_.clear();
+  snapshotBindings_.resize(snapshotFrames_.size());
+  for (std::size_t i = 0; i < snapshotFrames_.size(); ++i) {
+    FrameBindings& fb = snapshotBindings_[i];
+    VarCapture ac{ctx_, &fb.args};
+    rill_qjs_enumerate_frame_vars(ctx_, static_cast<int>(i), RILL_QJS_VAR_ARG,
+                                  &rill_qjs_dup_var_sink, &ac);
+    VarCapture lc{ctx_, &fb.locals};
+    rill_qjs_enumerate_frame_vars(ctx_, static_cast<int>(i), RILL_QJS_VAR_LOCAL,
+                                  &rill_qjs_dup_var_sink, &lc);
+    VarCapture cc{ctx_, &fb.closures};
+    rill_qjs_enumerate_frame_vars(ctx_, static_cast<int>(i), RILL_QJS_VAR_CLOSURE,
+                                  &rill_qjs_dup_var_sink, &cc);
+    fb.thisVal = JS_DupValue(ctx_, rill_qjs_frame_this(ctx_, static_cast<int>(i)));
+  }
+#endif
+}
 
-void QuickJSDebugCore::freeSnapshot() { snapshotFrames_.clear(); }
+void QuickJSDebugCore::freeSnapshot() {
+  snapshotFrames_.clear();
+#if defined(__EMSCRIPTEN__)
+  for (auto& fb : snapshotBindings_) {
+    for (auto& v : fb.args) JS_FreeValue(ctx_, v.value);
+    for (auto& v : fb.locals) JS_FreeValue(ctx_, v.value);
+    for (auto& v : fb.closures) JS_FreeValue(ctx_, v.value);
+    JS_FreeValue(ctx_, fb.thisVal);
+  }
+  snapshotBindings_.clear();
+#endif
+}
 
 }  // namespace rill::qjs_debug
 
