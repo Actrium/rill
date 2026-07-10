@@ -27,6 +27,7 @@ for cpp in "$QSRC/QuickJSDebugCore.cpp" "$QSRC/QuickJSEngineDebugger.cpp" \
            "$CORE/devtools/DebuggerAdapter.cpp" \
            "$CORE/devtools/AdapterDebugTarget.cpp" \
            "$CORE/devtools/CDPServer.cpp" \
+           "$CORE/devtools/cdp_wire.cpp" \
            "$HERE/test_qjs_cdp_e2e.cpp"; do
   $CXX $CXXFLAGS -c "$cpp" -o "$TMP/$(basename "$cpp").o"
 done
