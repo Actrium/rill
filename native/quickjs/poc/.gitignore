@@ -1,0 +1,6 @@
+# Generated wasm/JS build artifacts — rebuild with build-asyncify-poc.sh.
+*.mjs
+*.wasm
+*.map
+# Keep the hand-written harness (it is a source file, not a build output).
+!run-poc.mjs
