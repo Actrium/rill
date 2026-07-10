@@ -98,6 +98,7 @@
 #include <unordered_set>
 
 #include "ConnectionId.h"
+#include "cdp_wire.h"  // cdp:: JSON wire helpers (usable without the server)
 
 namespace rill::devtools {
 
@@ -777,22 +778,10 @@ private:
 
 namespace cdp {
 
-/**
- * Build CDP event JSON
- */
-std::string buildEventJSON(const std::string& method, 
-                           const std::string& params,
-                           const std::optional<SessionId>& sessionId = std::nullopt);
-
-/**
- * Build CDP response JSON
- */
-std::string buildResponseJSON(int id, const std::string& result);
-
-/**
- * Build CDP error response JSON
- */
-std::string buildErrorJSON(int id, int code, const std::string& message);
+// buildEventJSON / buildResponseJSON / buildErrorJSON / escapeJSON /
+// parseJSONString / parseJSONInt are declared in cdp_wire.h (included above) so
+// they can be linked into the debug wasm without CDPServer. The HTTP / discovery
+// helpers below stay here because they depend on CDPServer's own types.
 
 /**
  * Frame an HttpResponse into an HTTP/1.1 wire string: status line, Content-Type,
@@ -820,21 +809,6 @@ bool parseRequestLine(const std::string& requestBytes, std::string& method,
  * outbound messages so the client can demultiplex them.
  */
 std::string injectSessionId(const std::string& rawCdp, const SessionId& sessionId);
-
-/**
- * Escape string for JSON
- */
-std::string escapeJSON(const std::string& str);
-
-/**
- * Parse JSON string value
- */
-std::optional<std::string> parseJSONString(const std::string& json, const std::string& key);
-
-/**
- * Parse JSON int value
- */
-std::optional<int> parseJSONInt(const std::string& json, const std::string& key);
 
 } // namespace cdp
 

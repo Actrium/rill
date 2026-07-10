@@ -24,6 +24,7 @@ SRC_SECURITY = \
 # Source files under test (devtools subdirectory)
 SRC_DEVTOOLS = \
 	$(SRC_DIR)/devtools/CDPServer.cpp \
+	$(SRC_DIR)/devtools/cdp_wire.cpp \
 	$(SRC_DIR)/devtools/ConsoleAdapter.cpp \
 	$(SRC_DIR)/devtools/RuntimeAdapter.cpp \
 	$(SRC_DIR)/devtools/DOMAdapter.cpp \
