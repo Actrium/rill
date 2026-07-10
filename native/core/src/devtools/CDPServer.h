@@ -95,6 +95,7 @@
 #include <vector>
 #include <atomic>
 #include <optional>
+#include <unordered_set>
 
 #include "ConnectionId.h"
 
@@ -118,6 +119,25 @@ class IEngineDebugTarget;
 using TenantId = uint32_t;
 
 // ConnectionId lives in ConnectionId.h (shared with the relay seam).
+
+// ============================================
+// HTTP Discovery Response
+// ============================================
+
+/**
+ * A minimal HTTP/1.1 response for the CDP target-discovery endpoint (the
+ * `/json*` routes chrome://inspect fetches before it opens a WebSocket).
+ *
+ * Kept deliberately small and loopback-only: no CORS / wildcard headers are ever
+ * emitted, so a discovered target list (tenant titles and URLs) can never leak
+ * off-box even if the endpoint is probed cross-origin.
+ */
+struct HttpResponse {
+  int status = 200;
+  std::string statusText = "OK";
+  std::string contentType = "application/json; charset=UTF-8";
+  std::string body;
+};
 
 // ============================================
 // WebSocket Transport Interface
@@ -150,6 +170,17 @@ public:
   using OnDisconnectCallback = std::function<void(ConnectionId connId)>;
 
   /**
+   * HTTP GET callback: a path-capable transport calls this for a plain HTTP GET
+   * (the chrome://inspect discovery probe) BEFORE any WebSocket upgrade, and
+   * writes the returned response straight back to the socket. Transports that
+   * cannot surface a plain GET (e.g. an auto-upgrading WebSocket listener) simply
+   * never invoke it; CDPServer works either way (unit code calls
+   * handleDiscoveryRequest directly).
+   */
+  using OnHttpGetCallback =
+      std::function<HttpResponse(const std::string& method, const std::string& path)>;
+
+  /**
    * Start listening on the given host:port.
    * @return true if started successfully
    */
@@ -176,11 +207,13 @@ public:
   void setOnMessage(OnMessageCallback cb) { onMessage_ = std::move(cb); }
   void setOnConnect(OnConnectCallback cb) { onConnect_ = std::move(cb); }
   void setOnDisconnect(OnDisconnectCallback cb) { onDisconnect_ = std::move(cb); }
+  void setOnHttpGet(OnHttpGetCallback cb) { onHttpGet_ = std::move(cb); }
 
 protected:
   OnMessageCallback onMessage_;
   OnConnectCallback onConnect_;
   OnDisconnectCallback onDisconnect_;
+  OnHttpGetCallback onHttpGet_;
 };
 
 /**
@@ -530,8 +563,25 @@ public:
   /**
    * Handle HTTP request (for /json target discovery)
    * @return JSON response body, empty string for 404
+   *
+   * Body-only shim over handleDiscoveryRequest, kept for callers/tests that only
+   * want the JSON body and treat 404 as empty.
    */
   std::string handleHttpRequest(const std::string& path);
+
+  /**
+   * Handle a CDP discovery HTTP request (what chrome://inspect fetches to
+   * enumerate targets). GET-only; anything else is 405. Routes:
+   *   /json, /json/list  -> 200 target list (buildTargetListJSON)
+   *   /json/version      -> 200 Browser + Protocol-Version + a single root
+   *                         webSocketDebuggerUrl (no tenant path)
+   *   /json/protocol     -> 200 {"domains":[]}
+   *   anything else      -> 404
+   * Loopback-only by construction: no CORS/wildcard headers are emitted (see
+   * HttpResponse). Safe to call with mutex_ released — it locks internally only
+   * where it needs the tenant list.
+   */
+  HttpResponse handleDiscoveryRequest(const std::string& method, const std::string& path) const;
 
 private:
   // ============================================
@@ -611,6 +661,21 @@ private:
   CDPSession* getOrCreateSessionLocked(ConnectionId connId, const CDPRequest& request);
 
   /**
+   * Create a session bound to `tenantId` for a Target.attachToTarget request and
+   * return its id. Unlike createSession this does NOT claim connectionToSession_,
+   * so one connection may hold several attached sessions at once — the sessionId
+   * multiplex, where each subsequent request names its session explicitly.
+   * Caller must hold mutex_.
+   */
+  SessionId createAttachedSessionLocked(ConnectionId connId, TenantId tenantId);
+
+  /**
+   * Build a CDP Target.TargetInfo object ("{...}") for tenant `id`.
+   * Caller must hold mutex_.
+   */
+  std::string buildTargetInfoLocked(TenantId id) const;
+
+  /**
    * Remove and return the (connection, target) bindings matching `target`
    * (nullptr = all), so the caller can invoke onClientDisconnect OUTSIDE the
    * lock. Caller must hold mutex_.
@@ -685,7 +750,10 @@ private:
   // request installs the target's persistent sink). Drives onClientDisconnect on
   // teardown so the target can drop per-connection state.
   std::unordered_map<ConnectionId, std::shared_ptr<IEngineDebugTarget>> connectionTarget_;
-  
+  // Connections that issued Target.setDiscoverTargets{discover:true}; they receive
+  // Target.targetCreated / Target.targetDestroyed as tenants come and go.
+  std::unordered_set<ConnectionId> discoveringConnections_;
+
   // Registered tenants
   std::unordered_map<TenantId, TenantInfo> tenants_;
 
@@ -720,6 +788,20 @@ std::string buildResponseJSON(int id, const std::string& result);
  * Build CDP error response JSON
  */
 std::string buildErrorJSON(int id, int code, const std::string& message);
+
+/**
+ * Frame an HttpResponse into an HTTP/1.1 wire string: status line, Content-Type,
+ * Content-Length, blank line, then body. No CORS headers by design (loopback
+ * only).
+ */
+std::string buildHttpResponse(const HttpResponse& resp);
+
+/**
+ * Insert a top-level "sessionId" member into a raw CDP message object if it does
+ * not already carry one. Used to tag a Target-attached (flatten-mode) session's
+ * outbound messages so the client can demultiplex them.
+ */
+std::string injectSessionId(const std::string& rawCdp, const SessionId& sessionId);
 
 /**
  * Escape string for JSON

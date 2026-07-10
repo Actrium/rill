@@ -28,6 +28,9 @@ struct MockTransport : public CDPTransport {
   void simulateConnect(ConnectionId c, const std::string& path = "") { if (onConnect_) onConnect_(c, path); }
   void simulateMessage(ConnectionId c, const std::string& m) { if (onMessage_) onMessage_(c, m); }
   void simulateDisconnect(ConnectionId c) { if (onDisconnect_) onDisconnect_(c); }
+  HttpResponse simulateHttpGet(const std::string& method, const std::string& path) {
+    return onHttpGet_ ? onHttpGet_(method, path) : HttpResponse{404, "Not Found", "", ""};
+  }
 };
 
 // Owns the Debugger domain but, unlike RecordingTarget, does NOT reply inside
@@ -214,6 +217,19 @@ TestSuite createDevToolsServiceTests() {
     target->emit(701, R"({"method":"Debugger.resumed","params":{}})");
     assertEqual(transport->sent.size(), size_t(1), "one message");
     assertEqual(transport->sent[0].first, ConnectionId(701), "routed to conn 701");
+    svc.stop();
+  }});
+
+  suite.cases.push_back({"the /json discovery endpoint is served over the injected transport", []() {
+    auto transport = std::make_shared<MockTransport>();
+    DevToolsService svc(transport);
+    svc.start();
+    svc.onTenantCreated(4, "App D");
+    // chrome://inspect probes /json through the transport's HTTP-GET seam.
+    HttpResponse r = transport->simulateHttpGet("GET", "/json");
+    assertEqual(r.status, 200, "200 for /json");
+    assertTrue(r.body.find("App D") != std::string::npos, "the tenant is discoverable");
+    assertEqual(transport->simulateHttpGet("POST", "/json").status, 405, "non-GET -> 405");
     svc.stop();
   }});
 

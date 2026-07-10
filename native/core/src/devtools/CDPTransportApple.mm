@@ -8,6 +8,25 @@
  *
  * Uses Network.framework C API (nw_listener_t / nw_connection_t / ws_options.h)
  * to implement a WebSocket server for Chrome DevTools Protocol.
+ *
+ * FOLLOW-UP (portable half already landed in CDPServer): the /json discovery
+ * endpoint (CDPServer::handleDiscoveryRequest + CDPTransport::setOnHttpGet) is
+ * NOT yet served by this transport. Network.framework's nw_ws listener performs
+ * the WebSocket upgrade for us and only ever yields WebSocket frames — a client
+ * that speaks plain HTTP GET / on the same port never surfaces its request line
+ * or path here, so there is nothing to hand to onHttpGet_. Two ways to wire the
+ * discovery probe when it is worth doing:
+ *   1. A second plain-TCP nw_listener (no ws options) on a sibling port that
+ *      reads the request line, calls onHttpGet_(method, path), and writes back
+ *      cdp::buildHttpResponse(...). Keep it 127.0.0.1-only, same as the ws port.
+ *   2. A single port that sniffs the first bytes of each accepted TCP connection:
+ *      a "GET ... HTTP/1.1" with no Upgrade header is answered as discovery via
+ *      onHttpGet_; anything else is handed to the ws stack.
+ * Neither is required for stock chrome://inspect: it opens the root
+ * webSocketDebuggerUrl and enumerates/attaches guests entirely over the Target
+ * domain (setDiscoverTargets / attachToTarget) that CDPServer now implements, so
+ * the sessionId multiplex is the working tenant-routing path on this transport.
+ * A WebSocket subprotocol can additionally carry a tenant hint for VS Code.
  */
 
 #import "CDPTransportApple.h"

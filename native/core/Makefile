@@ -52,6 +52,7 @@ TEST_SOURCES = \
 	$(TEST_DIR)/test_event_bus.cpp \
 	$(TEST_DIR)/test_cdp_server.cpp \
 	$(TEST_DIR)/test_cdp_adapters.cpp \
+	$(TEST_DIR)/test_cdp_discovery.cpp \
 	$(TEST_DIR)/test_engine_debug_target.cpp \
 	$(TEST_DIR)/test_adapter_debug_target.cpp \
 	$(TEST_DIR)/test_devtools_service.cpp \
