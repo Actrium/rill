@@ -140,6 +140,10 @@ std::string QuickJSEngineDebugger::toRemoteObjectJson(JSContext* ctx,
   const char* s = JS_ToCString(ctx, v);
   const std::string desc = rd::cdp::escapeJSON(s ? s : "");
   if (s) JS_FreeCString(ctx, s);
+  // Stringifying an object can run a throwing toString/Symbol.toPrimitive, which
+  // leaves a pending exception on the context. Drain it so the paused guest is
+  // exception-clean when it resumes (on web, before the Asyncify rewind).
+  JS_FreeValue(ctx, JS_GetException(ctx));
   const std::string oid = registerObject(ctx, v);
   if (JS_IsFunction(ctx, v)) {
     return "{\"type\":\"function\",\"className\":\"Function\",\"description\":\"" +
@@ -164,7 +168,11 @@ void QuickJSEngineDebugger::emitOwnProps(JSContext* ctx, JSValueConst obj,
   for (uint32_t i = 0; i < cap; ++i) {
     const char* nm = JS_AtomToCString(ctx, tab[i].atom);
     JSValue pv = JS_GetProperty(ctx, obj, tab[i].atom);
-    if (nm && !JS_IsException(pv)) {
+    if (JS_IsException(pv)) {
+      // A throwing getter left a pending exception; drain it so the paused guest
+      // stays exception-clean, and skip the property.
+      JS_FreeValue(ctx, JS_GetException(ctx));
+    } else if (nm) {
       out.push_back(
           "{\"name\":\"" + rd::cdp::escapeJSON(nm) +
           "\",\"value\":" + toRemoteObjectJson(ctx, pv) +

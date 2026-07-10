@@ -142,6 +142,9 @@ private:
   // Capture / drop the pre-unwind frame snapshot (web pause path).
   void buildSnapshot();
   void freeSnapshot();
+  // Free the dup'd JSValues held in snapshotBindings_ and clear it (web only;
+  // no-op on native, where it stays empty). Idempotent.
+  void freeSnapshotBindings();
 
   JSContext* ctx_;
 

@@ -170,11 +170,17 @@ const mutated = ev("(o.x = 5, o.x)");
 claim(9,
     before === 1 && mutated === 5,
     `cross-unwind evaluate read (o.x=${before}) then mutated (o.x=${mutated}) a captured object`);
+// A result-coercion that throws (valueOf) must be drained, not leaked into the
+// resumed guest: the export returns the INT_MIN sentinel and stays paused/clean.
+const thrown = ev("({ valueOf() { throw 1; } })");
+claim(10,
+    thrown === -2147483648 && cc("qjsd_is_paused", "number", [], []) === 1 && !settled3,
+    `throwing-coercion evaluate drained its exception (sentinel=${thrown}, still paused)`);
 cc("qjsd_resume", null, [], []);
 const r3 = await p3;
-claim(10,
+claim(11,
     r3 === 5,
-    `object mutation propagated to the guest across resume (h returned o.x=${r3})`);
+    `object mutation propagated + guest resumed exception-clean (h returned o.x=${r3})`);
 
 console.log(failures === 0 ? "\nALL CLAIMS PASS" : `\n${failures} CLAIM(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

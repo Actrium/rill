@@ -474,9 +474,29 @@ int main() {
                   std::string::npos,
           "getProperties(nested) exposes c === 3");
 
+    // Result coercion / enumeration that throws must be drained, never left
+    // pending on the paused context (or the guest resumes with a stale
+    // exception). Evaluate an object whose toString throws; getProperties an
+    // object with a throwing getter — both must return normally and skip the
+    // throwing member, and the case must still resume cleanly below.
+    std::string badToString = oEngine->evaluateOnCallFrame(
+        1, "0", "({ toString() { throw 1; }, keep: 8 })");
+    check(badToString.find("\"objectId\":\"obj:") != std::string::npos,
+          "evaluate of a throwing-toString object yields an object (drained)");
+    const std::string badId = extractObjectId(badToString);
+    std::string badProps = oEngine->getProperties(1, badId);
+    check(badProps.find("\"name\":\"keep\"") != std::string::npos,
+          "getProperties skips a throwing getter and keeps the good property");
+    std::string getterProps = oEngine->getProperties(
+        1, extractObjectId(oEngine->evaluateOnCallFrame(
+               1, "0", "({ get boom() { throw 1; }, ok: 9 })")));
+    check(getterProps.find("\"name\":\"ok\"") != std::string::npos &&
+              getterProps.find("\"name\":\"boom\"") == std::string::npos,
+          "getProperties drains a throwing getter and omits it");
+
     oTarget.dispatch(1, R"({"id":3,"method":"Debugger.resume"})");
     check(oFut.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
-          "nested objects case resumed to completion");
+          "nested objects case resumed to completion after throwing evaluates");
     oThread.join();
 
     // After resume the pause-scoped registry is emptied: the id no longer

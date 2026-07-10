@@ -117,11 +117,13 @@ int qjsd_evaluate_on_frame(int frameIndex, const char* expr) {
       JS_FreeValue(ctx, fn);
     }
     if (JS_IsException(v)) {
-      JS_FreeValue(ctx, JS_GetException(ctx));  // clear so resume stays clean
-    } else {
-      int32_t n = 0;
-      JS_ToInt32(ctx, &n, v);
-      out = n;
+      JS_FreeValue(ctx, JS_GetException(ctx));  // the call itself threw
+    } else if (JS_ToInt32(ctx, &out, v) < 0) {
+      // Coercing the result ran a throwing valueOf; drain the exception so the
+      // guest resumes exception-clean before the Asyncify rewind, and report the
+      // sentinel rather than a bogus zero.
+      JS_FreeValue(ctx, JS_GetException(ctx));
+      out = INT_MIN;
     }
     JS_FreeValue(ctx, v);
   });

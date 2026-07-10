@@ -58,6 +58,10 @@ QuickJSDebugCore::QuickJSDebugCore(JSRuntime* rt, JSContext* ctx) : ctx_(ctx) {
 
 QuickJSDebugCore::~QuickJSDebugCore() {
   rill_qjs_set_debug_hook(ctx_, nullptr, nullptr);
+  // Defensive (web): if the core is torn down while a pause is still parked (an
+  // unusual teardown-before-resume), free the snapshot dups here rather than
+  // leaking them; ctx_ still outlives the core. No-op on native / when empty.
+  freeSnapshotBindings();
 }
 
 void QuickJSDebugCore::setPausedCallback(PausedFn fn) {
@@ -160,13 +164,25 @@ bool QuickJSDebugCore::runOnPausedThread(const EvalJob& job) {
   // The job reads the pre-unwind binding snapshot (pausedBindings()), not the
   // gone live frames.
   if (!paused_) return false;
-  void* savedFrame = rill_qjs_current_frame(ctx_);
+  // Restore the frame pointer and inEval_ no matter how job() exits. A skipped
+  // restore would strand current_stack_frame at NULL (so the next GC during
+  // rewind would not root the suspended frame's live values) and leave inEval_
+  // stuck true (so the debugger never pauses again). The debug wasm builds with
+  // C++ exceptions off, so this is belt-and-suspenders today, but it keeps the
+  // invariant regardless of how job() returns.
+  struct Restore {
+    bool* inEval;
+    bool prevInEval;
+    JSContext* ctx;
+    void* savedFrame;
+    ~Restore() {
+      *inEval = prevInEval;
+      rill_qjs_set_current_frame(ctx, savedFrame);
+    }
+  } restore{&inEval_, inEval_, ctx_, rill_qjs_current_frame(ctx_)};
   rill_qjs_set_current_frame(ctx_, nullptr);
-  const bool savedInEval = inEval_;
   inEval_ = true;
   job(ctx_);
-  inEval_ = savedInEval;
-  rill_qjs_set_current_frame(ctx_, savedFrame);
   return true;
 #else
   std::unique_lock<std::mutex> lk(mutex_);
@@ -206,6 +222,15 @@ void QuickJSDebugCore::onStep(JSContext* ctx, const void* token, int line,
   // Suppress the hook while evaluating in the paused context: a re-entrant eval
   // runs on this same thread and would otherwise self-pause / recurse.
   if (inEval_) return;
+#if defined(__EMSCRIPTEN__)
+  // Web: the pause unwinds the C stack instead of blocking a thread, so guest
+  // bytecode CAN run while already parked (a second eval entry, or a host that
+  // pumps QuickJS promise jobs during the await). A nested pause is impossible
+  // to honor with the single Asyncify resolver — it would overwrite the outer
+  // resolver and hang the outer eval forever — so refuse to re-pause. (Native
+  // blocks the runtime thread inside suspendAtPause, so this cannot arise.)
+  if (paused_) return;
+#endif
   // Fire once per (source line, call depth): the same line re-entered at a
   // different depth (recursion, or a step that returns to it) must re-evaluate.
   if (token == lastToken_ && line == lastLine_ && depth == lastDepth_) return;
@@ -320,7 +345,7 @@ void QuickJSDebugCore::buildSnapshot() {
   // can reconstruct the frame scope from this immutable snapshot. Native reads
   // live frames instead and never populates this. Frame indexing matches
   // captureFrames()/rill_qjs_nth_frame (located JS frames, top first).
-  snapshotBindings_.clear();
+  freeSnapshotBindings();  // release any prior pause's dups before recapturing
   snapshotBindings_.resize(snapshotFrames_.size());
   for (std::size_t i = 0; i < snapshotFrames_.size(); ++i) {
     FrameBindings& fb = snapshotBindings_[i];
@@ -340,6 +365,10 @@ void QuickJSDebugCore::buildSnapshot() {
 
 void QuickJSDebugCore::freeSnapshot() {
   snapshotFrames_.clear();
+  freeSnapshotBindings();
+}
+
+void QuickJSDebugCore::freeSnapshotBindings() {
 #if defined(__EMSCRIPTEN__)
   for (auto& fb : snapshotBindings_) {
     for (auto& v : fb.args) JS_FreeValue(ctx_, v.value);
