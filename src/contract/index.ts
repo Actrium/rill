@@ -612,6 +612,11 @@ function wrapRpcDispatch(
  * `value` is an actual `Uint8Array`. Returns the value unchanged on success so it
  * can be run through {@link runBoundary}. Throws a short message the boundary
  * wrapper decorates with the capability + phase context.
+ *
+ * A `null`/absent whole result is passed through unchecked: it carries no fields
+ * to validate, so a nullable output that declares `binary` (e.g. a store's
+ * `getBytes(key) -> { value: Uint8Array; ... } | null` returning `null` for a
+ * missing key) is a legitimate result, not a boundary violation.
  */
 // Reason: a fail-closed backstop over an untyped boundary value; returns it unchanged for runBoundary.
 function assertBinaryFields(
@@ -620,6 +625,11 @@ function assertBinaryFields(
   phase: HostModuleBoundaryPhase
   // Reason: returns the value unchanged so runBoundary can thread it through the boundary.
 ): unknown {
+  // No whole result -> no binary fields to assert. Without this, the field walk
+  // below would reject a nullable output's legitimate `null` (or an absent input).
+  if (value == null) {
+    return value;
+  }
   for (const field of fields) {
     const fieldValue = (value as Record<string, unknown> | null | undefined)?.[field];
     if (!(fieldValue instanceof Uint8Array)) {

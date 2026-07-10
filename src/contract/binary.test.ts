@@ -191,6 +191,41 @@ describe('rill/contract binary fields', () => {
     );
   });
 
+  test('dispatch passes a null result through the binary output backstop (nullable output)', () => {
+    // A nullable output that declares binary — e.g. getBytes(key) -> {...} | null —
+    // must return null for a missing key, not trip the byte backstop on the whole null.
+    const dispatch = createHostModuleDispatch(buildStoreContract(), {
+      'host:store': {
+        putBytes: () => ({ version: 1 }),
+        getBytes: () => null as never,
+      },
+    });
+
+    expect(dispatch['host:store']!.getBytes!({ key: 'missing' })).toBeNull();
+  });
+
+  test('async impl: a null result passes the binary output backstop (nullable output)', async () => {
+    const contract = defineRillContract({
+      version: '1.0.0',
+      hostModules: {
+        'host:store': {
+          getBytes: rpc<{ key: string }, { value: Uint8Array } | null>({
+            binary: { output: ['value'] },
+          }),
+        },
+      },
+      guestExports: {},
+    });
+
+    const dispatch = createHostModuleDispatch(contract, {
+      'host:store': {
+        getBytes: async () => null,
+      },
+    });
+
+    await expect(dispatch['host:store']!.getBytes!({ key: 'missing' })).resolves.toBeNull();
+  });
+
   test('binary backstop composes with a user parseInput (parse runs, then bytes are checked)', () => {
     const contract = defineRillContract({
       version: '1.0.0',
