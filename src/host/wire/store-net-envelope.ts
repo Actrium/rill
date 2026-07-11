@@ -311,7 +311,18 @@ export function reviveSentinels(value: unknown, segments: Uint8Array[]): unknown
       }
       const out: Record<string, unknown> = {};
       for (const [k, val] of Object.entries(obj)) {
-        out[k] = walk(val);
+        // defineProperty, NOT plain assignment: the source keys are
+        // guest-controlled (JSON.parse makes '__proto__' an own property), and
+        // `out['__proto__'] = x` would SET the rebuilt object's prototype —
+        // letting a hostile envelope inject inherited fields into the args
+        // handed to host capability impls. defineProperty always creates an
+        // own data property, for every key.
+        Object.defineProperty(out, k, {
+          value: walk(val),
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
       }
       return out;
     }

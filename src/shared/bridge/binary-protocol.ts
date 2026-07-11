@@ -361,6 +361,14 @@ class BinaryDecoder {
           __fnId: this.internTable[fnIdIdx] ?? '',
         };
         const fnFlags = this.readU8();
+        // bits 3..7 are reserved and MUST be written 0 (contracts/
+        // op-batch-wire.json values.FUNCTION flags note). A set reserved bit
+        // implies unknown trailing fields we cannot length, so reject
+        // fail-closed rather than desync the stream — matching
+        // wire-decoder.ts and the C++ WireDecoder.
+        if ((fnFlags & 0xf8) !== 0) {
+          throw new Error(`FUNCTION reserved flag bit set: 0x${fnFlags.toString(16)}`);
+        }
         if ((fnFlags & 0x01) !== 0) fn.__name = this.internTable[this.readU16()] ?? '';
         if ((fnFlags & 0x02) !== 0) fn.__sourceFile = this.internTable[this.readU16()] ?? '';
         if ((fnFlags & 0x04) !== 0) fn.__sourceLine = this.readU32();

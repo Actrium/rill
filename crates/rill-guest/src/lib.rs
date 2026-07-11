@@ -110,16 +110,17 @@ pub mod rt {
     static mut TURN_DEPTH: u32 = 0;
 
     // Outstanding talc-FALLBACK allocations `(ptr, size)` that `alloc` handed out
-    // for oversized (> WIRE_SIZE) host-written buffers. `resolve` frees a return's
-    // SOURCE buffer by looking it up here — so it frees ONLY buffers the guest
-    // itself allocated, exactly once. This is the load-bearing safety invariant:
-    // `resolve` is a raw ABI entry whose `ptr` is guest-allocated in the real host
-    // (the host always writes via `rill_alloc` first), but a test harness or a
-    // misbehaving host could pass a foreign pointer; matching against this table
-    // means such a pointer is NEVER wild-freed (a bare "off-arena => free" rule
-    // would double-free it). Arena buffers are recycled per turn and never appear
-    // here. Bounded by MAX_FALLBACK_TRACKED so a fallback with no matching resolve
-    // (e.g. an oversized event payload) cannot grow it without limit.
+    // for oversized (> WIRE_SIZE) host-written buffers. Each host->guest entry
+    // frees its SOURCE buffers by looking them up here after copying/consuming
+    // (`resolve` for returns, `events::dispatch` for events) — so it frees ONLY
+    // buffers the guest itself allocated, exactly once. This is the load-bearing
+    // safety invariant: these are raw ABI entries whose `ptr` is guest-allocated
+    // in the real host (the host always writes via `rill_alloc` first), but a
+    // test harness or a misbehaving host could pass a foreign pointer; matching
+    // against this table means such a pointer is NEVER wild-freed (a bare
+    // "off-arena => free" rule would double-free it). Arena buffers are recycled
+    // per turn and never appear here. Bounded by MAX_FALLBACK_TRACKED so a
+    // fallback whose entry never consumes it cannot grow the table without limit.
     static mut FALLBACK_ALLOCS: Vec<(usize, usize)> = Vec::new();
     pub(crate) const MAX_FALLBACK_TRACKED: usize = 64;
 
@@ -182,8 +183,8 @@ pub mod rt {
     /// # Safety
     /// If `ptr` is tracked, it must still be live (not already freed) — upheld
     /// because a fallback ptr is recorded once by `alloc` and removed on the first
-    /// matching `resolve`.
-    unsafe fn free_fallback_source(ptr: *const u8) {
+    /// matching entry consumer (`resolve`, or `events::dispatch` for events).
+    pub(crate) unsafe fn free_fallback_source(ptr: *const u8) {
         if wire_contains(ptr) {
             return; // arena buffer: recycled per turn, never freed here
         }
@@ -208,10 +209,9 @@ pub mod rt {
     ///
     /// Host-written wire buffers come from the per-turn WIRE arena (recycled at
     /// each outermost turn boundary); an oversized request falls back to the
-    /// global heap (talc) and is recorded in FALLBACK_ALLOCS so the return path
-    /// (`resolve`) can free it after copying it out. A fallback with no matching
-    /// resolve (e.g. an oversized event payload) still relies on the per-turn
-    /// recycle for its arena-side reads and leaks the buffer bounded per turn.
+    /// global heap (talc) and is recorded in FALLBACK_ALLOCS so the consuming
+    /// entry can free it after copying it out — `resolve` for returns,
+    /// `events::dispatch` for event name/payload.
     pub fn alloc(size: usize) -> *mut u8 {
         unsafe {
             let need = size.max(1);
@@ -2211,6 +2211,14 @@ pub mod events {
         for handler in &matched {
             handler(payload);
         }
+        // The payload is fully consumed here (handlers get a &[u8] that must
+        // not escape the call), so an OVERSIZED (> WIRE_SIZE) buffer that took
+        // the talc fallback in `alloc` has no other owner — free it now, same
+        // as `resolve` does for returns. Without this every oversized event
+        // payload leaked, so repeated large events grew wasm memory linearly.
+        // Arena buffers and foreign pointers are untouched (table-matched).
+        crate::rt::free_fallback_source(name_ptr);
+        crate::rt::free_fallback_source(payload_ptr);
         crate::rt::end_wire_turn();
     }
 }
@@ -2833,6 +2841,60 @@ mod tests {
             // Tidy up: a left-full table would perturb other rt tests' fallback
             // deltas (they hold the same lock, so ordering is otherwise serialized).
             rt::clear_fallback();
+        }
+
+        /// events::dispatch must free an OVERSIZED (off-arena talc fallback)
+        /// event payload after the handlers consumed it — the event twin of
+        /// `return_path_frees_oversized_fallback_no_leak`. Before the fix every
+        /// oversized event payload leaked, so repeated large events grew wasm
+        /// memory linearly.
+        #[test]
+        fn event_dispatch_frees_oversized_fallback_no_leak() {
+            use crate::rt;
+
+            // Serialize with every other rt-static-touching test.
+            let _guard = crate::wire_lock();
+
+            const BIG: usize = rt::WIRE_SIZE + 4096;
+            let fb_baseline = rt::fallback_count();
+
+            // The handler proves the payload survives intact up to dispatch.
+            let seen = std::rc::Rc::new(core::cell::Cell::new(0usize));
+            let seen_in_handler = seen.clone();
+            let handler_id = crate::events::on("bigload", move |payload| {
+                seen_in_handler.set(payload.len());
+            });
+
+            for _ in 0..8 {
+                // The host writes name + payload via rill_alloc before calling
+                // rill_on_event; the payload is oversized so it takes the
+                // off-arena fallback (the only path that could leak).
+                let name = b"bigload";
+                let name_ptr = rt::alloc(name.len());
+                assert!(!name_ptr.is_null(), "name alloc must succeed");
+                unsafe {
+                    core::ptr::copy_nonoverlapping(name.as_ptr(), name_ptr, name.len());
+                }
+                let payload_ptr = rt::alloc(BIG);
+                assert!(!payload_ptr.is_null(), "payload alloc must succeed");
+                assert!(
+                    !rt::wire_contains(payload_ptr),
+                    "an oversized event payload must fall back off-arena"
+                );
+                unsafe {
+                    core::ptr::write_bytes(payload_ptr, 0xAB, BIG);
+                    crate::events::dispatch(name_ptr, name.len(), payload_ptr, BIG);
+                }
+                assert_eq!(seen.get(), BIG, "handler must see the full payload");
+            }
+
+            assert_eq!(
+                rt::fallback_count(),
+                fb_baseline,
+                "every oversized event payload must be freed after dispatch"
+            );
+
+            crate::events::off(handler_id);
         }
     }
 }

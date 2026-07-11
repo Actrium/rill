@@ -412,3 +412,29 @@ describe('store-net-envelope — golden cross-language lock', () => {
     });
   }
 });
+
+describe('reviveSentinels prototype-pollution hardening', () => {
+  // JSON.parse makes '__proto__' an OWN property; the pre-fix rebuild used
+  // plain assignment, which SET the rebuilt object's prototype instead —
+  // letting a hostile guest envelope inject inherited fields into the args
+  // handed to host capability impls.
+  it('a guest __proto__ key becomes an own data property, never the prototype', () => {
+    const hostile = JSON.parse('{"__proto__":{"polluted":true},"x":{"$b":0}}');
+    const seg = new Uint8Array([1, 2, 3]);
+
+    const revived = reviveSentinels(hostile, [seg]) as Record<string, unknown>;
+
+    // The prototype is untouched (no inherited 'polluted' field)...
+    expect(Object.getPrototypeOf(revived)).toBe(Object.prototype);
+    expect((revived as { polluted?: unknown }).polluted).toBeUndefined();
+    // ...Object.prototype itself is not polluted either...
+    expect(({}as { polluted?: unknown }).polluted).toBeUndefined();
+    // ...and the key survives as a plain OWN property with its walked value.
+    expect(Object.hasOwn(revived, '__proto__')).toBe(true);
+    expect(Object.getOwnPropertyDescriptor(revived, '__proto__')?.value).toEqual({
+      polluted: true,
+    });
+    // The sentinel next to it still revives normally.
+    expect(revived.x).toEqual(seg);
+  });
+});

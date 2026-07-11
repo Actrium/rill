@@ -651,3 +651,30 @@ describe('FUNCTION anti-drift (legacy codec ⇄ schema)', () => {
     expect(toHex(bytes)).toBe(golden);
   });
 });
+
+// ============================================
+// Fail-closed: FUNCTION reserved flag bits
+// ============================================
+
+describe('BinaryProtocol FUNCTION reserved flag bits (fail-closed)', () => {
+  it('rejects a batch whose FUNCTION flags byte has a reserved bit set', () => {
+    const protocol = new BinaryProtocol({ encoding: 'binary' });
+    // A single CREATE whose only prop is a metadata-free function: the wire
+    // then ends [..., ValueType.FUNCTION, fnId u16, flags u8], so the flags
+    // byte is the LAST byte of the buffer (0x00 for no metadata).
+    const batch = createTestBatch([
+      createCreateOp(1, 'View', { onPress: { __type: 'function', __fnId: 'fn-1' } }),
+    ]);
+    const encoded = protocol.encodeBatch(batch) as ArrayBuffer;
+    const bytes = new Uint8Array(encoded.slice(0));
+    expect(bytes[bytes.length - 1]).toBe(0x00); // sanity: metadata-free flags
+
+    // Sanity: the untampered buffer round-trips.
+    expect(protocol.decodeBatch(bytes.buffer.slice(0))).toEqual(batch);
+
+    // bits 3..7 are reserved and MUST be 0; a set bit implies unknown
+    // trailing fields the decoder cannot length — reject, never desync.
+    bytes[bytes.length - 1] = 0x08;
+    expect(() => protocol.decodeBatch(bytes.buffer)).toThrow(/reserved flag bit/);
+  });
+});
