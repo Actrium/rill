@@ -438,3 +438,44 @@ describe('reviveSentinels prototype-pollution hardening', () => {
     expect(revived.x).toEqual(seg);
   });
 });
+
+describe('hoistSentinels prototype-pollution hardening (outbound twin)', () => {
+  // The encode direction had the same plain-assignment hazard: a byte-carrying
+  // result whose object holds an OWN '__proto__' key (e.g. data round-tripped
+  // through JSON.parse) would set the rebuilt object's prototype instead,
+  // silently dropping the field from the encoded control JSON.
+  it("a result's own __proto__ key survives encoding as a field, not a prototype", () => {
+    const result = JSON.parse('{"__proto__":{"kept":1},"pad":true}') as Record<string, unknown>;
+    // Reason: attaching bytes to the parsed object; test-local shape.
+    (result as { blob?: Uint8Array }).blob = new Uint8Array([9, 9]);
+
+    const { control, segments } = hoistSentinels(result);
+
+    expect(segments).toHaveLength(1);
+    const ctrl = control as Record<string, unknown>;
+    // The key is an own data property of the walked control value...
+    expect(Object.hasOwn(ctrl, '__proto__')).toBe(true);
+    expect(Object.getPrototypeOf(ctrl)).toBe(Object.prototype);
+    // ...and it survives JSON serialization (the wire bytes), where the
+    // pre-fix prototype-set made it vanish entirely.
+    const encoded = JSON.parse(JSON.stringify(control)) as Record<string, unknown>;
+    expect(Object.getOwnPropertyDescriptor(encoded, '__proto__')?.value).toEqual({ kept: 1 });
+    expect(encoded.pad).toBe(true);
+  });
+
+  it('round-trip: an own __proto__ field survives hoist -> revive intact', () => {
+    const original = JSON.parse('{"__proto__":{"kept":1}}') as Record<string, unknown>;
+    // Reason: attaching bytes to the parsed object; test-local shape.
+    (original as { blob?: Uint8Array }).blob = new Uint8Array([7]);
+
+    const { control, segments } = hoistSentinels(original);
+    const revived = reviveSentinels(
+      JSON.parse(JSON.stringify(control)),
+      segments
+    ) as Record<string, unknown>;
+
+    expect(Object.getPrototypeOf(revived)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(revived, '__proto__')?.value).toEqual({ kept: 1 });
+    expect(revived.blob).toEqual(new Uint8Array([7]));
+  });
+});

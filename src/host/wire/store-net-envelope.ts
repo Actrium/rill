@@ -268,7 +268,18 @@ export function hoistSentinels(value: unknown): Hoisted {
       }
       const out: Record<string, unknown> = {};
       for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
-        out[k] = walk(val);
+        // defineProperty, NOT plain assignment — the outbound twin of the
+        // reviveSentinels hardening: a result carrying an own '__proto__' key
+        // (e.g. data round-tripped through JSON.parse) would otherwise SET
+        // the rebuilt object's prototype, silently DROPPING the field from
+        // the encoded control JSON. defineProperty always creates an own
+        // data property, so every key survives encoding.
+        Object.defineProperty(out, k, {
+          value: walk(val),
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
       }
       return out;
     }
