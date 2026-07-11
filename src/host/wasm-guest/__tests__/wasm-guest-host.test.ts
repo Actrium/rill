@@ -196,7 +196,9 @@ describe('WasmGuestHost — native guest renders UI via the receiver', () => {
     const tree = receiver.getComponentTree();
     expect(tree?.type).toBe('View');
     expect(tree?.children).toHaveLength(2);
-    expect(tree?.children[0].type).toBe('Text');
+    // Text nodes must arrive as '__TEXT__' + props.text — the only shape the
+    // receiver's renderNode() renders as Text children (same as the JS guest).
+    expect(tree?.children[0].type).toBe('__TEXT__');
     expect(tree?.children[0].props.text).toBe('hello from rust');
     expect(tree?.children[1].type).toBe('View');
     expect(tree?.children[1].children[0].props.text).toBe('nested');
@@ -330,6 +332,7 @@ describe('WasmGuestHost — C guest via the C SDK (language-neutral ABI)', () =>
 
     const tree = receiver.getComponentTree();
     expect(tree?.type).toBe('View');
+    expect(tree?.children[0].type).toBe('__TEXT__');
     expect(tree?.children[0].props.text).toBe('hello from c');
   });
 });

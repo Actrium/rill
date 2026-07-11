@@ -1787,8 +1787,10 @@ pub mod gpu {
 }
 
 /// Declarative UI: build a small element tree and `render` it. The guest sends a
-/// render batch (CREATE / TEXT / APPEND ops) the host `receiver` materializes —
-/// the same rendering path JS guests use, only the batch is authored in Rust.
+/// render batch (CREATE / APPEND ops; text nodes are CREATE type "__TEXT__"
+/// with props.text, matching the JS reconciler) the host `receiver`
+/// materializes — the same rendering path JS guests use, only the batch is
+/// authored in Rust.
 pub mod ui {
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -1883,15 +1885,18 @@ fn emit_node(ops: &mut alloc::string::String, node: &ui::Node, next_id: &mut u32
             }
         }
         ui::Node::Text(content) => {
-            push_op(
-                ops,
-                format!("{{\"op\":\"CREATE\",\"id\":{id},\"type\":\"Text\",\"props\":{{}}}}"),
-            );
+            // Text nodes must be CREATE type "__TEXT__" with props.text — the
+            // only shape the host receiver's renderNode() routes through the
+            // Text-as-children branch, and what the JS reconciler emits
+            // (createTextInstance). A "Text"-typed node falls into the generic
+            // component branch and renders no children.
             let mut escaped = alloc::string::String::new();
             json_escape(&mut escaped, content);
             push_op(
                 ops,
-                format!("{{\"op\":\"TEXT\",\"id\":{id},\"text\":{escaped}}}"),
+                format!(
+                    "{{\"op\":\"CREATE\",\"id\":{id},\"type\":\"__TEXT__\",\"props\":{{\"text\":{escaped}}}}}"
+                ),
             );
         }
         ui::Node::Canvas {
