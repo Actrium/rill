@@ -1,11 +1,37 @@
 #include "QuickJSSandboxJSI.h"
 #include <cstring>
 #include <sstream>
+#include <vector>
 #ifdef _WIN32
 #include <windows.h>
 #endif
 
 namespace quickjs_sandbox {
+
+namespace {
+// Byte-owning jsi::MutableBuffer used to rebuild a HOST-realm ArrayBuffer from
+// bytes copied out of the sandbox. A copy is mandatory: the sandbox value's
+// backing store dies with the sandbox GC, and the two realms must never alias
+// each other's memory.
+class VectorBuffer : public jsi::MutableBuffer {
+public:
+  VectorBuffer(const uint8_t *data, size_t size) : bytes_(data, data + size) {}
+  size_t size() const override { return bytes_.size(); }
+  uint8_t *data() override { return bytes_.data(); }
+
+private:
+  std::vector<uint8_t> bytes_;
+};
+
+// Copy `size` bytes into a fresh host-realm ArrayBuffer. Throws jsi::JSError
+// if the host runtime does not implement createArrayBuffer — a loud failure
+// at the boundary, never a silent empty object.
+jsi::Value makeHostArrayBuffer(jsi::Runtime &rt, const uint8_t *data,
+                               size_t size) {
+  auto buffer = std::make_shared<VectorBuffer>(data, size);
+  return jsi::ArrayBuffer(rt, std::move(buffer));
+}
+} // namespace
 
 // Static counter for sandbox functions
 static int g_sandboxFuncCounter = 0;
@@ -676,6 +702,75 @@ jsi::Value QuickJSSandboxContext::qjsToJSI(jsi::Runtime &rt, JSValue value,
         });
   }
   if (JS_IsObject(value)) {
+    // Binary passthrough — MUST come before the generic property copy. An
+    // ArrayBuffer has zero own enumerable string props, so the generic branch
+    // would emit an empty host object and silently destroy the bytes (the
+    // binary op-batch failure mode). Bytes are COPIED into the host realm.
+    if (JS_IsArrayBuffer(qjsContext_, value)) {
+      size_t abSize = 0;
+      uint8_t *abData = JS_GetArrayBuffer(qjsContext_, &abSize, value);
+      if (abData || abSize == 0) {
+        return makeHostArrayBuffer(rt, abData, abSize);
+      }
+      // Detached buffer: JS_GetArrayBuffer set an exception — clear it and
+      // fall through to the generic copy (which yields {}), matching JS
+      // structured-clone's refusal to carry detached buffers.
+      JS_FreeValue(qjsContext_, JS_GetException(qjsContext_));
+    } else {
+      // Typed-array view (Uint8Array & friends): rebuild the view's byte
+      // WINDOW as a host ArrayBuffer, then re-wrap it in the same-named view
+      // constructor when the host realm has one. JS_GetTypedArrayBuffer
+      // throws for non-views — a cleared exception is the "not a view" probe.
+      size_t viewOffset = 0, viewLength = 0, bytesPerElement = 0;
+      JSValue backing = JS_GetTypedArrayBuffer(qjsContext_, value, &viewOffset,
+                                               &viewLength, &bytesPerElement);
+      if (!JS_IsException(backing)) {
+        size_t backingSize = 0;
+        uint8_t *backingData =
+            JS_GetArrayBuffer(qjsContext_, &backingSize, backing);
+        jsi::Value hostValue = jsi::Value::undefined();
+        if (backingData && viewOffset + viewLength <= backingSize) {
+          hostValue =
+              makeHostArrayBuffer(rt, backingData + viewOffset, viewLength);
+          // Same-kind view reconstruction (e.g. Uint8Array): best-effort — a
+          // host realm without the constructor still gets the raw bytes.
+          JSValue ctor = JS_GetPropertyStr(qjsContext_, value, "constructor");
+          if (!JS_IsException(ctor)) {
+            JSValue ctorName = JS_GetPropertyStr(qjsContext_, ctor, "name");
+            const char *name = JS_IsString(ctorName)
+                                   ? JS_ToCString(qjsContext_, ctorName)
+                                   : nullptr;
+            if (name) {
+              jsi::Object global = rt.global();
+              if (global.hasProperty(rt, name)) {
+                jsi::Value hostCtor = global.getProperty(rt, name);
+                if (hostCtor.isObject() &&
+                    hostCtor.getObject(rt).isFunction(rt)) {
+                  hostValue = hostCtor.getObject(rt)
+                                  .getFunction(rt)
+                                  .callAsConstructor(rt, hostValue);
+                }
+              }
+              JS_FreeCString(qjsContext_, name);
+            }
+            JS_FreeValue(qjsContext_, ctorName);
+            JS_FreeValue(qjsContext_, ctor);
+          } else {
+            JS_FreeValue(qjsContext_, JS_GetException(qjsContext_));
+          }
+        } else if (!backingData) {
+          JS_FreeValue(qjsContext_, JS_GetException(qjsContext_));
+        }
+        JS_FreeValue(qjsContext_, backing);
+        if (!hostValue.isUndefined()) {
+          return hostValue;
+        }
+      } else {
+        // Not a typed array — clear the probe's exception and fall through.
+        JS_FreeValue(qjsContext_, JS_GetException(qjsContext_));
+      }
+    }
+
     jsi::Object jsiObj = jsi::Object(rt);
 
     // Get property names

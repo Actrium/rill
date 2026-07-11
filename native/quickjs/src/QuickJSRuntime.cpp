@@ -1102,6 +1102,10 @@ QuickJSRuntime::createArrayBuffer(std::shared_ptr<jsi::MutableBuffer> buffer) {
     checkAndThrowException(context_);
   }
 
+  // QuickJSPointerValue DUPS the value; the reference JS_NewArrayBuffer handed
+  // us must be released on scope exit (same pattern as createObject) or the
+  // buffer leaks a refcount and JS_FreeRuntime asserts on gc_obj_list.
+  ScopedJSValue scopedJsValue(context_, &arrayBuffer);
   return make<jsi::ArrayBuffer>(
       new QuickJSPointerValue(runtime_, context_, arrayBuffer));
 }
@@ -1121,13 +1125,19 @@ bool QuickJSRuntime::strictEquals(const jsi::BigInt &a,
 }
 
 jsi::BigInt QuickJSRuntime::createBigIntFromInt64(int64_t v) {
+  // Same refcount rule as createArrayBuffer: release the constructor's
+  // reference once the PointerValue holds its own dup.
+  JSValue bigint = JS_NewBigInt64(context_, v);
+  ScopedJSValue scopedJsValue(context_, &bigint);
   return make<jsi::BigInt>(
-      new QuickJSPointerValue(runtime_, context_, JS_NewBigInt64(context_, v)));
+      new QuickJSPointerValue(runtime_, context_, bigint));
 }
 
 jsi::BigInt QuickJSRuntime::createBigIntFromUint64(uint64_t v) {
-  return make<jsi::BigInt>(new QuickJSPointerValue(
-      runtime_, context_, JS_NewBigUint64(context_, v)));
+  JSValue bigint = JS_NewBigUint64(context_, v);
+  ScopedJSValue scopedJsValue(context_, &bigint);
+  return make<jsi::BigInt>(
+      new QuickJSPointerValue(runtime_, context_, bigint));
 }
 
 jsi::String QuickJSRuntime::bigintToString(const jsi::BigInt &value,
