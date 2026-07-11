@@ -82,23 +82,25 @@ bool extractHostViewBytes(jsi::Runtime &hostRt, const jsi::Object &obj,
     return false;
   }
 
+  // Bound byteOffset/byteLength by the REAL backing size in the DOUBLE domain
+  // before narrowing to size_t. backingSize is a true allocation (<< 2^53, so
+  // exactly representable as double); this closes the 2^64-rounding hole of
+  // static_cast<double>(SIZE_MAX) — where byteOffset == 2**64 slips past and
+  // then casts out of range — and makes the narrowing below lossless.
+  jsi::ArrayBuffer backing = bufferObj.getArrayBuffer(hostRt);
+  const size_t backingSize = backing.size(hostRt);
+  const double backingSizeD = static_cast<double>(backingSize);
   const double offsetD = offsetVal.getNumber();
   const double lengthD = lengthVal.getNumber();
   if (!std::isfinite(offsetD) || !std::isfinite(lengthD) || offsetD < 0 ||
       lengthD < 0 || offsetD != std::floor(offsetD) ||
-      lengthD != std::floor(lengthD) ||
-      offsetD > static_cast<double>(SIZE_MAX) ||
-      lengthD > static_cast<double>(SIZE_MAX)) {
+      lengthD != std::floor(lengthD) || offsetD > backingSizeD ||
+      lengthD > backingSizeD - offsetD) {
     return false;
   }
 
-  jsi::ArrayBuffer backing = bufferObj.getArrayBuffer(hostRt);
-  const size_t backingSize = backing.size(hostRt);
   const auto offset = static_cast<size_t>(offsetD);
   const auto length = static_cast<size_t>(lengthD);
-  if (offset > backingSize || length > backingSize - offset) {
-    return false;
-  }
 
   const uint8_t *base = backing.data(hostRt) + offset;
   out.assign(base, base + length);

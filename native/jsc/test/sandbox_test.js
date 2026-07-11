@@ -547,6 +547,27 @@
     evalAb instanceof ArrayBuffer && new Uint8Array(evalAb)[0] === 9,
     'eval-returned ArrayBuffer crosses intact'
   );
+
+  // A merely view-SHAPED plain object with an out-of-range byteOffset must be
+  // rejected by extractHostViewBytes (bounded in the double domain against the
+  // real backing size) and fall through to the generic object copy — never a
+  // UB size_t cast. 2**64 specifically defeats a naive static_cast<double>
+  // (SIZE_MAX) upper bound, which rounds up to 2**64.
+  binCtx.inject('getFakeView', () => ({
+    constructor: { name: 'Uint8Array' },
+    buffer: new ArrayBuffer(4),
+    byteOffset: Math.pow(2, 64),
+    byteLength: 2,
+  }));
+  assert(
+    binCtx.eval(
+      'var v = getFakeView();' +
+        // Not real bytes: a plain object copy, NOT a Uint8Array / ArrayBuffer.
+        '!(v instanceof Uint8Array) && !(v instanceof ArrayBuffer) && ' +
+        'typeof v === "object" && v.byteLength === 2 && v.byteOffset === Math.pow(2,64)'
+    ) === true,
+    'fake view with byteOffset 2**64 is rejected, copied as a plain object (no UB cast)'
+  );
   binRt.dispose();
 
   // Summary

@@ -319,24 +319,25 @@ jsi::Value copyArrayBufferViewAcross(jsi::Runtime &srcRt, jsi::Runtime &dstRt,
   // object (constructor.name in the allowlist, an ArrayBuffer `buffer`) can
   // carry byteOffset/byteLength of NaN, Infinity, negative, or non-integer;
   // casting those to size_t first is UB / implementation-defined, so a
-  // post-cast range check cannot catch them.
+  // post-cast range check cannot catch them. Bound against the REAL backing
+  // size in the double domain: backingSize is a true allocation (<< 2^53, so
+  // exactly representable as double), which closes the 2^64-rounding hole of
+  // static_cast<double>(SIZE_MAX) — where byteOffset == 2**64 slips past and
+  // then casts out of range — and makes the narrowing below lossless.
+  jsi::ArrayBuffer backing = bufferObj.getArrayBuffer(srcRt);
+  const size_t backingSize = backing.size(srcRt);
+  const double backingSizeD = static_cast<double>(backingSize);
   const double offsetD = offsetVal.getNumber();
   const double lengthD = lengthVal.getNumber();
   if (!std::isfinite(offsetD) || !std::isfinite(lengthD) || offsetD < 0 ||
       lengthD < 0 || offsetD != std::floor(offsetD) ||
-      lengthD != std::floor(lengthD) ||
-      offsetD > static_cast<double>(SIZE_MAX) ||
-      lengthD > static_cast<double>(SIZE_MAX)) {
+      lengthD != std::floor(lengthD) || offsetD > backingSizeD ||
+      lengthD > backingSizeD - offsetD) {
     return jsi::Value::undefined();
   }
 
-  jsi::ArrayBuffer backing = bufferObj.getArrayBuffer(srcRt);
-  const size_t backingSize = backing.size(srcRt);
   const auto offset = static_cast<size_t>(offsetD);
   const auto length = static_cast<size_t>(lengthD);
-  if (offset > backingSize || length > backingSize - offset) {
-    return jsi::Value::undefined();
-  }
 
   jsi::Value dstBuffer =
       makeArrayBufferIn(dstRt, backing.data(srcRt) + offset, length);
