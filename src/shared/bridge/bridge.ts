@@ -238,7 +238,34 @@ export class Bridge {
     if (this.debug) {
       console.log('[Bridge] sendRawBatch input:', batch);
     }
+    Bridge.assertRawBatchShape(batch);
     this.dispatchSerializedBatch(this.encodeBatch(batch).serialized);
+  }
+
+  /**
+   * Guard sendRawBatch against structurally-broken input so failures surface
+   * as an attributable error instead of a TypeError deep in encodeBatch. The
+   * signature case is a guest-realm ArrayBuffer that a sandbox boundary
+   * converter (JSI / QuickJS JSON bridge) degraded into a plain empty object —
+   * the batch bytes are already lost by then, and only the boundary can be
+   * fixed, so name it explicitly.
+   */
+  private static assertRawBatchShape(batch: OperationBatch): void {
+    if (typeof batch !== 'object' || batch === null || Array.isArray(batch)) {
+      throw new Error(
+        `[Bridge] sendRawBatch: expected an OperationBatch object, got ${batch === null ? 'null' : Array.isArray(batch) ? 'array' : typeof batch}`
+      );
+    }
+    if (!Array.isArray((batch as { operations?: unknown }).operations)) {
+      const keyCount = Object.keys(batch).length;
+      const hint =
+        keyCount === 0
+          ? ' — an empty object here usually means the guest sent a binary ArrayBuffer that the sandbox boundary cannot carry (converter lacks ArrayBuffer support); keep binary op-batch gated off on this provider'
+          : '';
+      throw new Error(
+        `[Bridge] sendRawBatch: batch.operations must be an array, got ${typeof (batch as { operations?: unknown }).operations}${hint}`
+      );
+    }
   }
 
   /**

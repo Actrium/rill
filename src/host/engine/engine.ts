@@ -1201,9 +1201,29 @@ export class Engine implements IEngine {
       if (!this.bridge) return;
       if (batch instanceof ArrayBuffer) {
         this.bridge.sendBinaryBatch(batch);
+      } else if (ArrayBuffer.isView(batch)) {
+        // Typed-array view (e.g. Uint8Array from a boundary that rebuilds
+        // views rather than bare ArrayBuffers): hand the exact byte window on.
+        const view = batch as ArrayBufferView;
+        this.bridge.sendBinaryBatch(
+          view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength) as ArrayBuffer
+        );
       } else if (typeof batch === 'string') {
         this.bridge.sendJsonBatch(batch);
       } else {
+        if (
+          batch &&
+          typeof batch === 'object' &&
+          Object.keys(batch as object).length === 0 &&
+          !(batch as OperationBatch).operations
+        ) {
+          // A batch with zero own keys is the signature of a guest ArrayBuffer
+          // destroyed by a sandbox boundary converter without ArrayBuffer
+          // support — attribute the failure to the boundary, not the Bridge.
+          logger.error(
+            `[rill:${this.id}] sendToHost received an empty object — likely a binary batch lost at the sandbox boundary (converter lacks ArrayBuffer support); binary op-batch must stay disabled on this provider`
+          );
+        }
         this.bridge.sendRawBatch(batch as OperationBatch);
       }
     };
