@@ -527,8 +527,7 @@ function validateBinaryFields(value: unknown, label: string): void {
     for (const name of list) {
       // A trailing '?' is the optional-field marker; the name before it must
       // still be non-empty (a bare '?' names no field).
-      const fieldName =
-        typeof name === 'string' && name.endsWith('?') ? name.slice(0, -1) : name;
+      const fieldName = typeof name === 'string' && name.endsWith('?') ? name.slice(0, -1) : name;
       if (typeof fieldName !== 'string' || fieldName.length === 0) {
         throw new Error(
           `[rill/contract] Descriptor "${label}" binary.${direction} must contain non-empty field-name strings.`
