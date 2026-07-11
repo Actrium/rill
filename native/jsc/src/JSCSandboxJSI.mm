@@ -1157,16 +1157,20 @@ jsi::Value JSCSandboxContext::jsValueToJSI(jsi::Runtime &rt, void *jsValue,
                   rt, static_cast<const uint8_t *>(bytes), byteLength);
             }
           } else {
-            // Typed-array view. JSObjectGetTypedArrayBytesPtr returns the
-            // VIEW's data start (byteOffset already applied, per WebKit's
-            // vector() semantics) — do not add the offset again.
+            // Typed-array view. Verified on-device (macOS 26 JSC):
+            // JSObjectGetTypedArrayBytesPtr returns the BACKING ArrayBuffer's
+            // start, NOT the view's data start — the view's byteOffset must
+            // be applied explicitly or a subarray crosses with shifted bytes.
             void *bytes = JSObjectGetTypedArrayBytesPtr(ctxRef, objRef, &exc);
             size_t byteLength =
                 exc ? 0 : JSObjectGetTypedArrayByteLength(ctxRef, objRef, &exc);
+            size_t byteOffset =
+                exc ? 0 : JSObjectGetTypedArrayByteOffset(ctxRef, objRef, &exc);
             if (!exc && bytes) {
               if (addedToVisited) visited->erase(valueRef);
               jsi::Value hostBuffer = makeHostArrayBuffer(
-                  rt, static_cast<const uint8_t *>(bytes), byteLength);
+                  rt, static_cast<const uint8_t *>(bytes) + byteOffset,
+                  byteLength);
               // Same-kind reconstruction, best-effort: a host realm without
               // the constructor still gets the raw bytes.
               const char *ctorName = typedArrayCtorName(typedArrayType);
