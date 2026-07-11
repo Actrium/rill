@@ -256,6 +256,7 @@ export class Bridge {
         `[Bridge] sendRawBatch: expected an OperationBatch object, got ${batch === null ? 'null' : Array.isArray(batch) ? 'array' : typeof batch}`
       );
     }
+    // Reason: probing an untrusted object's field before it is proven to be an array
     if (!Array.isArray((batch as { operations?: unknown }).operations)) {
       const keyCount = Object.keys(batch).length;
       const hint =
@@ -263,6 +264,7 @@ export class Bridge {
           ? ' — an empty object here usually means the guest sent a binary ArrayBuffer that the sandbox boundary cannot carry (converter lacks ArrayBuffer support); keep binary op-batch gated off on this provider'
           : '';
       throw new Error(
+        // Reason: reporting the same unproven field's typeof in the error message
         `[Bridge] sendRawBatch: batch.operations must be an array, got ${typeof (batch as { operations?: unknown }).operations}${hint}`
       );
     }
