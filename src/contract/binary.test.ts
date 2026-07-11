@@ -315,3 +315,101 @@ describe('rill/contract binary field-name types (compile-time)', () => {
     expect(true).toBe(true);
   });
 });
+
+describe('rill/contract optional binary fields (trailing ? marker)', () => {
+  // issue #29: an optional/nullable binary FIELD (an absent optional body, a
+  // null value inside a present result) could not be declared — the backstop
+  // rejected legitimate absence. The trailing '?' marker tolerates absence
+  // while keeping the Uint8Array requirement when the field is present.
+  function buildOptionalBodyContract() {
+    return defineRillContract({
+      version: '1.0.0',
+      hostModules: {
+        'host:net': {
+          request: rpc<
+            { url: string; body?: Uint8Array },
+            { status: number; payload: Uint8Array | null }
+          >({
+            binary: { input: ['body?'], output: ['payload?'] },
+          }),
+        },
+      },
+      guestExports: {},
+    });
+  }
+
+  test('an absent optional binary input passes the backstop', () => {
+    const dispatch = createHostModuleDispatch(buildOptionalBodyContract(), {
+      'host:net': {
+        request: () => ({ status: 204, payload: null }),
+      },
+    });
+
+    expect(dispatch['host:net']!.request!({ url: 'demo://x' })).toEqual({
+      status: 204,
+      payload: null,
+    });
+  });
+
+  test('a null optional binary output field passes the backstop', () => {
+    const dispatch = createHostModuleDispatch(buildOptionalBodyContract(), {
+      'host:net': {
+        request: () => ({ status: 200, payload: null }),
+      },
+    });
+
+    expect(
+      dispatch['host:net']!.request!({ url: 'demo://x', body: new Uint8Array([1]) })
+    ).toEqual({ status: 200, payload: null });
+  });
+
+  test('a PRESENT optional binary field must still be a real Uint8Array', () => {
+    const dispatch = createHostModuleDispatch(buildOptionalBodyContract(), {
+      'host:net': {
+        request: () => ({ status: 200, payload: [1, 2, 3] }) as never,
+      },
+    });
+
+    expect(() =>
+      dispatch['host:net']!.request!({ url: 'demo://x' })
+    ).toThrow('binary output field "payload" must be a Uint8Array when present');
+  });
+
+  test('an UNMARKED (required) binary field keeps failing closed on absence', () => {
+    const contract = defineRillContract({
+      version: '1.0.0',
+      hostModules: {
+        'host:store': {
+          getBytes: rpc<{ key: string }, { value: Uint8Array }>({
+            binary: { output: ['value'] },
+          }),
+        },
+      },
+      guestExports: {},
+    });
+    const dispatch = createHostModuleDispatch(contract, {
+      'host:store': {
+        getBytes: () => ({}) as never,
+      },
+    });
+
+    expect(() => dispatch['host:store']!.getBytes!({ key: 'k' })).toThrow(
+      'binary output field "value" must be a Uint8Array'
+    );
+  });
+
+  test('a bare "?" is rejected as a field name', () => {
+    expect(() =>
+      defineRillContract({
+        version: '1.0.0',
+        hostModules: {
+          'host:store': {
+            // Reason: deliberately malformed descriptor to exercise validation
+            putBytes: rpc({ binary: { input: ['?'] } } as never),
+          },
+        },
+        guestExports: {},
+      })
+    ).toThrow('must contain non-empty field-name strings');
+  });
+});
