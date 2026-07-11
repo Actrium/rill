@@ -49,6 +49,7 @@ interface QuickJSWASMModule {
   _qjs_inject_json: (namePtr: number, valuePtr: number) => number;
   _qjs_extract_json: (namePtr: number) => number;
   _qjs_set_host_callback: (fnPtr: number) => void;
+  _qjs_set_host_binary_callback: (fnPtr: number) => void;
   _qjs_install_host_functions: () => void;
   _qjs_set_timer_callback: (fnPtr: number) => void;
   _qjs_install_timer_functions: () => void;
@@ -397,8 +398,19 @@ function buildHostFnShim(name: string): string {
   }
 
   // Generic: marker any function arguments so they survive the JSON bridge.
+  // A single ArrayBuffer/view argument takes the dedicated binary channel —
+  // the JSON bridge stringifies an ArrayBuffer to '{}', destroying the bytes
+  // (the binary op-batch failure mode). typeof-gated so an old wasm binary
+  // without __sendBinaryToHost degrades to the JSON path, where the Bridge's
+  // shape validation now fails loudly instead of silently.
   return `globalThis[${nameKey}] = function() {
     var a = Array.prototype.slice.call(arguments);
+    if (a.length === 1 && (a[0] instanceof ArrayBuffer || ArrayBuffer.isView(a[0])) &&
+        typeof __sendBinaryToHost === 'function') {
+      globalThis.__rill_fn_ret = null;
+      __sendBinaryToHost(${eventKey}, a[0]);
+      return globalThis.__rill_fn_ret;
+    }
     var hasFn = false;
     for (var i = 0; i < a.length; i++) { if (typeof a[i] === 'function') { hasFn = true; break; } }
     if (hasFn) {${ENSURE_CB_REGISTRY}
@@ -451,6 +463,7 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
         }
 
         let hostCallbackPtr = 0;
+        let hostBinaryCallbackPtr = 0;
 
         // host:* module bridge handler. Assigned once the eval helpers below are
         // defined; the guest reaches it by posting `__rill_host_*` events through
@@ -462,6 +475,9 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
         // (render: __rill_sendBatch; events: __rill_emitEvent; config: __rill_getConfig;
         // etc.) is registered here and reached via __sendToHost -> onHostFnCall.
         let onHostFnCall: ((name: string, data: string) => void) | null = null;
+        // Binary twin of onHostFnCall: receives the raw byte window a guest
+        // handed to __sendBinaryToHost (already copied out of wasm memory).
+        let onHostBinaryFnCall: ((name: string, bytes: Uint8Array) => void) | null = null;
         // Reason: injected host hooks accept/return arbitrary serializable values.
         const injectedHostFns = new Map<string, (...args: ReviewedUnknown[]) => ReviewedUnknown>();
 
@@ -496,6 +512,22 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
 
         hostCallbackPtr = module.addFunction(hostCallback, 'vii');
         module._qjs_set_host_callback(hostCallbackPtr);
+
+        // Binary channel (__sendBinaryToHost): the guest hands over a
+        // (ptr,len) window into wasm linear memory; slice() copies the bytes
+        // out BEFORE returning (the window is only valid during this call).
+        const hostBinaryCallback = (eventPtr: number, dataPtr: number, len: number) => {
+          const event = module.UTF8ToString(eventPtr);
+          if (this.options.debug) {
+            console.log(`[QuickJSWASM] Host binary callback: ${event} (${len} bytes)`);
+          }
+          if (event.indexOf('__rill_fn:') === 0) {
+            onHostBinaryFnCall?.(event.slice(10), module.HEAPU8.slice(dataPtr, dataPtr + len));
+          }
+        };
+        hostBinaryCallbackPtr = module.addFunction(hostBinaryCallback, 'viii');
+        module._qjs_set_host_binary_callback(hostBinaryCallbackPtr);
+
         module._qjs_install_host_functions();
         module._qjs_install_console();
 
@@ -570,6 +602,22 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
             return (...cbArgs: ReviewedUnknown[]) => invokeGuestCallback(id, cbArgs);
           }
           return a;
+        };
+
+        onHostBinaryFnCall = (name: string, bytes: Uint8Array): void => {
+          const fn = injectedHostFns.get(name);
+          if (!fn) return;
+          try {
+            // bytes is an exact-size copy, so .buffer IS the payload: the
+            // injected host fn (e.g. engine sendToHost) sees a real host-realm
+            // ArrayBuffer and its instanceof branch finally matches. One-way:
+            // the guest shim pre-set __rill_fn_ret = null and returns that.
+            fn(bytes.buffer);
+          } catch (err) {
+            if (this.options.debug) {
+              console.error(`[QuickJSWASM] injected host fn "${name}" threw on binary arg:`, err);
+            }
+          }
         };
 
         onHostFnCall = (name: string, data: string): void => {
@@ -883,6 +931,9 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
             // Remove function pointers
             if (hostCallbackPtr) {
               module.removeFunction(hostCallbackPtr);
+            }
+            if (hostBinaryCallbackPtr) {
+              module.removeFunction(hostBinaryCallbackPtr);
             }
 
             // Destroy QuickJS context

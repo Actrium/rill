@@ -271,3 +271,69 @@ describeIfWASM('QuickJSNativeWASMProvider by-name host-fn bridge', () => {
     expect(ops).toEqual([{ op: 'REF_CALL', refId: 5, method: 'focus', args: [], callId: 1 }]);
   });
 });
+
+describeIfWASM('QuickJSNativeWASMProvider binary host-fn channel', () => {
+  let provider: QuickJSNativeWASMProvider;
+  let runtime: JSEngineRuntime;
+  let context: SandboxScope;
+
+  beforeEach(async () => {
+    provider = new QuickJSNativeWASMProvider({ debug: false });
+    runtime = await provider.createRuntime();
+    context = runtime.createContext();
+  });
+
+  afterEach(() => {
+    context?.dispose();
+    runtime?.dispose();
+  });
+
+  // The JSON string bridge stringifies an ArrayBuffer to '{}', destroying the
+  // bytes — the binary op-batch failure mode. A single ArrayBuffer/view arg
+  // must take the dedicated __sendBinaryToHost linear-memory channel instead.
+  it('delivers a guest ArrayBuffer to the host byte-identical', () => {
+    // biome-ignore lint/suspicious/noExplicitAny: captured binary payloads
+    const received: any[] = [];
+    context.inject('__rill_sendBatch', (batch: unknown) => {
+      received.push(batch);
+    });
+
+    context.eval(
+      'var ab = new ArrayBuffer(4); var w = new Uint8Array(ab); ' +
+        'w[0] = 0x52; w[1] = 0x49; w[2] = 0x4c; w[3] = 0x4c; ' +
+        'globalThis.__rill_sendBatch(ab);'
+    );
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toBeInstanceOf(ArrayBuffer);
+    expect([...new Uint8Array(received[0] as ArrayBuffer)]).toEqual([0x52, 0x49, 0x4c, 0x4c]);
+  });
+
+  it("delivers only a typed-array view's byte window", () => {
+    // biome-ignore lint/suspicious/noExplicitAny: captured binary payloads
+    const received: any[] = [];
+    context.inject('__rill_sendBatch', (batch: unknown) => {
+      received.push(batch);
+    });
+
+    context.eval(
+      'var backing = new Uint8Array([1, 2, 3, 4, 5]); ' +
+        'globalThis.__rill_sendBatch(backing.subarray(1, 4));'
+    );
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toBeInstanceOf(ArrayBuffer);
+    expect([...new Uint8Array(received[0] as ArrayBuffer)]).toEqual([2, 3, 4]);
+  });
+
+  it('keeps multi-arg and non-binary calls on the JSON path', () => {
+    // biome-ignore lint/suspicious/noExplicitAny: captured args
+    const received: any[] = [];
+    context.inject('__rill_probe', (...args: unknown[]) => {
+      received.push(args);
+    });
+
+    context.eval('globalThis.__rill_probe({ a: 1 }, "two")');
+    expect(received).toEqual([[{ a: 1 }, 'two']]);
+  });
+});

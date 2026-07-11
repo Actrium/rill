@@ -24,6 +24,15 @@ static JSContext *g_context = NULL;
 typedef void (*HostCallbackFn)(const char *event, const char *data);
 static HostCallbackFn g_host_callback = NULL;
 
+// Binary host callback: hands the host a (ptr,len) window into wasm linear
+// memory — the dedicated channel for ArrayBuffer payloads, which the JSON
+// string bridge above cannot carry (JSON.stringify(ArrayBuffer) === "{}",
+// silently destroying the bytes). Same technique as the native-guest
+// rill_send_batch channel: no serialisation, the host reads HEAPU8 directly.
+typedef void (*HostBinaryCallbackFn)(const char *event, const uint8_t *data,
+                                     size_t len);
+static HostBinaryCallbackFn g_host_binary_callback = NULL;
+
 // ============================================
 // Lifecycle
 // ============================================
@@ -218,7 +227,61 @@ static JSValue js_send_to_host(JSContext *ctx, JSValueConst this_val,
 }
 
 /**
- * Install __sendToHost function in global scope
+ * Set the binary host callback function pointer
+ */
+EXPORT void qjs_set_host_binary_callback(HostBinaryCallbackFn callback) {
+    g_host_binary_callback = callback;
+}
+
+/**
+ * Native function callable from JS to send BINARY data to the host:
+ * __sendBinaryToHost(event, arrayBufferOrView). The bytes are handed over as
+ * a (ptr,len) window into linear memory — copied host-side before this call
+ * returns. Non-binary payloads are ignored (the JSON channel is for those).
+ */
+static JSValue js_send_binary_to_host(JSContext *ctx, JSValueConst this_val,
+                                      int argc, JSValueConst *argv) {
+    if (!g_host_binary_callback || argc < 2) {
+        return JS_UNDEFINED;
+    }
+
+    const char *event = JS_ToCString(ctx, argv[0]);
+    if (!event) {
+        return JS_UNDEFINED;
+    }
+
+    size_t size = 0;
+    uint8_t *data = JS_GetArrayBuffer(ctx, &size, argv[1]);
+    if (data || JS_IsArrayBuffer(ctx, argv[1])) {
+        // Plain ArrayBuffer (data may be NULL for a zero-length buffer).
+        g_host_binary_callback(event, data, size);
+    } else {
+        // Not an ArrayBuffer: JS_GetArrayBuffer set an exception — clear it,
+        // then probe for a typed-array view and send its byte window.
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        size_t offset = 0, length = 0, bpe = 0;
+        JSValue backing =
+            JS_GetTypedArrayBuffer(ctx, argv[1], &offset, &length, &bpe);
+        if (!JS_IsException(backing)) {
+            size_t backing_size = 0;
+            uint8_t *backing_data =
+                JS_GetArrayBuffer(ctx, &backing_size, backing);
+            if (backing_data && offset + length <= backing_size) {
+                g_host_binary_callback(event, backing_data + offset, length);
+            }
+            JS_FreeValue(ctx, backing);
+        } else {
+            // Not a view either — drop silently; callers gate on typeof.
+            JS_FreeValue(ctx, JS_GetException(ctx));
+        }
+    }
+
+    JS_FreeCString(ctx, event);
+    return JS_UNDEFINED;
+}
+
+/**
+ * Install __sendToHost / __sendBinaryToHost functions in global scope
  */
 EXPORT void qjs_install_host_functions(void) {
     if (!g_context) return;
@@ -228,6 +291,11 @@ EXPORT void qjs_install_host_functions(void) {
     // __sendToHost(event, data)
     JS_SetPropertyStr(g_context, global, "__sendToHost",
                       JS_NewCFunction(g_context, js_send_to_host, "__sendToHost", 2));
+
+    // __sendBinaryToHost(event, arrayBufferOrView)
+    JS_SetPropertyStr(g_context, global, "__sendBinaryToHost",
+                      JS_NewCFunction(g_context, js_send_binary_to_host,
+                                      "__sendBinaryToHost", 2));
 
     JS_FreeValue(g_context, global);
 }

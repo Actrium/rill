@@ -110,6 +110,7 @@ if(BUILD_WASM)
         "_qjs_inject_json"
         "_qjs_extract_json"
         "_qjs_set_host_callback"
+        "_qjs_set_host_binary_callback"
         "_qjs_install_host_functions"
         "_qjs_set_timer_callback"
         "_qjs_install_timer_functions"
@@ -122,7 +123,7 @@ if(BUILD_WASM)
     list(JOIN EXPORTED_FUNCS "," EXPORTED_FUNCS_STR)
 
     set_target_properties(quickjs_sandbox_wasm PROPERTIES
-        LINK_FLAGS "-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,UTF8ToString,stringToUTF8,addFunction,removeFunction -sEXPORTED_FUNCTIONS=${EXPORTED_FUNCS_STR}"
+        LINK_FLAGS "-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,UTF8ToString,stringToUTF8,addFunction,removeFunction,HEAPU8 -sEXPORTED_FUNCTIONS=${EXPORTED_FUNCS_STR}"
     )
 
     # Output name
