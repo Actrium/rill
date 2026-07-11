@@ -1843,12 +1843,194 @@ pub mod ui {
     }
 }
 
-/// Materialize `root` on the host: walk the tree into an operation batch
-/// (`{version,batchId,operations:[…]}`, UTF-8 JSON) and hand it to the host's
-/// render channel. One-way; no host round-trip.
+// ---- WIP binary op-batch wire: runtime gate + emit fork ----
+//
+// Guest half of the op-batch binary route (`contracts/op-batch-wire.json`).
+// Two-level gate, mirroring the canvas binary wire: the `wip-binary-protocol`
+// cargo feature compiles the encoder in, and the HOST pushes the runtime half
+// via the optional `rill_wire_caps` export (bit0 = binary op-batch), called
+// between instantiation and `rill_init` so the flag is set before the first
+// render — `render()` is synchronous, so a canvas-style async `getInfo` probe
+// cannot work here. A host that never calls it (old host, gate off) leaves the
+// default `false` and the guest emits JSON: no flag-day in either direction.
+#[cfg(feature = "wip-binary-protocol")]
+mod op_batch_wire {
+    use crate::wire_encode::{Batch, Encoder, Op, Value};
+    use alloc::vec::Vec;
+
+    // Single-task guest, no threads — same unsafe-static pattern as the canvas
+    // handshake cache (`BINARY_SUPPORTED`).
+    static mut ENABLED: bool = false;
+    // Session-persistent encoder => stable cross-batch intern indices. An
+    // encoder that returned `Err` must be DISCARDED (its intern table may hold
+    // entries from the aborted batch), hence the Option: it is `take`n for the
+    // encode and only put back on success.
+    static mut ENCODER: Option<Encoder> = None;
+    // Monotonic batch id stamped into the binary header.
+    static mut BATCH_ID: u32 = 0;
+    // Latch: log the compiled-in-but-not-enabled diagnostic once, not per render.
+    static mut GATE_OFF_LOGGED: bool = false;
+
+    pub(crate) fn set_caps(flags: u32) {
+        unsafe { ENABLED = (flags & 0x1) != 0 };
+    }
+
+    pub(crate) fn enabled() -> bool {
+        unsafe { ENABLED }
+    }
+
+    /// The diagnostic that makes an unwired gate loud instead of silent: the
+    /// feature is compiled in but the host never pushed `rill_wire_caps`.
+    pub(crate) fn log_gate_off_once() {
+        unsafe {
+            if !GATE_OFF_LOGGED {
+                GATE_OFF_LOGGED = true;
+                crate::log(
+                    "[info] wip-binary-protocol compiled in but host did not enable binary op-batch (rill_wire_caps); using JSON",
+                );
+            }
+        }
+    }
+
+    fn next_batch_id() -> u32 {
+        unsafe {
+            BATCH_ID = BATCH_ID.wrapping_add(1);
+            BATCH_ID
+        }
+    }
+
+    /// Binary render emit. Returns `true` when the batch went out on the wire;
+    /// `false` means encode failed closed (warn logged, encoder discarded) and
+    /// the caller must fall through to JSON so the render is never dropped.
+    pub(crate) fn render_binary(root: &crate::ui::Node) -> bool {
+        let mut ops: Vec<Op<'_>> = Vec::new();
+        let mut next_id: u32 = 0;
+        let root_id = emit_node(root, &mut ops, &mut next_id);
+        // Attach the root to the receiver root (parentId 0).
+        ops.push(Op::Append {
+            id: 0,
+            parent_id: 0,
+            child_id: root_id,
+        });
+        let batch = Batch {
+            batch_id: next_batch_id(),
+            ops,
+        };
+
+        let mut encoder = unsafe { ENCODER.take() }.unwrap_or_default();
+        match encoder.encode_batch(&batch) {
+            Ok(bytes) => {
+                // Only a clean encoder goes back for reuse (stable interns).
+                unsafe { ENCODER = Some(encoder) };
+                unsafe { crate::rill_send_batch(bytes.as_ptr(), bytes.len()) };
+                true
+            }
+            Err(_) => {
+                crate::log(
+                    "[warn] op-batch binary encode failed; falling back to JSON for this batch",
+                );
+                false
+            }
+        }
+    }
+
+    /// The wire contract's NUMBER RULE (caller's responsibility): an integer in
+    /// i32 range is `Int32`, anything else finite is `Float64`.
+    fn num(v: u32) -> Value<'static> {
+        if v <= i32::MAX as u32 {
+            Value::Int32(v as i32)
+        } else {
+            Value::Float64(v as f64)
+        }
+    }
+
+    /// Typed twin of the JSON `emit_node` walk. MUST stay op-for-op identical
+    /// to it — same ids, same order, same prop shapes — so both routes
+    /// materialize the same tree on the host.
+    fn emit_node<'a>(node: &'a crate::ui::Node, ops: &mut Vec<Op<'a>>, next_id: &mut u32) -> u32 {
+        *next_id += 1;
+        let id = *next_id;
+        match node {
+            crate::ui::Node::View(children) => {
+                ops.push(Op::Create {
+                    id,
+                    ty: "View",
+                    props: Vec::new(),
+                });
+                for child in children {
+                    let child_id = emit_node(child, ops, next_id);
+                    ops.push(Op::Append {
+                        id: 0,
+                        parent_id: id,
+                        child_id,
+                    });
+                }
+            }
+            crate::ui::Node::Text(content) => {
+                ops.push(Op::Create {
+                    id,
+                    ty: "__TEXT__",
+                    props: alloc::vec![("text", Value::Str(content))],
+                });
+            }
+            crate::ui::Node::Canvas {
+                canvas_id,
+                width,
+                height,
+                mode,
+            } => {
+                ops.push(Op::Create {
+                    id,
+                    ty: "Canvas",
+                    props: alloc::vec![
+                        ("canvasId", Value::Str(canvas_id)),
+                        ("mode", Value::Str(mode)),
+                        (
+                            "style",
+                            Value::Object(alloc::vec![
+                                ("width", num(*width)),
+                                ("height", num(*height)),
+                            ])
+                        ),
+                    ],
+                });
+            }
+        }
+        id
+    }
+}
+
+/// Host→guest capability push for the WIP binary op-batch wire: bit0 of
+/// `flags` enables binary render batches. Optional in both directions — an old
+/// host never calls it (guest stays JSON), an old guest lacks the export (host
+/// skips the call). The host must call it BEFORE `rill_init` so the very first
+/// render already goes out on the negotiated wire.
+#[cfg(feature = "wip-binary-protocol")]
+#[no_mangle]
+pub extern "C" fn rill_wire_caps(flags: u32) {
+    op_batch_wire::set_caps(flags);
+}
+
+/// Materialize `root` on the host: walk the tree into an operation batch and
+/// hand it to the host's render channel (one-way; no host round-trip). Default
+/// wire is UTF-8 JSON (`{version,batchId,operations:[…]}`); with the
+/// `wip-binary-protocol` feature compiled in AND the host having enabled it
+/// via `rill_wire_caps`, the batch goes out on the binary op-batch wire
+/// instead (falling back to JSON if the encode fails closed).
 pub fn render(root: ui::Node) {
     use alloc::format;
     use alloc::string::String;
+
+    #[cfg(feature = "wip-binary-protocol")]
+    {
+        if op_batch_wire::enabled() {
+            if op_batch_wire::render_binary(&root) {
+                return;
+            }
+        } else {
+            op_batch_wire::log_gate_off_once();
+        }
+    }
 
     let mut ops = String::new();
     let mut next_id: u32 = 0;
@@ -2116,17 +2298,19 @@ extern crate std;
 
 /// Guest-side encoder for the binary op-batch wire protocol
 /// (`contracts/op-batch-wire.json`). WORK IN PROGRESS, gated behind the
-/// `wip-binary-protocol` feature (default OFF) and NOT wired into the live
-/// op-batch emit path — new code only, so the shipped guest is unchanged.
+/// `wip-binary-protocol` feature (default OFF); wired into `render()` via the
+/// `op_batch_wire` runtime gate — taken only when the host enabled it through
+/// the optional `rill_wire_caps` export, so the default shipped guest is
+/// unchanged (JSON).
 #[cfg(feature = "wip-binary-protocol")]
 pub mod wire_encode;
 
 /// Guest-side encoder for the binary CANVAS wire protocol
 /// (`contracts/canvas-wire.json`) — a per-frame flat 2D display list, sister to
 /// `wire_encode` (distinct magic `RCNV`). WORK IN PROGRESS, gated behind the
-/// `wip-binary-protocol` feature (default OFF) and NOT wired into the live
-/// `canvas::draw` emit path (which still ships JSON) — new code only, so the
-/// shipped guest is unchanged.
+/// `wip-binary-protocol` feature (default OFF); wired into `canvas::draw` via
+/// the `host:canvas.getInfo` capability handshake — a host that does not
+/// advertise `binaryDraw` still receives the legacy JSON op-list.
 #[cfg(feature = "wip-binary-protocol")]
 pub mod canvas_encode;
 

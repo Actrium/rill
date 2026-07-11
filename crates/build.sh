@@ -21,12 +21,13 @@ export CARGO_TARGET_DIR=target/fixtures
 
 RUSTFLAGS="--remap-path-prefix=$(pwd)=." cargo build -p kv-guest -p ui-guest -p seq-guest -p event-guest -p heap-churn-guest -p canvas-guest -p canvas-present-guest -p canvas-gpu-guest -p canvas-escape-guest -p asset-guest --target "$TARGET" --release
 
-# canvas-binary-guest is built in a SEPARATE cargo invocation on purpose: it
-# turns ON rill-guest's `wip-binary-protocol` feature, and cargo unifies features
-# across all packages in a single build. Building it apart keeps the WIP feature
-# out of the default JSON fixtures above (their rill-guest stays feature-clean),
-# so the DEFAULT shipped guests provably still emit JSON.
-RUSTFLAGS="--remap-path-prefix=$(pwd)=." cargo build -p canvas-binary-guest --target "$TARGET" --release
+# canvas-binary-guest / ui-binary-guest are built in a SEPARATE cargo
+# invocation on purpose: they turn ON rill-guest's `wip-binary-protocol`
+# feature, and cargo unifies features across all packages in a single build.
+# Building them apart keeps the WIP feature out of the default JSON fixtures
+# above (their rill-guest stays feature-clean), so the DEFAULT shipped guests
+# provably still emit JSON.
+RUSTFLAGS="--remap-path-prefix=$(pwd)=." cargo build -p canvas-binary-guest -p ui-binary-guest --target "$TARGET" --release
 
 stage() { # <crate-lib-name> <fixture-name>
   cp "$CARGO_TARGET_DIR/$TARGET/release/$1.wasm" "$FIXTURES/$2"
@@ -35,6 +36,7 @@ stage() { # <crate-lib-name> <fixture-name>
 stage kv_guest kv-guest.wasm
 stage seq_guest seq-guest.wasm
 stage ui_guest ui-guest.wasm
+stage ui_binary_guest ui-binary-guest.wasm
 stage event_guest event-guest.wasm
 stage heap_churn_guest heap-churn-guest.wasm
 stage canvas_guest canvas-guest.wasm

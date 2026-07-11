@@ -22,18 +22,29 @@
  *   host  -> guest imports:  env.rill_host_call(mod_ptr,mod_len, method_ptr,method_len, in_ptr,in_len, cb_id)
  *                            env.rill_log(ptr,len)
  *   guest -> host  exports:  memory, rill_alloc(size)->ptr, rill_resolve(cb,ok,ptr,len), rill_init()
- *   guest -> host  exports (optional): rill_abi_version() -> u32
+ *   guest -> host  exports (optional): rill_abi_version() -> u32,
+ *                            rill_wire_caps(flags) (WIP binary op-batch gate)
  *   wire: request/response bytes are UTF-8 JSON in the guest's linear memory,
  *         addressed by (ptr,len); the host reads guest memory bounds-checked
  *         (results are copied out).
  */
 import type { HostModuleDispatchTable } from '../../contract';
-import type { OperationBatch } from '../../shared/types';
+import type { OperationBatch, SerializedOperation } from '../../shared/types';
 import {
   decodeRequest as decodeRbs1Request,
   encodeResult as encodeRbs1Result,
   isRbs1,
 } from '../wire/store-net-envelope';
+import { decodeBatchStreaming } from '../wire/wire-decoder';
+
+/**
+ * `rill_wire_caps` flag bits (host→guest capability push for WIP binary
+ * wires). Bit0 = binary op-batch render batches.
+ */
+const WIRE_CAP_OP_BATCH_BINARY = 0x1;
+
+/** Cap on render-channel drop warnings per host, so hostile input cannot flood the log. */
+const MAX_BATCH_DROP_WARNINGS = 10;
 
 /**
  * Guest ABI versions this host understands. A guest may declare its version via
@@ -50,11 +61,22 @@ export interface WasmGuestHostOptions {
   onLog?: (message: string) => void;
   /**
    * Sink for guest render batches (`rill_send_batch`). The batch wire is UTF-8
-   * JSON in guest memory; the host decodes it to an `OperationBatch` and hands
-   * it off — typically to `receiver.applyBatch`. Keeping this a callback leaves
+   * JSON in guest memory (or the binary op-batch wire when `binaryOpBatch` is
+   * on); the host decodes it to an `OperationBatch` and hands it off —
+   * typically to `receiver.applyBatch`. Keeping this a callback leaves
    * `WasmGuestHost` decoupled from the receiver.
    */
   onRenderBatch?: (batch: OperationBatch) => void;
+  /**
+   * WIP: enable the binary op-batch render wire (default false — same
+   * default-off policy as the rest of the wip-binary-protocol surface). When
+   * true, the host pushes `rill_wire_caps(bit0)` to a guest that exports it
+   * (before `rill_init`, so the first render is already negotiated) and
+   * accepts RILL-magic binary frames on the render channel. A guest without
+   * the export stays on JSON; a binary frame arriving while this is off is
+   * dropped with a warning (fail-closed).
+   */
+  binaryOpBatch?: boolean;
 }
 
 export class WasmGuestHost {
@@ -63,13 +85,16 @@ export class WasmGuestHost {
   private readonly dispatch: HostModuleDispatchTable;
   private readonly onLog?: (message: string) => void;
   private readonly onRenderBatch?: (batch: OperationBatch) => void;
+  private readonly binaryOpBatch: boolean;
   private readonly inflight = new Set<Promise<void>>();
   private abiVersion: number | null = null;
+  private batchDropWarnings = 0;
 
   constructor(options: WasmGuestHostOptions) {
     this.dispatch = options.dispatch;
     this.onLog = options.onLog;
     this.onRenderBatch = options.onRenderBatch;
+    this.binaryOpBatch = options.binaryOpBatch ?? false;
   }
 
   /**
@@ -118,6 +143,18 @@ export class WasmGuestHost {
       this.abiVersion = version;
     } else {
       this.abiVersion = null; // pre-versioning guest (ABI v0/v1 wire is identical): tolerated
+    }
+
+    // WIP binary op-batch: push the runtime half of the gate BEFORE rill_init,
+    // so the guest's very first render already goes out on the negotiated
+    // wire. Optional in both directions — a guest without the export (JSON-only
+    // build) is skipped, and with the option off the guest is never told, so
+    // old/new host x guest combinations all degrade to JSON.
+    if (this.binaryOpBatch) {
+      const wireCaps = instance.exports.rill_wire_caps;
+      if (typeof wireCaps === 'function') {
+        (wireCaps as (flags: number) => void)(WIRE_CAP_OP_BATCH_BINARY);
+      }
     }
 
     (instance.exports.rill_init as (() => void) | undefined)?.();
@@ -224,12 +261,53 @@ export class WasmGuestHost {
   private onSendBatch(ptr: number, len: number): void {
     if (!this.onRenderBatch) return;
     try {
-      const batch = JSON.parse(this.readString(ptr, len)) as OperationBatch;
+      const raw = this.readBytes(ptr, len);
+      // Render-channel framing fork (same full-u32 magic policy as onHostCall,
+      // never byte 0 alone): 'RILL' (52 49 4C 4C) -> binary op-batch wire;
+      // anything else -> the legacy JSON path, byte-for-byte unchanged.
+      const isBinaryOpBatch =
+        raw.length >= 4 && raw[0] === 0x52 && raw[1] === 0x49 && raw[2] === 0x4c && raw[3] === 0x4c;
+      if (isBinaryOpBatch) {
+        if (!this.binaryOpBatch) {
+          // A guest can only emit this frame if something told it to (its
+          // rill_wire_caps was called) — a frame arriving with the gate off is
+          // a wiring bug, not hostile noise; fail closed but attributably.
+          this.warnBatchDropped(
+            'binary op-batch frame received but the binaryOpBatch option is off'
+          );
+          return;
+        }
+        // Collect at the call site — the decoder stays streaming per its
+        // header contract. readBytes returned an exact-size copy, so
+        // raw.buffer IS the frame (offset 0, no detach hazard).
+        const operations: SerializedOperation[] = [];
+        const header = decodeBatchStreaming(raw.buffer as ArrayBuffer, (op) => operations.push(op));
+        this.onRenderBatch({
+          version: header.version,
+          batchId: header.batchId,
+          operations,
+        } as unknown as OperationBatch);
+        return;
+      }
+      const batch = JSON.parse(new TextDecoder().decode(raw)) as OperationBatch;
       this.onRenderBatch(batch);
-    } catch {
-      // A hostile/malformed batch (bad pointer, non-JSON, wrong shape) must not
-      // crash the host — drop it.
+    } catch (err) {
+      // A hostile/malformed batch (bad pointer, non-JSON, WireDecodeError,
+      // wrong shape) must not crash the host — drop it, but never silently:
+      // the drop reason is the difference between a five-minute fix and a
+      // debugging session. Warning volume is capped against hostile flooding.
+      this.warnBatchDropped(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  private warnBatchDropped(reason: string): void {
+    if (this.batchDropWarnings >= MAX_BATCH_DROP_WARNINGS) return;
+    this.batchDropWarnings++;
+    const suffix =
+      this.batchDropWarnings === MAX_BATCH_DROP_WARNINGS
+        ? ' (further drop warnings suppressed)'
+        : '';
+    console.warn(`[rill:wasm-guest] render batch dropped: ${reason}${suffix}`);
   }
 
   // --- ABI bridge: guest rill_host_call -> host dispatch -> guest rill_resolve ---

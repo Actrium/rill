@@ -8,8 +8,11 @@
 //! bottom (`contracts/op-batch-wire.golden.json`).
 //!
 //! WORK IN PROGRESS — behind the `wip-binary-protocol` cargo feature (default
-//! OFF). It is deliberately NOT wired into the live op-batch emit path; it is
-//! new, side-effect-free code that produces an owned `Vec<u8>` and nothing else.
+//! OFF). Wired into the live emit path via `render()`'s `op_batch_wire` gate:
+//! taken only when the host enabled binary op-batch through the optional
+//! `rill_wire_caps` export, so the default shipped guest still emits JSON.
+//! This module itself stays side-effect-free: it produces an owned `Vec<u8>`
+//! and nothing else.
 //!
 //! `#![no_std]` crate: only `alloc` is used (no `std`).
 //!
