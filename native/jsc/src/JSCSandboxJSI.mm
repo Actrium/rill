@@ -3,6 +3,7 @@
 #import <JavaScriptCore/JavaScriptCore.h>
 #import <dlfcn.h>
 #import <os/log.h>
+#include <vector>
 
 namespace jsc_sandbox {
 
@@ -26,6 +27,56 @@ namespace jsc_sandbox {
 // Note the limit is in SECONDS (double), while our public option is in ms.
 
 namespace {
+
+// Byte-owning jsi::MutableBuffer used to rebuild a HOST-realm ArrayBuffer
+// from bytes copied out of the sandbox. A copy is mandatory: the sandbox
+// value's backing store dies with the sandbox GC, and the two realms must
+// never alias each other's memory.
+class VectorBuffer : public jsi::MutableBuffer {
+public:
+  VectorBuffer(const uint8_t *data, size_t size) : bytes_(data, data + size) {}
+  size_t size() const override { return bytes_.size(); }
+  uint8_t *data() override { return bytes_.data(); }
+
+private:
+  std::vector<uint8_t> bytes_;
+};
+
+// Copy `size` bytes into a fresh host-realm ArrayBuffer. Throws (loudly) if
+// the host runtime does not implement createArrayBuffer — never a silent
+// empty object.
+jsi::Value makeHostArrayBuffer(jsi::Runtime &rt, const uint8_t *data,
+                               size_t size) {
+  return jsi::ArrayBuffer(rt, std::make_shared<VectorBuffer>(data, size));
+}
+
+// Host-realm constructor name for a JSC typed-array kind; nullptr when the
+// kind has no same-name reconstruction (the caller falls back to the raw
+// ArrayBuffer of the view's byte window).
+const char *typedArrayCtorName(JSTypedArrayType type) {
+  switch (type) {
+  case kJSTypedArrayTypeInt8Array:
+    return "Int8Array";
+  case kJSTypedArrayTypeInt16Array:
+    return "Int16Array";
+  case kJSTypedArrayTypeInt32Array:
+    return "Int32Array";
+  case kJSTypedArrayTypeUint8Array:
+    return "Uint8Array";
+  case kJSTypedArrayTypeUint8ClampedArray:
+    return "Uint8ClampedArray";
+  case kJSTypedArrayTypeUint16Array:
+    return "Uint16Array";
+  case kJSTypedArrayTypeUint32Array:
+    return "Uint32Array";
+  case kJSTypedArrayTypeFloat32Array:
+    return "Float32Array";
+  case kJSTypedArrayTypeFloat64Array:
+    return "Float64Array";
+  default:
+    return nullptr;
+  }
+}
 
 using JSCShouldTerminateCallback = bool (*)(JSContextRef ctx, void *context);
 using JSCSetExecutionTimeLimitFn = void (*)(JSContextGroupRef group,
@@ -1081,6 +1132,64 @@ jsi::Value JSCSandboxContext::jsValueToJSI(jsi::Runtime &rt, void *jsValue,
               return self->jsValueToJSI(rt, (__bridge void *)result);
             }
           });
+    }
+
+    // Binary passthrough — MUST come before the generic Object.keys copy,
+    // which sees zero own enumerable props on an ArrayBuffer and would emit
+    // an empty host object, silently destroying the bytes (the binary
+    // op-batch failure mode). Bytes are COPIED into the host realm.
+    {
+      JSContextRef ctxRef = [ctx JSGlobalContextRef];
+      JSValueRef probeExc = nullptr;
+      JSTypedArrayType typedArrayType =
+          JSValueGetTypedArrayType(ctxRef, valueRef, &probeExc);
+      if (!probeExc && typedArrayType != kJSTypedArrayTypeNone) {
+        JSValueRef exc = nullptr;
+        JSObjectRef objRef = JSValueToObject(ctxRef, valueRef, &exc);
+        if (!exc && objRef) {
+          if (typedArrayType == kJSTypedArrayTypeArrayBuffer) {
+            void *bytes = JSObjectGetArrayBufferBytesPtr(ctxRef, objRef, &exc);
+            size_t byteLength =
+                exc ? 0 : JSObjectGetArrayBufferByteLength(ctxRef, objRef, &exc);
+            if (!exc) {
+              if (addedToVisited) visited->erase(valueRef);
+              return makeHostArrayBuffer(
+                  rt, static_cast<const uint8_t *>(bytes), byteLength);
+            }
+          } else {
+            // Typed-array view. JSObjectGetTypedArrayBytesPtr returns the
+            // VIEW's data start (byteOffset already applied, per WebKit's
+            // vector() semantics) — do not add the offset again.
+            void *bytes = JSObjectGetTypedArrayBytesPtr(ctxRef, objRef, &exc);
+            size_t byteLength =
+                exc ? 0 : JSObjectGetTypedArrayByteLength(ctxRef, objRef, &exc);
+            if (!exc && bytes) {
+              if (addedToVisited) visited->erase(valueRef);
+              jsi::Value hostBuffer = makeHostArrayBuffer(
+                  rt, static_cast<const uint8_t *>(bytes), byteLength);
+              // Same-kind reconstruction, best-effort: a host realm without
+              // the constructor still gets the raw bytes.
+              const char *ctorName = typedArrayCtorName(typedArrayType);
+              if (ctorName && rt.global().hasProperty(rt, ctorName)) {
+                jsi::Value hostCtor = rt.global().getProperty(rt, ctorName);
+                if (hostCtor.isObject() &&
+                    hostCtor.getObject(rt).isFunction(rt)) {
+                  try {
+                    return hostCtor.getObject(rt)
+                        .getFunction(rt)
+                        .callAsConstructor(rt, hostBuffer);
+                  } catch (...) {
+                    // fall through to the raw ArrayBuffer
+                  }
+                }
+              }
+              return hostBuffer;
+            }
+          }
+        }
+        // Detached buffer / JSC error: fall through to the generic copy
+        // (visited bookkeeping untouched — no early return happened).
+      }
     }
 
     // Not a function, convert as regular object
