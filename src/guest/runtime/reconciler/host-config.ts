@@ -25,6 +25,7 @@ import { isSerializedFunction } from '../../../shared';
 import { isDevToolsEnabled, type RenderTiming, sendDevToolsMessage } from './devtools';
 import { serializeProps } from './guest-encoder';
 import { OperationCollector } from './operation-collector';
+import { nowMs } from './sandbox-compat';
 import type { ExtendedHostConfig, PublicInstance, RillReconciler, RootContainer } from './types';
 import { getRemovedProps } from './types';
 
@@ -108,7 +109,7 @@ export function createReconciler(
     // ============ Core Methods ============
 
     createInstance(type: string, props: Record<string, unknown>): VNode {
-      const startTime = isDevToolsEnabled() ? performance.now() : 0;
+      const startTime = isDevToolsEnabled() ? nowMs() : 0;
       const id = ++nodeIdCounter;
 
       // Filter out children (handled separately via appendChild/appendInitialChild).
@@ -150,7 +151,7 @@ export function createReconciler(
           nodeId: id,
           type,
           phase: 'mount',
-          duration: performance.now() - startTime,
+          duration: nowMs() - startTime,
           timestamp: Date.now(),
         });
       }
@@ -256,7 +257,7 @@ export function createReconciler(
       nextPropsOrInternalHandle: unknown,
       _internalHandleMaybe?: unknown
     ): void {
-      const startTime = isDevToolsEnabled() ? performance.now() : 0;
+      const startTime = isDevToolsEnabled() ? nowMs() : 0;
 
       const isReact19 = typeof updatePayloadOrType === 'string';
       const type = isReact19 ? (updatePayloadOrType as string) : (typeOrPrevProps as string);
@@ -299,7 +300,7 @@ export function createReconciler(
           nodeId: instance.id,
           type,
           phase: 'update',
-          duration: performance.now() - startTime,
+          duration: nowMs() - startTime,
           timestamp: Date.now(),
         });
       }
@@ -331,7 +332,7 @@ export function createReconciler(
     },
 
     prepareForCommit(): null {
-      commitStartTime = isDevToolsEnabled() ? performance.now() : 0;
+      commitStartTime = isDevToolsEnabled() ? nowMs() : 0;
       renderTimings = [];
       return null;
     },
@@ -353,7 +354,7 @@ export function createReconciler(
 
       // Send DevTools timing data
       if (isDevToolsEnabled() && renderTimings.length > 0) {
-        const commitDuration = performance.now() - commitStartTime;
+        const commitDuration = nowMs() - commitStartTime;
         sendDevToolsMessage('RILL_RENDER_TIMINGS', {
           timings: renderTimings,
           commitDuration,

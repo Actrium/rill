@@ -38,6 +38,7 @@ import type {
   SerializedValue,
   SerializedValueObject,
 } from '../../../shared/types';
+import { createUtf8Encoder, nowMs } from './sandbox-compat';
 
 // ============================================
 // Constants (must match InstructionFormat.h)
@@ -177,7 +178,7 @@ export class BinaryEncoder {
    * Encode a complete operation batch
    */
   encodeBatch(batch: SerializedOperationBatch): ArrayBuffer {
-    const startTime = performance.now();
+    const startTime = nowMs();
 
     // Reset position (keep intern table if persistent)
     this.pos = 0;
@@ -210,7 +211,7 @@ export class BinaryEncoder {
     this.patchHeader(headerPos, batch.operations.length);
 
     // Calculate stats
-    const endTime = performance.now();
+    const endTime = nowMs();
     this.stats.encodingMs = endTime - startTime;
     this.stats.outputBytes = this.pos;
     this.stats.operationCount = batch.operations.length;
@@ -396,8 +397,9 @@ export class BinaryEncoder {
 
     this.writeU16(strings.length);
 
+    const utf8 = createUtf8Encoder();
     for (const str of strings) {
-      const encoded = new TextEncoder().encode(str);
+      const encoded = utf8(str);
       this.writeU16(encoded.length);
       this.writeBytes(encoded);
     }
