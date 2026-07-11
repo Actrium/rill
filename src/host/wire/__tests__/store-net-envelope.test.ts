@@ -479,3 +479,37 @@ describe('hoistSentinels prototype-pollution hardening (outbound twin)', () => {
     expect(revived.blob).toEqual(new Uint8Array([7]));
   });
 });
+
+describe('hoistSentinels toJSON semantics (byte-carrying results)', () => {
+  // A byte-carrying result takes the RBS1 path, where the control plane is walked
+  // structurally instead of via JSON.stringify. Without honoring toJSON, an object
+  // whose JSON form lives entirely in toJSON (Date, URL, custom) has no own data
+  // props and collapses to `{}` — losing its value. A Uint8Array sibling is what
+  // forces the RBS1 path, so it must be present to reproduce the regression.
+  it('encodes a sibling Date as its ISO string, not an empty object', () => {
+    const iso = '2024-01-01T00:00:00.000Z';
+    const result = { when: new Date(iso), blob: new Uint8Array([1, 2, 3]) };
+
+    const { control, segments } = hoistSentinels(result);
+
+    expect(segments).toHaveLength(1);
+    const ctrl = control as Record<string, unknown>;
+    expect(ctrl.when).toBe(iso);
+    expect(ctrl.blob).toEqual({ $b: 0 });
+    // The control plane must serialize to exactly the same JSON the non-binary
+    // (plain JSON.stringify) path would have produced for the non-byte fields.
+    expect(JSON.parse(JSON.stringify(ctrl))).toEqual({ when: iso, blob: { $b: 0 } });
+  });
+
+  it('honors a custom toJSON on a nested object', () => {
+    const result = {
+      meta: { toJSON: () => ({ tag: 'kept' }) },
+      blob: new Uint8Array([9]),
+    };
+
+    const { control } = hoistSentinels(result);
+
+    const ctrl = control as Record<string, unknown>;
+    expect(ctrl.meta).toEqual({ tag: 'kept' });
+  });
+});

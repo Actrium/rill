@@ -573,6 +573,43 @@
     evalEmpty instanceof ArrayBuffer && evalEmpty.byteLength === 0,
     'zero-length ArrayBuffer crosses as an empty ArrayBuffer'
   );
+
+  console.log('\n33. Binary values crossing host -> sandbox');
+  // The symmetric direction: a host capability that RETURNS an ArrayBuffer /
+  // typed-array must reach the guest as real bytes, not the generic empty
+  // object copy. The assertions run INSIDE the sandbox (eval returns a bool).
+  binCtx.inject('getBytesAb', () => {
+    var ab = new ArrayBuffer(3);
+    var w = new Uint8Array(ab);
+    w[0] = 1;
+    w[1] = 2;
+    w[2] = 3;
+    return ab;
+  });
+  assert(
+    binCtx.eval(
+      'var v = getBytesAb();' +
+        '(v instanceof ArrayBuffer) && v.byteLength === 3 && ' +
+        'new Uint8Array(v)[0] === 1 && new Uint8Array(v)[2] === 3'
+    ) === true,
+    'host ArrayBuffer return arrives in sandbox as ArrayBuffer, bytes intact'
+  );
+
+  binCtx.inject('getView', () => new Uint8Array([5, 6, 7, 8]).subarray(1, 3));
+  assert(
+    binCtx.eval(
+      'var v = getView();' +
+        '(v instanceof Uint8Array) && v.length === 2 && v[0] === 6 && v[1] === 7'
+    ) === true,
+    'host Uint8Array view return arrives in sandbox as Uint8Array window, bytes intact'
+  );
+
+  binCtx.inject('getEmptyAb', () => new ArrayBuffer(0));
+  assert(
+    binCtx.eval('var v = getEmptyAb(); (v instanceof ArrayBuffer) && v.byteLength === 0') === true,
+    'host zero-length ArrayBuffer return arrives as an empty ArrayBuffer'
+  );
+
   binRt.dispose();
 
   // Summary

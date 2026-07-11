@@ -177,6 +177,17 @@ class BinaryDecoder {
       operations.push(this.readOperation(flags));
     }
 
+    // Full-consumption check: every declared op has been read, so the buffer
+    // must be exactly spent. Trailing bytes mean either a corrupt/oversized
+    // frame or a desynced stream we silently mis-parsed — reject fail-closed,
+    // matching the authoritative streaming decoder (wire-decoder.ts) which also
+    // refuses a batch that does not end on a frame boundary. Reachable because
+    // Engine.injectRuntimeAPI routes ArrayBuffer batches through
+    // Bridge.sendBinaryBatch() into this decoder.
+    if (this.pos !== this.uint8.length) {
+      throw new Error(`Trailing bytes after batch: consumed ${this.pos} of ${this.uint8.length}`);
+    }
+
     return {
       version,
       batchId,

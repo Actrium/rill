@@ -3,6 +3,11 @@
 #import <JavaScriptCore/JavaScriptCore.h>
 #import <dlfcn.h>
 #import <os/log.h>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <string>
 #include <vector>
 
 namespace jsc_sandbox {
@@ -76,6 +81,130 @@ const char *typedArrayCtorName(JSTypedArrayType type) {
   default:
     return nullptr;
   }
+}
+
+// Inverse of typedArrayCtorName: the JSC typed-array kind for a host view
+// constructor name, or kJSTypedArrayTypeNone when JSC has no matching kind
+// (BigInt64Array / BigUint64Array / DataView — the caller falls back to the
+// raw ArrayBuffer, so the bytes still cross).
+JSTypedArrayType typedArrayTypeForCtorName(const std::string &name) {
+  if (name == "Int8Array") return kJSTypedArrayTypeInt8Array;
+  if (name == "Uint8Array") return kJSTypedArrayTypeUint8Array;
+  if (name == "Uint8ClampedArray") return kJSTypedArrayTypeUint8ClampedArray;
+  if (name == "Int16Array") return kJSTypedArrayTypeInt16Array;
+  if (name == "Uint16Array") return kJSTypedArrayTypeUint16Array;
+  if (name == "Int32Array") return kJSTypedArrayTypeInt32Array;
+  if (name == "Uint32Array") return kJSTypedArrayTypeUint32Array;
+  if (name == "Float32Array") return kJSTypedArrayTypeFloat32Array;
+  if (name == "Float64Array") return kJSTypedArrayTypeFloat64Array;
+  return kJSTypedArrayTypeNone;
+}
+
+// Host-realm ArrayBufferView constructor names eligible for host->sandbox
+// same-kind reconstruction (also the shape-detection allowlist).
+bool isViewCtorName(const std::string &name) {
+  static const char *kNames[] = {
+      "Int8Array",    "Uint8Array",    "Uint8ClampedArray", "Int16Array",
+      "Uint16Array",  "Int32Array",    "Uint32Array",       "Float32Array",
+      "Float64Array", "BigInt64Array", "BigUint64Array",    "DataView"};
+  for (const char *candidate : kNames) {
+    if (name == candidate) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Extract the byte WINDOW + view constructor name from a HOST jsi::Object that
+// is an ArrayBufferView shape ({buffer: ArrayBuffer, byteOffset, byteLength}).
+// Returns false when `obj` is not view-shaped or the window is out of range.
+// byteOffset/byteLength are validated as doubles BEFORE narrowing to size_t
+// (NaN/Infinity/negative/non-integer rejected): a merely view-shaped plain
+// object could otherwise force a UB / implementation-defined cast.
+bool extractHostViewBytes(jsi::Runtime &hostRt, const jsi::Object &obj,
+                          std::vector<uint8_t> &out, std::string &ctorName) {
+  jsi::Value ctorVal = obj.getProperty(hostRt, "constructor");
+  if (!ctorVal.isObject()) {
+    return false;
+  }
+  jsi::Value nameVal = ctorVal.getObject(hostRt).getProperty(hostRt, "name");
+  if (!nameVal.isString()) {
+    return false;
+  }
+  std::string name = nameVal.getString(hostRt).utf8(hostRt);
+  if (!isViewCtorName(name)) {
+    return false;
+  }
+
+  jsi::Value bufferVal = obj.getProperty(hostRt, "buffer");
+  jsi::Value offsetVal = obj.getProperty(hostRt, "byteOffset");
+  jsi::Value lengthVal = obj.getProperty(hostRt, "byteLength");
+  if (!bufferVal.isObject() || !offsetVal.isNumber() || !lengthVal.isNumber()) {
+    return false;
+  }
+  jsi::Object bufferObj = bufferVal.getObject(hostRt);
+  if (!bufferObj.isArrayBuffer(hostRt)) {
+    return false;
+  }
+
+  const double offsetD = offsetVal.getNumber();
+  const double lengthD = lengthVal.getNumber();
+  if (!std::isfinite(offsetD) || !std::isfinite(lengthD) || offsetD < 0 ||
+      lengthD < 0 || offsetD != std::floor(offsetD) ||
+      lengthD != std::floor(lengthD) ||
+      offsetD > static_cast<double>(SIZE_MAX) ||
+      lengthD > static_cast<double>(SIZE_MAX)) {
+    return false;
+  }
+
+  jsi::ArrayBuffer backing = bufferObj.getArrayBuffer(hostRt);
+  const size_t backingSize = backing.size(hostRt);
+  const auto offset = static_cast<size_t>(offsetD);
+  const auto length = static_cast<size_t>(lengthD);
+  if (offset > backingSize || length > backingSize - offset) {
+    return false;
+  }
+
+  const uint8_t *base = backing.data(hostRt) + offset;
+  out.assign(base, base + length);
+  ctorName = name;
+  return true;
+}
+
+// Build a sandbox-realm JSValue* from COPIED bytes: a raw ArrayBuffer when
+// `viewCtorName` is nullptr, otherwise the same-kind typed-array view (falling
+// back to the raw ArrayBuffer when JSC has no matching kind). The copy is owned
+// by the new ArrayBuffer and freed by its deallocator on GC.
+void *makeSandboxBytes(JSContext *ctx, const uint8_t *data, size_t len,
+                       const char *viewCtorName) {
+  JSContextRef ctxRef = [ctx JSGlobalContextRef];
+  void *buf = malloc(len ? len : 1);
+  if (len) {
+    memcpy(buf, data, len);
+  }
+  JSValueRef exc = nullptr;
+  JSObjectRef abRef = JSObjectMakeArrayBufferWithBytesNoCopy(
+      ctxRef, buf, len, [](void *bytes, void *) { free(bytes); }, nullptr, &exc);
+  if (exc || !abRef) {
+    // Ownership is NOT transferred when creation fails — free it ourselves.
+    free(buf);
+    return (__bridge void *)[JSValue valueWithUndefinedInContext:ctx];
+  }
+
+  if (viewCtorName) {
+    JSTypedArrayType type = typedArrayTypeForCtorName(viewCtorName);
+    if (type != kJSTypedArrayTypeNone) {
+      JSValueRef viewExc = nullptr;
+      JSObjectRef viewRef =
+          JSObjectMakeTypedArrayWithArrayBuffer(ctxRef, type, abRef, &viewExc);
+      if (!viewExc && viewRef) {
+        return (__bridge void *)[JSValue valueWithJSValueRef:viewRef
+                                                   inContext:ctx];
+      }
+    }
+    // Unknown/unsupported kind (or wrap failure): fall back to the ArrayBuffer.
+  }
+  return (__bridge void *)[JSValue valueWithJSValueRef:abRef inContext:ctx];
 }
 
 using JSCShouldTerminateCallback = bool (*)(JSContextRef ctx, void *context);
@@ -923,6 +1052,24 @@ void *JSCSandboxContext::jsiToJSValue(jsi::Runtime &rt,
     if (obj.isFunction(rt)) {
       jsi::Function func = obj.asFunction(rt);
       return wrapFunctionForSandbox(rt, std::move(func));
+    }
+
+    // Binary passthrough (host -> sandbox): a host capability result carrying
+    // an ArrayBuffer / typed-array must reach the guest as real bytes, not the
+    // generic Object.keys copy below (which sees zero own props and drops it to
+    // {}). Symmetric with jsValueToJSI's sandbox->host branch. Bytes are COPIED
+    // into the sandbox realm; the two realms never alias.
+    if (obj.isArrayBuffer(rt)) {
+      jsi::ArrayBuffer ab = obj.getArrayBuffer(rt);
+      return makeSandboxBytes(ctx, ab.data(rt), ab.size(rt), nullptr);
+    }
+    {
+      std::vector<uint8_t> window;
+      std::string viewCtor;
+      if (extractHostViewBytes(rt, obj, window, viewCtor)) {
+        return makeSandboxBytes(ctx, window.empty() ? nullptr : window.data(),
+                                window.size(), viewCtor.c_str());
+      }
     }
 
     // Handle arrays

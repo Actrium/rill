@@ -243,6 +243,21 @@ export function hoistSentinels(value: unknown): Hoisted {
   // Reason: walks arbitrary caller data structurally; Uint8Array leaves hoist to
   // segments, other values pass through unchanged.
   const walk = (v: unknown): unknown => {
+    // Apply JSON.stringify's toJSON hook FIRST (mirrors the spec's
+    // SerializeJSONProperty step 2). The structural copy below only carries own
+    // enumerable DATA props, so a Date/URL/custom object — whose JSON form lives
+    // entirely in toJSON — would otherwise collapse to an empty `{}` and lose its
+    // value. Call toJSON once, then serialize the returned value (its own props
+    // are walked below and may themselves have toJSON). Uint8Array has no toJSON,
+    // so byte leaves skip this and still hoist just below; a toJSON that yields
+    // bytes is likewise hoisted.
+    // Reason: probing an arbitrary caller value for JSON.stringify's toJSON hook.
+    const toJSONHook =
+      v !== null && typeof v === 'object' ? (v as { toJSON?: unknown }).toJSON : undefined;
+    if (typeof toJSONHook === 'function') {
+      // Reason: caller-provided toJSON returns arbitrary JSON-shaped data.
+      v = (toJSONHook as (key: string) => unknown).call(v, '');
+    }
     if (v instanceof Uint8Array) {
       if (segments.length >= LIMITS.maxSegments) {
         throw new StoreNetEnvelopeError('too-many-segments', `> ${LIMITS.maxSegments}`);

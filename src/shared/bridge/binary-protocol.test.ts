@@ -678,3 +678,26 @@ describe('BinaryProtocol FUNCTION reserved flag bits (fail-closed)', () => {
     expect(() => protocol.decodeBatch(bytes.buffer)).toThrow(/reserved flag bit/);
   });
 });
+
+// ============================================
+// Fail-closed: full consumption (no trailing bytes)
+// ============================================
+
+describe('BinaryProtocol full-consumption (fail-closed trailing bytes)', () => {
+  it('rejects a binary batch that leaves trailing bytes unconsumed', () => {
+    const protocol = new BinaryProtocol({ encoding: 'binary' });
+    const batch = createTestBatch([createCreateOp(1, 'View', { a: 1 })]);
+    const encoded = protocol.encodeBatch(batch) as ArrayBuffer;
+
+    // Sanity: the exact buffer round-trips.
+    expect(protocol.decodeBatch(encoded.slice(0))).toEqual(batch);
+
+    // A fully-parsed batch must leave the buffer exactly spent; one extra byte
+    // is a corrupt/oversized frame or a desynced stream. The authoritative
+    // streaming decoder rejects it too, so the legacy decoder must not diverge.
+    const padded = new Uint8Array(encoded.byteLength + 1);
+    padded.set(new Uint8Array(encoded), 0);
+    padded[padded.length - 1] = 0xff;
+    expect(() => protocol.decodeBatch(padded.buffer)).toThrow(/Trailing bytes/);
+  });
+});
