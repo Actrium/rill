@@ -24,6 +24,11 @@ let relay: Relay | null = null;
 
 function connect(url: string): WebSocket {
   const ws = new WebSocket(url);
+  // Keep a PERSISTENT error listener on every test socket: the helpers below
+  // use once(), which detaches after the first event, and a socket that errors
+  // again during teardown (e.g. a refused upgrade followed by the destroyed
+  // TCP socket) would otherwise raise an unhandled 'error' and kill the run.
+  ws.on('error', () => {});
   openSockets.push(ws);
   return ws;
 }
