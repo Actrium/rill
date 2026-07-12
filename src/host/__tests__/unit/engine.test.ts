@@ -2,7 +2,7 @@
  * Engine unit tests
  */
 
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import React from 'react';
 import { Engine } from '../../engine';
 
@@ -13,9 +13,15 @@ const MockView: React.FC<{ children?: React.ReactNode }> = ({ children }) =>
 const MockText: React.FC<{ children?: React.ReactNode }> = ({ children }) =>
   React.createElement('Text', null, children);
 
-// Mock fetch
+// Mock fetch — and RESTORE it: bun test runs every file in one process, so a
+// leaked global mock breaks later files that talk to a real local server
+// (e.g. the cdp-relay tests).
+const realFetch = global.fetch;
 const mockFetch = mock();
 global.fetch = mockFetch;
+afterAll(() => {
+  global.fetch = realFetch;
+});
 
 describe('Engine', () => {
   let engine: Engine;
