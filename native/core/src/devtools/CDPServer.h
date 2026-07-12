@@ -179,9 +179,10 @@ public:
    * handleDiscoveryRequest directly).
    *
    * On Apple, the ws listener auto-upgrades and never yields a plain GET, so the
-   * transport surfaces this callback from a sibling loopback plain-TCP listener
-   * on port + 1 (see CDPTransportApple's startHttpListener); the ws port itself
-   * only ever speaks WebSocket.
+   * transport surfaces this callback from a sibling loopback plain-TCP listener.
+   * That sibling holds the CONFIGURED port — chrome://inspect probes /json on
+   * exactly the host:port the user typed in — and the WebSocket listener moves
+   * to webSocketPort() (configured port + 1); see CDPTransportApple.
    */
   using OnHttpGetCallback =
       std::function<HttpResponse(const std::string& method, const std::string& path)>;
@@ -191,6 +192,18 @@ public:
    * @return true if started successfully
    */
   virtual bool start(const std::string& host, uint16_t port) = 0;
+
+  /**
+   * The port the WebSocket surface actually listens on, for a given configured
+   * port. Defaults to the configured port itself (one listener speaks both HTTP
+   * discovery and WebSocket). A transport that cannot serve both on one listener
+   * overrides this: discovery keeps the configured port (chrome://inspect probes
+   * /json on exactly the host:port the user configured) and the ws listener
+   * moves to the returned port. CDPServer uses this to build every
+   * webSocketDebuggerUrl, so discovered targets always point at the real ws
+   * listener. Must be stable from construction (CDPServer reads it once).
+   */
+  virtual uint16_t webSocketPort(uint16_t configuredPort) const { return configuredPort; }
 
   /**
    * Stop the transport and close all connections.
@@ -338,7 +351,18 @@ struct CDPSession {
   SessionId id;                  // Session identifier
   TenantId tenantId = 0;         // Associated tenant (0 if not attached)
   ConnectionId connectionId = 0; // WebSocket connection
-  
+
+  // Debug-target binding for the sessionId multiplex: one WebSocket may hold
+  // several Target-attached sessions, and each must look like its OWN client
+  // to the tenant's debug target (own agent, own sink, own sessionId tag). So
+  // the server presents the session to the target under a server-generated
+  // VIRTUAL connection id rather than the shared socket id. 0 = not bound yet
+  // (bound lazily on the session's first owned-domain request).
+  ConnectionId targetConnId = 0;
+  // The target the virtual connection was handed to, so detach/teardown can
+  // call onClientDisconnect(targetConnId) even after tenantTargets_ changed.
+  std::shared_ptr<IEngineDebugTarget> target;
+
   // Enabled domains
   bool consoleEnabled = false;
   bool runtimeEnabled = false;
@@ -440,9 +464,16 @@ public:
   bool isRunning() const;
   
   /**
-   * Get server port
+   * Get the configured (discovery) port
    */
   uint16_t getPort() const { return config_.port; }
+
+  /**
+   * Get the port the WebSocket surface actually listens on. Equals getPort()
+   * unless the transport splits discovery and ws across sibling ports (see
+   * CDPTransport::webSocketPort).
+   */
+  uint16_t getWebSocketPort() const { return wsPort_; }
   
   // ============================================
   // Tenant Management
@@ -593,7 +624,13 @@ private:
   // ============================================
   // Internal Types
   // ============================================
-  
+
+  // (Possibly virtual) connection ids paired with the target they were handed
+  // to, collected under mutex_ so the caller can invoke onClientDisconnect
+  // OUTSIDE the lock (the target may re-enter the server).
+  using TargetDetachList =
+      std::vector<std::pair<ConnectionId, std::shared_ptr<IEngineDebugTarget>>>;
+
   struct Connection {
     ConnectionId id = 0;
     std::string remoteAddress;
@@ -623,9 +660,12 @@ private:
   std::optional<CDPRequest> parseRequest(const std::string& json);
   
   /**
-   * Route request to appropriate domain adapter
+   * Route request to appropriate domain adapter. Runs under mutex_; any target
+   * connections it drops (Target.detachFromTarget) are appended to
+   * `deferredTargetDetach` for the caller to release OUTSIDE the lock.
    */
-  CDPResponse routeRequest(const CDPRequest& request, const CDPSession& session);
+  CDPResponse routeRequest(const CDPRequest& request, const CDPSession& session,
+                           TargetDetachList& deferredTargetDetach);
   
   /**
    * Send response to connection
@@ -686,8 +726,17 @@ private:
    * (nullptr = all), so the caller can invoke onClientDisconnect OUTSIDE the
    * lock. Caller must hold mutex_.
    */
-  std::vector<std::pair<ConnectionId, std::shared_ptr<IEngineDebugTarget>>>
+  TargetDetachList
   detachConnectionTargetsLocked(const std::shared_ptr<IEngineDebugTarget>& target);
+
+  /**
+   * The per-session counterpart: clear the virtual target connections of every
+   * session bound to `target` (nullptr = any) and return the (virtualConnId,
+   * target) pairs for onClientDisconnect OUTSIDE the lock. The sessions
+   * themselves are left in place. Caller must hold mutex_.
+   */
+  TargetDetachList
+  detachSessionTargetsLocked(const std::shared_ptr<IEngineDebugTarget>& target);
   
   // ============================================
   // Domain Handlers
@@ -699,7 +748,8 @@ private:
   CDPResponse handleDOMMethod(const CDPRequest& req, CDPSession& session);
   CDPResponse handleNetworkMethod(const CDPRequest& req, CDPSession& session);
   CDPResponse handleProfilerMethod(const CDPRequest& req, CDPSession& session);
-  CDPResponse handleTargetMethod(const CDPRequest& req, CDPSession& session);
+  CDPResponse handleTargetMethod(const CDPRequest& req, CDPSession& session,
+                                 TargetDetachList& deferredTargetDetach);
   
   // ============================================
   // Utility
@@ -709,6 +759,14 @@ private:
    * Generate unique connection ID
    */
   ConnectionId generateConnectionId();
+
+  /**
+   * Generate a VIRTUAL connection id for a Target-attached session (see
+   * CDPSession::targetConnId). Lives in its own id namespace — top bit set —
+   * so it can never collide with a transport-assigned socket id, which targets
+   * also key their per-connection state by.
+   */
+  ConnectionId generateVirtualConnectionId();
   
   /**
    * Generate unique session ID
@@ -735,7 +793,12 @@ private:
   // ============================================
   
   CDPServerConfig config_;
-  
+
+  // The port the WebSocket surface actually listens on (config_.port unless the
+  // transport splits ws and discovery across sibling ports). Every
+  // webSocketDebuggerUrl is built from this, never from config_.port.
+  uint16_t wsPort_ = 0;
+
   mutable std::mutex mutex_;
   
   // Server state

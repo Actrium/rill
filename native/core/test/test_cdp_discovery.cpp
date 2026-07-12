@@ -63,11 +63,29 @@ struct RecordingTarget : public IEngineDebugTarget {
   }
 };
 
+// A transport that, like CDPTransportApple, serves discovery on the configured
+// port and moves the ws surface to the sibling port.
+struct SplitPortTransport : public MockTransport {
+  uint16_t webSocketPort(uint16_t configuredPort) const override {
+    return static_cast<uint16_t>(configuredPort + 1);
+  }
+};
+
 // Pull the first "sessionId" value out of a sequence of sent messages.
 std::string firstSessionId(const std::vector<std::pair<ConnectionId, std::string>>& sent) {
   for (const auto& [c, m] : sent) {
     (void)c;
     auto sid = cdp::parseJSONString(m, "sessionId");
+    if (sid) return *sid;
+  }
+  return {};
+}
+
+// Pull the sessionId out of the FIRST message at index >= from that carries one.
+std::string sessionIdFrom(const std::vector<std::pair<ConnectionId, std::string>>& sent,
+                          size_t from) {
+  for (size_t i = from; i < sent.size(); ++i) {
+    auto sid = cdp::parseJSONString(sent[i].second, "sessionId");
     if (sid) return *sid;
   }
   return {};
@@ -306,6 +324,124 @@ TestSuite createCDPDiscoveryTests() {
     assertTrue(transport->sent.back().second.find("error") != std::string::npos, "unknown session -> error");
 
     transport->simulateDisconnect(kConn);
+    server.stop();
+  }});
+
+  // --- split-port transports (Apple): ws urls point at the real ws port ------
+
+  suite.cases.push_back({"webSocketDebuggerUrl follows the transport's ws port; discovery keeps the configured port", []() {
+    auto transport = std::make_shared<SplitPortTransport>();
+    CDPServerConfig cfg;
+    cfg.host = "127.0.0.1";
+    cfg.port = 9229;
+    cfg.transport = transport;
+    CDPServer server(cfg);
+    server.registerTenant(1, "App A");
+
+    assertEqual(server.getPort(), uint16_t(9229), "configured (discovery) port");
+    assertEqual(server.getWebSocketPort(), uint16_t(9230), "ws surface on the sibling port");
+    // Discovery itself stays on the configured port (chrome://inspect probes it).
+    assertEqual(server.getTargetListUrl(), std::string("http://127.0.0.1:9229/json"), "discovery url");
+    // Every ws url the server hands out points at the REAL ws listener.
+    assertEqual(server.getWebSocketUrl(1), std::string("ws://127.0.0.1:9230/tenant/1"), "per-tenant ws url");
+    HttpResponse version = server.handleDiscoveryRequest("GET", "/json/version");
+    assertTrue(version.body.find("\"ws://127.0.0.1:9230/\"") != std::string::npos, "root ws url on ws port");
+    HttpResponse list = server.handleDiscoveryRequest("GET", "/json/list");
+    assertTrue(list.body.find("ws://127.0.0.1:9230/tenant/1") != std::string::npos, "list ws url on ws port");
+    assertTrue(list.body.find(":9229/tenant/") == std::string::npos, "no ws url leaks the discovery port");
+  }});
+
+  // --- one socket, several attached sessions ---------------------------------
+
+  suite.cases.push_back({"two sessions on one socket route to their own tenants with their own sinks", []() {
+    auto transport = std::make_shared<MockTransport>();
+    auto targetA = std::make_shared<RecordingTarget>();
+    auto targetB = std::make_shared<RecordingTarget>();
+    CDPServerConfig cfg;
+    cfg.enabled = true;
+    cfg.transport = transport;
+    CDPServer server(cfg);
+    server.registerTenant(1, "App A");
+    server.registerTenant(2, "App B");
+    server.registerDebugTarget(1, targetA);
+    server.registerDebugTarget(2, targetB);
+    server.start();
+
+    const ConnectionId kConn = 900;
+    transport->simulateConnect(kConn);
+
+    // Attach to both tenants over the SAME socket.
+    size_t mark = transport->sent.size();
+    transport->simulateMessage(kConn, R"({"id":1,"method":"Target.attachToTarget","params":{"targetId":"1","flatten":true}})");
+    std::string sidA = sessionIdFrom(transport->sent, mark);
+    mark = transport->sent.size();
+    transport->simulateMessage(kConn, R"({"id":2,"method":"Target.attachToTarget","params":{"targetId":"2","flatten":true}})");
+    std::string sidB = sessionIdFrom(transport->sent, mark);
+    assertTrue(!sidA.empty() && !sidB.empty() && sidA != sidB, "two distinct sessionIds");
+
+    // Each session's Debugger.* lands in ITS tenant's target — including the
+    // second one, which must get its own agent/sink rather than being dropped.
+    transport->simulateMessage(kConn, std::string("{\"id\":3,\"method\":\"Debugger.enable\",\"sessionId\":\"") + sidA + "\"}");
+    transport->simulateMessage(kConn, std::string("{\"id\":4,\"method\":\"Debugger.enable\",\"sessionId\":\"") + sidB + "\"}");
+    assertEqual(targetA->received.size(), size_t(1), "tenant 1 got its request");
+    assertEqual(targetB->received.size(), size_t(1), "tenant 2 got its request (not starved)");
+    assertEqual(targetA->sinks.size(), size_t(1), "tenant 1 target has its own client");
+    assertEqual(targetB->sinks.size(), size_t(1), "tenant 2 target has its own client");
+
+    // Replies are tagged with the RIGHT sessionId per session.
+    transport->sent.clear();
+    transport->simulateMessage(kConn, std::string("{\"id\":5,\"method\":\"Debugger.resume\",\"sessionId\":\"") + sidB + "\"}");
+    assertTrue(transport->sent.back().second.find(sidB) != std::string::npos, "reply tagged with session B");
+    assertTrue(transport->sent.back().second.find(sidA) == std::string::npos, "not tagged with session A");
+
+    // Detach session A: its target connection is released (onClientDisconnect),
+    // session B keeps working untouched.
+    transport->simulateMessage(kConn, std::string("{\"id\":6,\"method\":\"Target.detachFromTarget\",\"params\":{\"sessionId\":\"") + sidA + "\"}}");
+    assertEqual(targetA->sinks.size(), size_t(0), "detach released tenant 1's client connection");
+    assertEqual(targetB->sinks.size(), size_t(1), "tenant 2's client survives A's detach");
+    transport->simulateMessage(kConn, std::string("{\"id\":7,\"method\":\"Debugger.resume\",\"sessionId\":\"") + sidB + "\"}");
+    assertEqual(targetB->received.size(), size_t(3), "session B still routes after A detached");
+
+    // Socket teardown sweeps the remaining attached session.
+    transport->simulateDisconnect(kConn);
+    assertEqual(targetB->sinks.size(), size_t(0), "disconnect released tenant 2's client connection");
+    assertEqual(server.getSessionCount(), size_t(0), "no sessions survive the socket");
+    server.stop();
+  }});
+
+  suite.cases.push_back({"two sessions attached to the SAME tenant are separate clients to its target", []() {
+    auto transport = std::make_shared<MockTransport>();
+    auto target = std::make_shared<RecordingTarget>();
+    CDPServerConfig cfg;
+    cfg.enabled = true;
+    cfg.transport = transport;
+    CDPServer server(cfg);
+    server.registerTenant(5, "App");
+    server.registerDebugTarget(5, target);
+    server.start();
+
+    const ConnectionId kConn = 901;
+    transport->simulateConnect(kConn);
+    size_t mark = transport->sent.size();
+    transport->simulateMessage(kConn, R"({"id":1,"method":"Target.attachToTarget","params":{"targetId":"5","flatten":true}})");
+    std::string sid1 = sessionIdFrom(transport->sent, mark);
+    mark = transport->sent.size();
+    transport->simulateMessage(kConn, R"({"id":2,"method":"Target.attachToTarget","params":{"targetId":"5","flatten":true}})");
+    std::string sid2 = sessionIdFrom(transport->sent, mark);
+    assertTrue(!sid1.empty() && !sid2.empty() && sid1 != sid2, "distinct sessions");
+
+    transport->simulateMessage(kConn, std::string("{\"id\":3,\"method\":\"Debugger.enable\",\"sessionId\":\"") + sid1 + "\"}");
+    transport->simulateMessage(kConn, std::string("{\"id\":4,\"method\":\"Debugger.enable\",\"sessionId\":\"") + sid2 + "\"}");
+    assertEqual(target->sinks.size(), size_t(2), "one client connection per session");
+
+    // The second session's replies carry ITS id, not the first one's.
+    transport->sent.clear();
+    transport->simulateMessage(kConn, std::string("{\"id\":5,\"method\":\"Debugger.resume\",\"sessionId\":\"") + sid2 + "\"}");
+    assertTrue(transport->sent.back().second.find(sid2) != std::string::npos, "tagged with its own session");
+    assertTrue(transport->sent.back().second.find(sid1) == std::string::npos, "not the sibling session");
+
+    transport->simulateDisconnect(kConn);
+    assertEqual(target->sinks.size(), size_t(0), "disconnect sweeps both sessions' clients");
     server.stop();
   }});
 
