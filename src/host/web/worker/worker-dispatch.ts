@@ -17,11 +17,16 @@
  * debugger is enabled, so a turn is never re-entered on top of a stack that is
  * suspended at a breakpoint (with the QuickJS-asyncify debug build a breakpoint
  * unwinds and parks the C stack; a second eval on top of it is undefined
- * behaviour). That means BOTH kinds of entry:
- *   - inbound worker messages (load / event / invoke), gated in handle(); and
+ * behaviour). That means EVERY kind of entry:
+ *   - inbound guest-eval messages (load / event / invoke), gated in handle();
+ *   - inbound messages that eval into the guest as a side effect — config
+ *     (CONFIG_UPDATE eval) and resume (flushes pause-queued HOST_EVENT evals) —
+ *     gated in handle() the same way; and
  *   - engine-owned timer callbacks (setTimeout/setInterval fire from the worker
  *     event loop, not via postMessage), routed through the same gate via
  *     {@link GuestEngineLike.setGuestTurnRunner} at init.
+ * Deliberately NOT gated: pause (clock freeze, never enters the guest) and
+ * destroy (teardown must not park behind a dead session's suspend).
  *
  * `dbg.evaluateOnCallFrame` and `dbg.getProperties`, however, are NOT new eval turns —
  * they are control-plane sub-operations OF the already-suspended turn (inspect a frame,
@@ -169,15 +174,26 @@ export class WorkerDispatch {
         // own GC handles unmounted trees). A no-op here; tracked as a follow-up.
         break;
       case 'config':
-        this.#engine?.updateConfig(message.config as BridgeValueObject);
+        // updateConfig evals into the guest (CONFIG_UPDATE → __rill_handleMessage),
+        // so it is guest-eval entry exactly like event/invoke and takes the gate.
+        this.#runGuestTurn(() => this.#engine?.updateConfig(message.config as BridgeValueObject));
         break;
       case 'pause':
+        // Clock freeze only — pause() never enters the guest, and deferring it
+        // behind an outstanding breakpoint suspend would delay freezing timers
+        // exactly when the debugger wants the world quiet. Stays direct.
         this.#engine?.pause();
         break;
       case 'resume':
-        this.#engine?.resume();
+        // resume() flushes events queued while paused straight into the guest
+        // (each is a HOST_EVENT eval) — guest-eval entry, so it takes the gate;
+        // a flush landing on top of a parked breakpoint stack would re-enter it.
+        this.#runGuestTurn(() => this.#engine?.resume());
         break;
       case 'destroy':
+        // Teardown stays direct: parking it behind a suspend could deadlock a
+        // dead session (nothing left to drain the gate). Destroying a suspended
+        // runtime is the documented teardown edge (dispose without resume).
         this.#engine?.destroy();
         this.#engine = null;
         break;

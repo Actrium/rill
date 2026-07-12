@@ -49,9 +49,18 @@ class MockEngine {
     this.invokes.push(fnId);
     return undefined;
   }
-  updateConfig(): void {}
-  pause(): void {}
-  resume(): void {}
+  configs = 0;
+  paused = 0;
+  resumed = 0;
+  updateConfig(): void {
+    this.configs++;
+  }
+  pause(): void {
+    this.paused++;
+  }
+  resume(): void {
+    this.resumed++;
+  }
   destroy(): void {
     this.destroyed = true;
   }
@@ -184,6 +193,38 @@ describe('WorkerDispatch — control-plane dbg ops bypass the guest-eval gate', 
     h.send({ type: 'dbg.getProperties', requestId: 3, objectId: 'obj:1' });
     expect(h.last('dbg.evalResult')?.requestId).toBe(2);
     expect(h.last('dbg.propertiesResult')?.requestId).toBe(3);
+  });
+
+  it('config and engine-resume are guest-eval entry too: deferred during a suspend', async () => {
+    // updateConfig evals CONFIG_UPDATE into the guest; engine.resume() flushes
+    // pause-queued HOST_EVENT evals. Neither may land on a parked breakpoint stack.
+    const h = setup();
+    init(h);
+    h.send({ type: 'dbg.enable', requestId: 1 });
+    h.send({ type: 'dbg.pause', requestId: 2 });
+
+    h.send({ type: 'config', config: { theme: 'dark' } });
+    h.send({ type: 'resume' });
+    expect(h.engine.configs).toBe(0);
+    expect(h.engine.resumed).toBe(0);
+    // pause stays DIRECT — clock freeze must not queue behind the suspend.
+    h.send({ type: 'pause' });
+    expect(h.engine.paused).toBe(1);
+
+    h.send({ type: 'dbg.resume', requestId: 3 });
+    await flush();
+    expect(h.engine.configs).toBe(1);
+    expect(h.engine.resumed).toBe(1);
+  });
+
+  it('config and engine-resume run directly with no debug session', () => {
+    const h = setup();
+    init(h);
+    h.send({ type: 'config', config: {} });
+    h.send({ type: 'resume' });
+    expect(h.engine.configs).toBe(1);
+    expect(h.engine.resumed).toBe(1);
+    expect(h.dispatch.pendingTurns).toBe(0);
   });
 
   it('dbg.disable drains the gate and restores the direct eval path', () => {
