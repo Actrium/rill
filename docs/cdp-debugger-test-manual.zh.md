@@ -20,7 +20,7 @@ CDP 客户端库经真 WebSocket 驱动的前端联调,以及真 Chrome DevTools
 
 | # | 能力 | 测试套 | 机器 | 期望 | 现状 |
 |---|------|--------|------|------|------|
-| A | 协议/适配器/服务/接缝 + `/json` 发现端点 + `parseRequestLine` 单元 | `native/core` `make test` | 任意 | 384/384 | ✅ |
+| A | 协议/适配器/服务/接缝 + `/json` 发现端点 + 多 session 路由 + `parseRequestLine` 单元 | `native/core` `make test` | 任意 | 388/388 | ✅ |
 | B | QuickJS 引擎:断点/单步/真栈/多租户 | `native/quickjs/test/build-run.sh` | 任意(本地 C) | 26 ALL PASS | ✅ |
 | C | QuickJS CDP 全栈(裸 CDP 报文)+ 帧内作用域求值 + 嵌套对象展开 | `native/quickjs/test/build-run-cdp.sh` | 任意 | 39 ALL PASS | ✅ |
 | D | Hermes CDP 接真 hermes.framework | `native/hermes/test/build-run.sh` | **s67**(需 destroot) | 7/7 ALL PASS | ✅ |
@@ -28,8 +28,8 @@ CDP 客户端库经真 WebSocket 驱动的前端联调,以及真 Chrome DevTools
 | F | 真前端(chrome-remote-interface)经真 WS | `native/quickjs/tools/` 三件套 | Linux + **s67** | 8/8 ALL PASS | ✅ |
 | G | QuickJS-asyncify VM 级暂停/恢复 PoC(Milestone A) | `native/quickjs/poc/`(需 emsdk) | 任意(emcc+node) | 3/3 claims PASS | ✅ |
 | I | Milestone B 核心:asyncify 调试核心 + **跨 unwind evaluate**(debug wasm) | `native/quickjs/build-wasm-debug.sh` + `test/run-debug-wasm.mjs`(需 emsdk) | 任意(emcc+node) | 11/11 claims PASS | ✅ |
-| J | Milestone B web 端:worker `dbg.*` 协议 + TurnGate + CDP 翻译器 + 绕闸路由 | `src/host/web/worker/__tests__`(bun) | 任意 | 50/50 PASS | ✅ |
-| K | 胖 CDP debug wasm(直接讲原始 CDP,含 `Runtime.getProperties` 路由)+ web 端 `CdpDebugSession`(真 wasm)+ 反向隧道 relay | `native/quickjs/test/run-cdp-wasm.mjs` + `src/host/web/{worker,tools}`(bun) | 任意(emcc+node/bun) | 9/9 + 65/65 + 4/4 PASS | ✅ |
+| J | Milestone B web 端:worker `dbg.*` 协议 + TurnGate + CDP 翻译器 + 绕闸路由 + **timer 回调门控**(真 TimerManager)+ `CdpDebugSession`(真 wasm) | `src/host/web/worker/__tests__`(bun) | 任意 | 71/71 PASS | ✅ |
+| K | 胖 CDP debug wasm(直接讲原始 CDP,含 `Runtime.getProperties` 路由)+ 反向隧道 relay | `native/quickjs/test/run-cdp-wasm.mjs` + `src/host/web/tools`(bun;web 端 session 测试并入 J 行) | 任意(emcc+node/bun) | 9/9 + 4/4 PASS | ✅ |
 | L | **浏览器内 E2E**:无头 Chromium,原始 CDP 客户端 → relay → 页面 → worker → 胖 wasm 全链(含作用域展开) | `tests/cdp-debug/`(`bun run test:e2e:cdp`) | 有 Chromium 的机 | 1/1 PASS | ✅ |
 | H | 真 Chrome DevTools GUI 实连 | 见 §8 人肉清单 | 有 GUI 的机 | 人肉核对 | ⏳ 待人肉 |
 
@@ -49,7 +49,9 @@ cd native/core
 make clean && make test        # 改过 .h 必须 clean(无头依赖追踪)
 ```
 
-**期望**:末行 `Total: 379 passed, 0 failed, 379 total`(含 `/json` 发现端点 11 例 + service 层 1 例)。
+**期望**:末行 `Total: 388 passed, 0 failed, 388 total`(含 `/json` 发现端点与
+多 session 路由 20 例——一 socket 双租户、同租户双 session、split-port ws url、unregister/stop 释放——
++ service 层 1 例)。
 Makefile 已带 `WIP_DEFS = -DRILL_WIP_CDP_DEVTOOLS=1 …`,无需额外 flag。
 
 可选消毒器:`make asan`(地址)、`make tsan`(线程)。
@@ -112,8 +114,13 @@ bash native/quickjs/test/build-run-cdp.sh
 **须在 s67**(macOS,备有带 CDP 符号的 debug Hermes pod)。
 
 ```bash
-# s67 上,checkout 于 ~/rill-arch-check(rsync 同步)
-HERMES_DESTROOT=/Users/leo/actrium/actro/apps/macos/actro/Pods/hermes-engine/destroot \
+# s67 上,checkout 于 ~/rill-arch-check(rsync 同步)。destroot 必须是 DEBUG 版
+# hermes(带 CDP 符号,判别:nm <framework>/hermes | grep -c CDPAgent > 0);
+# rn-macos fixture 的 Pods destroot 是 Release 版、链接必失败。已验证可用的
+# 来源是 CocoaPods 缓存里的 debug 变体,例如:
+HERMES_DESTROOT=$(for d in ~/Library/Caches/CocoaPods/Pods/External/hermes-engine/*/; do \
+    f=$(find "$d" -path "*macosx*" -name hermes -type f | head -1); \
+    [ -n "$f" ] && [ "$(nm "$f" | grep -c CDPAgent)" -gt 0 ] && { echo "${d}destroot"; break; }; done) \
   bash native/hermes/test/build-run.sh
 ```
 
@@ -132,8 +139,8 @@ HERMES_DESTROOT=/Users/leo/actrium/actro/apps/macos/actro/Pods/hermes-engine/des
 验「暂停期不计入 eval 超时预算」:暂停边界 `unwatchTimeLimit`、resume 重 arm。
 
 ```bash
-HERMES_DESTROOT=/Users/leo/actrium/actro/apps/macos/actro/Pods/hermes-engine/destroot \
-  bash native/hermes/test/build-run-watchdog.sh
+# HERMES_DESTROOT 取法同 §4(必须 debug 版 hermes)
+HERMES_DESTROOT=<debug destroot> bash native/hermes/test/build-run-watchdog.sh
 ```
 
 **期望**:**3/3 PASS** —— 关调和时 150ms 预算的 eval 在断点上 hold 600ms →
@@ -314,8 +321,12 @@ ssh leo@s67 'cd ~/rill-arch-check && clang++ -std=c++17 -fsyntax-only \
   `JS_Call` 对快照求值(悬垂帧指针置空 + 钩子抑制 + `paused_` 再入门 + 异常排空),
   对象突变经 dup 身份传回 guest(§7.1 debug wasm 11/11 已验,含对抗性复审收口的四项:
   异常排空、web 再入门、RAII 恢复、teardown 释放);发现端点的 **Apple 传输 HTTP 监听**
-  (loopback 双监听:ws + port+1 的 plain-TCP GET,§1 A `parseRequestLine` 已验,
-  s67 语法/构建已过);**胖 CDP debug wasm**——把真 CDP 引擎
+  (loopback 双监听,**配置端口 = /json discovery、ws 挪 port+1**——chrome://inspect
+  对配置的 host:port 发 /json 探测,所有 `webSocketDebuggerUrl` 由
+  `CDPTransport::webSocketPort()` 指向真 ws 口;§1 A `parseRequestLine`/split-port
+  已验,s67 真 Network.framework 双监听运行时 e2e 6/6 已验);**PR #30 review 五修复**
+  ——多 session 虚拟连接、Apple 端口对调、Hermes CDPAgent in-flight shared_ptr、
+  TimerManager 回调过 TurnGate、build.sh debug guest 清单(§1 A/§0 J 已验);**胖 CDP debug wasm**——把真 CDP 引擎
   (`AdapterDebugTarget → DebuggerAdapter → QuickJSEngineDebugger → core`)编进 asyncify
   wasm,直接讲原始 CDP,浏览器/worker/relay 退化为哑管道(`build-wasm-cdp.sh` +
   `test/run-cdp-wasm.mjs` 8/8 已验;单一序列化来源,不在 TS 里重实现 CDP);

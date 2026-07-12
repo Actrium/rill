@@ -445,6 +445,42 @@ TestSuite createCDPDiscoveryTests() {
     server.stop();
   }});
 
+  suite.cases.push_back({"unregisterDebugTarget and stop release attached sessions' target connections", []() {
+    auto transport = std::make_shared<MockTransport>();
+    auto target = std::make_shared<RecordingTarget>();
+    CDPServerConfig cfg;
+    cfg.enabled = true;
+    cfg.transport = transport;
+    CDPServer server(cfg);
+    server.registerTenant(6, "App");
+    server.registerDebugTarget(6, target);
+    server.start();
+
+    const ConnectionId kConn = 902;
+    transport->simulateConnect(kConn);
+    size_t mark = transport->sent.size();
+    transport->simulateMessage(kConn, R"({"id":1,"method":"Target.attachToTarget","params":{"targetId":"6","flatten":true}})");
+    std::string sid = sessionIdFrom(transport->sent, mark);
+    transport->simulateMessage(kConn, std::string("{\"id\":2,\"method\":\"Debugger.enable\",\"sessionId\":\"") + sid + "\"}");
+    assertEqual(target->sinks.size(), size_t(1), "attached session bound to the target");
+
+    // Unregistering the tenant's target must release the session's virtual
+    // connection, not just the raw-socket bindings.
+    server.unregisterDebugTarget(6);
+    assertEqual(target->sinks.size(), size_t(0), "unregisterDebugTarget released the session's client");
+    // The session itself survives; its Debugger.* now falls back to the local
+    // handler instead of the (gone) target.
+    transport->simulateMessage(kConn, std::string("{\"id\":3,\"method\":\"Debugger.enable\",\"sessionId\":\"") + sid + "\"}");
+    assertEqual(target->received.size(), size_t(1), "no dispatch into an unregistered target");
+
+    // Re-register, rebind on next request, then stop() must sweep it too.
+    server.registerDebugTarget(6, target);
+    transport->simulateMessage(kConn, std::string("{\"id\":4,\"method\":\"Debugger.enable\",\"sessionId\":\"") + sid + "\"}");
+    assertEqual(target->sinks.size(), size_t(1), "rebound after re-register");
+    server.stop();
+    assertEqual(target->sinks.size(), size_t(0), "stop() released the rebound client");
+  }});
+
   suite.cases.push_back({"injectSessionId adds a sessionId only when absent", []() {
     assertTrue(cdp::injectSessionId("{\"id\":1,\"result\":{}}", "S")
                    .find("\"sessionId\":\"S\"") != std::string::npos, "added to non-empty object");
