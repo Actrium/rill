@@ -12,7 +12,6 @@ export { DiagnosticsCollector } from './diagnostics-collector';
 // Export Engine class (core sandbox runtime manager)
 export { Engine } from './engine';
 // Export utility modules (for testing and advanced usage)
-export { EventManager } from './events';
 export {
   CONSOLE_SETUP_CODE,
   createCommonJSGlobals,

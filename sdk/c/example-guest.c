@@ -7,10 +7,11 @@
 #include "rill_guest.h"
 
 __attribute__((export_name("rill_init"))) void rill_init(void) {
+  /* Text nodes are CREATE type "__TEXT__" with props.text — the shape the
+   * host receiver renders as Text children (same as the JS reconciler). */
   rill_render("{\"version\":1,\"batchId\":1,\"operations\":["
               "{\"op\":\"CREATE\",\"id\":1,\"type\":\"View\",\"props\":{}},"
-              "{\"op\":\"CREATE\",\"id\":2,\"type\":\"Text\",\"props\":{}},"
-              "{\"op\":\"TEXT\",\"id\":2,\"text\":\"hello from c\"},"
+              "{\"op\":\"CREATE\",\"id\":2,\"type\":\"__TEXT__\",\"props\":{\"text\":\"hello from c\"}},"
               "{\"op\":\"APPEND\",\"id\":0,\"parentId\":1,\"childId\":2},"
               "{\"op\":\"APPEND\",\"id\":0,\"parentId\":0,\"childId\":1}"
               "]}");

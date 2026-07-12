@@ -36,7 +36,7 @@ const engine = new Engine({
 });
 ```
 
-For the QuickJS provider, timeout enforcement is best-effort because QuickJS does not support preemptive interruption from another thread in all cases.
+Enforcement is engine-specific: the QuickJS and Hermes (JSI) providers abort a runaway eval with a hard wall-clock interrupt; JSC has no public interrupt API and does not enforce the timeout by default (opt in with `enableExecutionTimeLimit: true` to enforce it via a `dlsym`-resolved private API — App Store review caveat) — see [Sandbox Comparison](../reference/sandbox-comparison.md) for the full matrix.
 
 ### Error Classification
 
@@ -110,26 +110,29 @@ const engine = new Engine({
 
 ## Health Check API
 
+All health and resource data is exposed through a single method, `engine.getDiagnostics()`, which returns an `EngineDiagnostics` snapshot.
+
 ### Engine Health
 
 ```ts
-const health = engine.getHealth();
+const { health } = engine.getDiagnostics();
 ```
 
 ```ts
 interface EngineHealth {
-  loaded: boolean;        // true if a bundle has been successfully loaded
-  destroyed: boolean;     // true if engine.destroy() has been called
-  errorCount: number;     // total errors since creation
-  lastErrorAt: number;    // timestamp (ms) of the most recent error, or 0
-  receiverNodes: number;  // current number of nodes tracked by the receiver
+  loaded: boolean;             // true if a bundle has been successfully loaded
+  destroyed: boolean;          // true if engine.destroy() has been called
+  errorCount: number;          // total errors since creation
+  lastErrorAt: number | null;  // timestamp (ms) of the most recent error, or null
+  receiverNodes: number;       // current number of nodes tracked by the receiver
+  batching: boolean;           // whether operation batching is active
 }
 ```
 
 ### Resource Stats
 
 ```ts
-const stats = engine.getResourceStats();
+const { resources } = engine.getDiagnostics();
 ```
 
 ```ts
@@ -140,7 +143,7 @@ interface ResourceStats {
 }
 ```
 
-Use these endpoints to build liveness probes or dashboard panels that surface sandbox health alongside your application metrics.
+Use this snapshot to build liveness probes or dashboard panels that surface sandbox health alongside your application metrics.
 
 ---
 
@@ -217,5 +220,5 @@ Before shipping to production, verify the following:
 - `logger` is connected to your structured logging pipeline.
 - `engine.destroy()` is called on component unmount or when the engine is no longer needed.
 - The bundle has passed `rill analyze` with no violations.
-- Health checks (`getHealth`, `getResourceStats`) are integrated into monitoring dashboards.
+- Health checks (`engine.getDiagnostics()` -- the `health` and `resources` fields) are integrated into monitoring dashboards.
 - Error handling covers `RequireError`, `ExecutionError`, and `TimeoutError`.

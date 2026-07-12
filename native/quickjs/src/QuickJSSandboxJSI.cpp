@@ -1,11 +1,113 @@
 #include "QuickJSSandboxJSI.h"
+#include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <sstream>
+#include <string>
+#include <vector>
 #ifdef _WIN32
 #include <windows.h>
 #endif
 
 namespace quickjs_sandbox {
+
+namespace {
+// Byte-owning jsi::MutableBuffer used to rebuild a HOST-realm ArrayBuffer from
+// bytes copied out of the sandbox. A copy is mandatory: the sandbox value's
+// backing store dies with the sandbox GC, and the two realms must never alias
+// each other's memory.
+class VectorBuffer : public jsi::MutableBuffer {
+public:
+  VectorBuffer(const uint8_t *data, size_t size) : bytes_(data, data + size) {}
+  size_t size() const override { return bytes_.size(); }
+  uint8_t *data() override { return bytes_.data(); }
+
+private:
+  std::vector<uint8_t> bytes_;
+};
+
+// Copy `size` bytes into a fresh host-realm ArrayBuffer. Throws jsi::JSError
+// if the host runtime does not implement createArrayBuffer — a loud failure
+// at the boundary, never a silent empty object.
+jsi::Value makeHostArrayBuffer(jsi::Runtime &rt, const uint8_t *data,
+                               size_t size) {
+  auto buffer = std::make_shared<VectorBuffer>(data, size);
+  return jsi::ArrayBuffer(rt, std::move(buffer));
+}
+
+// Host-realm ArrayBufferView constructor names eligible for host->sandbox
+// same-kind reconstruction (also the shape-detection allowlist).
+bool isViewCtorName(const std::string &name) {
+  static const char *kNames[] = {
+      "Int8Array",    "Uint8Array",    "Uint8ClampedArray", "Int16Array",
+      "Uint16Array",  "Int32Array",    "Uint32Array",       "Float32Array",
+      "Float64Array", "BigInt64Array", "BigUint64Array",    "DataView"};
+  for (const char *candidate : kNames) {
+    if (name == candidate) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Extract the byte WINDOW + view constructor name from a HOST jsi::Object that
+// is an ArrayBufferView shape ({buffer: ArrayBuffer, byteOffset, byteLength}).
+// Returns false when `obj` is not view-shaped or the window is out of range.
+// byteOffset/byteLength are validated as doubles BEFORE narrowing to size_t
+// (NaN/Infinity/negative/non-integer rejected): a merely view-shaped plain
+// object could otherwise force a UB / implementation-defined cast.
+bool extractHostViewBytes(jsi::Runtime &hostRt, const jsi::Object &obj,
+                          std::vector<uint8_t> &out, std::string &ctorName) {
+  jsi::Value ctorVal = obj.getProperty(hostRt, "constructor");
+  if (!ctorVal.isObject()) {
+    return false;
+  }
+  jsi::Value nameVal = ctorVal.getObject(hostRt).getProperty(hostRt, "name");
+  if (!nameVal.isString()) {
+    return false;
+  }
+  std::string name = nameVal.getString(hostRt).utf8(hostRt);
+  if (!isViewCtorName(name)) {
+    return false;
+  }
+
+  jsi::Value bufferVal = obj.getProperty(hostRt, "buffer");
+  jsi::Value offsetVal = obj.getProperty(hostRt, "byteOffset");
+  jsi::Value lengthVal = obj.getProperty(hostRt, "byteLength");
+  if (!bufferVal.isObject() || !offsetVal.isNumber() || !lengthVal.isNumber()) {
+    return false;
+  }
+  jsi::Object bufferObj = bufferVal.getObject(hostRt);
+  if (!bufferObj.isArrayBuffer(hostRt)) {
+    return false;
+  }
+
+  // Bound byteOffset/byteLength by the REAL backing size in the DOUBLE domain
+  // before narrowing to size_t. backingSize is a true allocation (<< 2^53, so
+  // exactly representable as double); this closes the 2^64-rounding hole of
+  // static_cast<double>(SIZE_MAX) — where byteOffset == 2**64 slips past and
+  // then casts out of range — and makes the narrowing below lossless.
+  jsi::ArrayBuffer backing = bufferObj.getArrayBuffer(hostRt);
+  const size_t backingSize = backing.size(hostRt);
+  const double backingSizeD = static_cast<double>(backingSize);
+  const double offsetD = offsetVal.getNumber();
+  const double lengthD = lengthVal.getNumber();
+  if (!std::isfinite(offsetD) || !std::isfinite(lengthD) || offsetD < 0 ||
+      lengthD < 0 || offsetD != std::floor(offsetD) ||
+      lengthD != std::floor(lengthD) || offsetD > backingSizeD ||
+      lengthD > backingSizeD - offsetD) {
+    return false;
+  }
+
+  const auto offset = static_cast<size_t>(offsetD);
+  const auto length = static_cast<size_t>(lengthD);
+
+  const uint8_t *base = backing.data(hostRt) + offset;
+  out.assign(base, base + length);
+  ctorName = name;
+  return true;
+}
+} // namespace
 
 // Static counter for sandbox functions
 static int g_sandboxFuncCounter = 0;
@@ -47,10 +149,11 @@ void QuickJSSandboxContext::ensureClassRegistered() {
 
 // MARK: - QuickJSSandboxContext Implementation
 
-QuickJSSandboxContext::QuickJSSandboxContext(jsi::Runtime &hostRuntime,
-                                             JSRuntime *qjsRuntime,
-                                             double /* timeout */)
+QuickJSSandboxContext::QuickJSSandboxContext(
+    jsi::Runtime &hostRuntime, JSRuntime *qjsRuntime, double timeoutMs,
+    std::shared_ptr<InterruptState> interruptState)
     : qjsContext_(nullptr), qjsRuntime_(qjsRuntime), hostRuntime_(&hostRuntime),
+      timeoutMs_(timeoutMs), interruptState_(std::move(interruptState)),
       disposed_(false), callbackCounter_(0) {
   qjsContext_ = JS_NewContext(qjsRuntime_);
   if (!qjsContext_) {
@@ -248,6 +351,13 @@ jsi::Value QuickJSSandboxContext::eval(jsi::Runtime &rt,
       throw jsi::JSError(rt, "Context has been disposed");
     }
 
+    // Arm the wall-clock execution deadline for this top-level eval.
+    // The runtime-level interrupt handler (see QuickJSSandboxRuntime ctor)
+    // aborts JS execution once the deadline passes. No-op when
+    // timeoutMs_ <= 0 (unlimited) or when an outer deadline is already
+    // active (nested re-entry through a host callback).
+    DeadlineGuard deadline(interruptState_.get(), timeoutMs_);
+
     JSValue result = JS_Eval(qjsContext_, code.c_str(), code.size(), "<eval>",
                              JS_EVAL_TYPE_GLOBAL);
 
@@ -259,6 +369,12 @@ jsi::Value QuickJSSandboxContext::eval(jsi::Runtime &rt,
         JS_FreeCString(qjsContext_, str);
       JS_FreeValue(qjsContext_, exception);
       JS_FreeValue(qjsContext_, result);
+      if (deadline.timedOut()) {
+        throw jsi::JSError(
+            rt, "QuickJS eval timed out after " +
+                    std::to_string(static_cast<long long>(timeoutMs_)) +
+                    "ms (execution interrupted)");
+      }
       throw jsi::JSError(rt, errorMsg);
     }
 
@@ -281,6 +397,12 @@ jsi::Value QuickJSSandboxContext::eval(jsi::Runtime &rt,
           JS_FreeValue(jobCtx, exception);
         }
         JS_FreeValue(qjsContext_, result);
+        if (deadline.timedOut()) {
+          throw jsi::JSError(
+              rt, "QuickJS eval timed out after " +
+                      std::to_string(static_cast<long long>(timeoutMs_)) +
+                      "ms (pending job interrupted)");
+        }
         throw jsi::JSError(rt, errorMsg);
       }
       executedJobs++;
@@ -491,6 +613,43 @@ JSValue QuickJSSandboxContext::jsiToQJS(jsi::Runtime &rt,
       return wrapFunctionForSandbox(rt, std::move(func));
     }
 
+    // Binary passthrough (host -> sandbox): a host capability result carrying
+    // an ArrayBuffer / typed-array must reach the guest as real bytes, not the
+    // generic object copy below (which sees zero own props and drops it to {}).
+    // Symmetric with qjsToJSI's sandbox->host branch. Bytes are COPIED into the
+    // sandbox realm; the two realms never alias.
+    if (obj.isArrayBuffer(rt)) {
+      jsi::ArrayBuffer ab = obj.getArrayBuffer(rt);
+      return JS_NewArrayBufferCopy(qjsContext_, ab.data(rt), ab.size(rt));
+    }
+    {
+      std::vector<uint8_t> window;
+      std::string viewCtor;
+      if (extractHostViewBytes(rt, obj, window, viewCtor)) {
+        JSValue backing = JS_NewArrayBufferCopy(
+            qjsContext_, window.empty() ? nullptr : window.data(),
+            window.size());
+        // Same-kind reconstruction, best-effort: a sandbox realm without the
+        // constructor (or a throwing one) still gets the raw ArrayBuffer.
+        JSValue global = JS_GetGlobalObject(qjsContext_);
+        JSValue ctor = JS_GetPropertyStr(qjsContext_, global, viewCtor.c_str());
+        JS_FreeValue(qjsContext_, global);
+        if (JS_IsFunction(qjsContext_, ctor)) {
+          JSValue view = JS_CallConstructor(qjsContext_, ctor, 1, &backing);
+          JS_FreeValue(qjsContext_, ctor);
+          if (!JS_IsException(view)) {
+            JS_FreeValue(qjsContext_, backing);
+            return view;
+          }
+          JS_FreeValue(qjsContext_, JS_GetException(qjsContext_));
+          // fall through to the raw ArrayBuffer
+        } else {
+          JS_FreeValue(qjsContext_, ctor);
+        }
+        return backing;
+      }
+    }
+
     // Handle arrays
     if (obj.isArray(rt)) {
       jsi::Array arr = obj.asArray(rt);
@@ -618,6 +777,11 @@ jsi::Value QuickJSSandboxContext::qjsToJSI(jsi::Runtime &rt, JSValue value,
             qjsArgs.push_back(self->jsiToQJS(rt, args[i]));
           }
 
+          // Sandbox code also runs here (host invoking a tenant function),
+          // so the same wall-clock deadline applies as for eval().
+          DeadlineGuard deadline(self->interruptState_.get(),
+                                 self->timeoutMs_);
+
           JSValue result = JS_Call(self->qjsContext_, sandboxFunc, JS_UNDEFINED,
                                    (int)count, qjsArgs.data());
 
@@ -635,6 +799,13 @@ jsi::Value QuickJSSandboxContext::qjsToJSI(jsi::Runtime &rt, JSValue value,
               JS_FreeCString(self->qjsContext_, str);
             JS_FreeValue(self->qjsContext_, exception);
             JS_FreeValue(self->qjsContext_, result);
+            if (deadline.timedOut()) {
+              throw jsi::JSError(
+                  rt, "QuickJS sandbox function timed out after " +
+                          std::to_string(
+                              static_cast<long long>(self->timeoutMs_)) +
+                          "ms (execution interrupted)");
+            }
             throw jsi::JSError(rt, errorMsg);
           }
 
@@ -644,6 +815,75 @@ jsi::Value QuickJSSandboxContext::qjsToJSI(jsi::Runtime &rt, JSValue value,
         });
   }
   if (JS_IsObject(value)) {
+    // Binary passthrough — MUST come before the generic property copy. An
+    // ArrayBuffer has zero own enumerable string props, so the generic branch
+    // would emit an empty host object and silently destroy the bytes (the
+    // binary op-batch failure mode). Bytes are COPIED into the host realm.
+    if (JS_IsArrayBuffer(qjsContext_, value)) {
+      size_t abSize = 0;
+      uint8_t *abData = JS_GetArrayBuffer(qjsContext_, &abSize, value);
+      if (abData || abSize == 0) {
+        return makeHostArrayBuffer(rt, abData, abSize);
+      }
+      // Detached buffer: JS_GetArrayBuffer set an exception — clear it and
+      // fall through to the generic copy (which yields {}), matching JS
+      // structured-clone's refusal to carry detached buffers.
+      JS_FreeValue(qjsContext_, JS_GetException(qjsContext_));
+    } else {
+      // Typed-array view (Uint8Array & friends): rebuild the view's byte
+      // WINDOW as a host ArrayBuffer, then re-wrap it in the same-named view
+      // constructor when the host realm has one. JS_GetTypedArrayBuffer
+      // throws for non-views — a cleared exception is the "not a view" probe.
+      size_t viewOffset = 0, viewLength = 0, bytesPerElement = 0;
+      JSValue backing = JS_GetTypedArrayBuffer(qjsContext_, value, &viewOffset,
+                                               &viewLength, &bytesPerElement);
+      if (!JS_IsException(backing)) {
+        size_t backingSize = 0;
+        uint8_t *backingData =
+            JS_GetArrayBuffer(qjsContext_, &backingSize, backing);
+        jsi::Value hostValue = jsi::Value::undefined();
+        if (backingData && viewOffset + viewLength <= backingSize) {
+          hostValue =
+              makeHostArrayBuffer(rt, backingData + viewOffset, viewLength);
+          // Same-kind view reconstruction (e.g. Uint8Array): best-effort — a
+          // host realm without the constructor still gets the raw bytes.
+          JSValue ctor = JS_GetPropertyStr(qjsContext_, value, "constructor");
+          if (!JS_IsException(ctor)) {
+            JSValue ctorName = JS_GetPropertyStr(qjsContext_, ctor, "name");
+            const char *name = JS_IsString(ctorName)
+                                   ? JS_ToCString(qjsContext_, ctorName)
+                                   : nullptr;
+            if (name) {
+              jsi::Object global = rt.global();
+              if (global.hasProperty(rt, name)) {
+                jsi::Value hostCtor = global.getProperty(rt, name);
+                if (hostCtor.isObject() &&
+                    hostCtor.getObject(rt).isFunction(rt)) {
+                  hostValue = hostCtor.getObject(rt)
+                                  .getFunction(rt)
+                                  .callAsConstructor(rt, hostValue);
+                }
+              }
+              JS_FreeCString(qjsContext_, name);
+            }
+            JS_FreeValue(qjsContext_, ctorName);
+            JS_FreeValue(qjsContext_, ctor);
+          } else {
+            JS_FreeValue(qjsContext_, JS_GetException(qjsContext_));
+          }
+        } else if (!backingData) {
+          JS_FreeValue(qjsContext_, JS_GetException(qjsContext_));
+        }
+        JS_FreeValue(qjsContext_, backing);
+        if (!hostValue.isUndefined()) {
+          return hostValue;
+        }
+      } else {
+        // Not a typed array — clear the probe's exception and fall through.
+        JS_FreeValue(qjsContext_, JS_GetException(qjsContext_));
+      }
+    }
+
     jsi::Object jsiObj = jsi::Object(rt);
 
     // Get property names
@@ -673,13 +913,38 @@ jsi::Value QuickJSSandboxContext::qjsToJSI(jsi::Runtime &rt, JSValue value,
 // MARK: - QuickJSSandboxRuntime Implementation
 
 QuickJSSandboxRuntime::QuickJSSandboxRuntime(jsi::Runtime &hostRuntime,
-                                             double timeout)
+                                             double timeout,
+                                             double maxHeapBytes)
     : qjsRuntime_(nullptr), hostRuntime_(&hostRuntime), timeout_(timeout),
-      disposed_(false) {
+      interruptState_(std::make_shared<InterruptState>()), disposed_(false) {
   qjsRuntime_ = JS_NewRuntime();
   if (!qjsRuntime_) {
     throw jsi::JSError(hostRuntime, "Failed to create QuickJS runtime");
   }
+
+  // Wall-clock watchdog: QuickJS polls this handler periodically while JS
+  // executes. Returning 1 aborts execution with an "interrupted" exception,
+  // which eval()/sandbox function calls translate into a clear timeout error
+  // when their DeadlineGuard armed the deadline. This is what makes
+  // createRuntime({timeout}) an enforced limit rather than a suggestion:
+  // a tenant `while(true){}` no longer hangs the host thread forever.
+  JS_SetInterruptHandler(
+      qjsRuntime_,
+      [](JSRuntime *, void *opaque) -> int {
+        auto *state = static_cast<InterruptState *>(opaque);
+        if (!state->armed.load(std::memory_order_acquire)) {
+          return 0;
+        }
+        int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch())
+                          .count();
+        if (now >= state->deadlineMs.load(std::memory_order_relaxed)) {
+          state->fired.store(true, std::memory_order_release);
+          return 1; // interrupt JS execution
+        }
+        return 0;
+      },
+      interruptState_.get());
 
   // Match the reference QuickJSRuntime defaults used elsewhere in the repo.
   // These settings shouldn't be required, but they help avoid runtime-specific
@@ -695,8 +960,15 @@ QuickJSSandboxRuntime::QuickJSSandboxRuntime(jsi::Runtime &hostRuntime,
   JS_SetCanBlock(qjsRuntime_, true);
   JS_SetRuntimeInfo(qjsRuntime_, "RillQuickJSSandbox");
 
-  // Set memory limit (optional)
-  JS_SetMemoryLimit(qjsRuntime_, 256 * 1024 * 1024); // 256MB
+  // Heap limit: the tenant quota when provided, the 256MB default otherwise.
+  // Guard the double->size_t cast (Infinity / oversized values are UB to
+  // cast): anything not representable falls back to the default.
+  constexpr double kMaxRepresentableHeap = 1.0e18; // < SIZE_MAX on 64-bit
+  size_t heapLimit = 256 * 1024 * 1024; // 256MB default
+  if (maxHeapBytes >= 1 && maxHeapBytes < kMaxRepresentableHeap) {
+    heapLimit = static_cast<size_t>(maxHeapBytes);
+  }
+  JS_SetMemoryLimit(qjsRuntime_, heapLimit);
 }
 
 QuickJSSandboxRuntime::~QuickJSSandboxRuntime() { dispose(); }
@@ -709,8 +981,14 @@ void QuickJSSandboxRuntime::dispose() {
 
   // Drain pending jobs (promises, etc.) before tearing down contexts/runtime.
   // This mirrors QuickJSRuntime::~QuickJSRuntime() and avoids freeing a runtime
-  // while jobs are still queued.
+  // while jobs are still queued. The drain MUST be bounded (same cap as the
+  // eval-path drain): a tenant can enqueue a self-requeueing promise job
+  // (`function f(){Promise.resolve().then(f)}`) that survives an eval timeout,
+  // and an unbounded loop here would hang the host thread in dispose()
+  // forever — the interrupt handler does not run while no deadline is armed.
+  // Leftover jobs are safe to drop: JS_FreeRuntime frees the queued job list.
   if (qjsRuntime_) {
+    int executedJobs = 0;
     for (;;) {
       JSContext *ctx1 = nullptr;
       int ret = JS_ExecutePendingJob(qjsRuntime_, &ctx1);
@@ -723,6 +1001,10 @@ void QuickJSSandboxRuntime::dispose() {
           JSValue exception = JS_GetException(ctx1);
           JS_FreeValue(ctx1, exception);
         }
+      }
+      executedJobs++;
+      if (executedJobs > 1000) {
+        break;
       }
     }
   }
@@ -782,8 +1064,8 @@ jsi::Value QuickJSSandboxRuntime::createContext(jsi::Runtime &rt) {
     throw jsi::JSError(rt, "Runtime has been disposed");
   }
 
-  auto context = std::make_shared<QuickJSSandboxContext>(*hostRuntime_,
-                                                         qjsRuntime_, timeout_);
+  auto context = std::make_shared<QuickJSSandboxContext>(
+      *hostRuntime_, qjsRuntime_, timeout_, interruptState_);
   contexts_.push_back(context);
 
   return jsi::Object::createFromHostObject(rt, context);
@@ -804,7 +1086,8 @@ jsi::Value QuickJSSandboxModule::get(jsi::Runtime &rt,
         rt, name, 1,
         [](jsi::Runtime &rt, const jsi::Value &, const jsi::Value *args,
            size_t count) -> jsi::Value {
-          double timeout = 30000; // default 30s
+          double timeout = 30000;   // default 30s
+          double maxHeapBytes = 0;  // <= 0: default heap limit (256MB)
 
           if (count > 0 && args[0].isObject()) {
             jsi::Object opts = args[0].asObject(rt);
@@ -814,9 +1097,16 @@ jsi::Value QuickJSSandboxModule::get(jsi::Runtime &rt,
                 timeout = timeoutVal.getNumber();
               }
             }
+            if (opts.hasProperty(rt, "maxHeapBytes")) {
+              jsi::Value heapVal = opts.getProperty(rt, "maxHeapBytes");
+              if (heapVal.isNumber()) {
+                maxHeapBytes = heapVal.getNumber();
+              }
+            }
           }
 
-          auto runtime = std::make_shared<QuickJSSandboxRuntime>(rt, timeout);
+          auto runtime =
+              std::make_shared<QuickJSSandboxRuntime>(rt, timeout, maxHeapBytes);
           return jsi::Object::createFromHostObject(rt, runtime);
         });
   }

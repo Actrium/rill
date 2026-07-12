@@ -1,0 +1,394 @@
+{
+  "$comment": "SINGLE SOURCE OF TRUTH for the guest->host CANVAS binary wire protocol — a per-frame flat 2D display list (the host:canvas.draw path: guest emits a serialized DrawList, host decodes it into Canvas2D ctx calls and replays them onto a sealed <Canvas>). This is a SISTER contract to op-batch-wire.json, deliberately SEPARATE: op-batch carries UI-tree DIFFS (CREATE/UPDATE/DELETE/... over a retained node graph, with recursive SerializedValue trees), whereas canvas is a FLAT, per-frame sequence of drawing ops with no nesting and no retained state on the wire. The two share the ENVELOPE SHAPE (magic + version + header + a per-batch u16 intern table + ops) and the SAME 'schema single-source + golden lock' discipline (this file + canvas-wire.golden.json + canvas-wire.CONFORMANCE.md, generated into the Rust codec by crates/rill-guest/build.rs and locked byte-exact by golden vectors), but they use DISTINCT magic so a buffer meant for one decoder fails fast in the other. Authoritative implementations (later phases): the Rust encoder (oracle) crates/rill-guest/src/canvas_encode.rs and the TS decoder on rill's public export surface (the platform's site/rill-runtime/src/host-canvas.ts imports it, replacing JSON.parse). A native codec generates its opcode + flag + limit constants FROM this file (never hand-copies a peer) and locks its record shapes to it via conformance tests + canvas-wire.golden.json. All integers are UNSIGNED unless the type says otherwise; every multi-byte scalar is LITTLE-ENDIAN. Numbers are f64 for v1 (correctness first, matches the current JSON semantics); the type-atom mechanism is retained so a future f32 coordinate variant is a purely additive flag, not a redesign.",
+  "version": 1,
+  "endianness": "little",
+
+  "magic": {
+    "$comment": "First 4 bytes of every frame. The u32 value 0x564e4352 read little-endian spells the ASCII bytes 52 43 4E 56 = 'RCNV' (Rill CaNVas). DISTINCT from op-batch's 0x4c4c4952 ('RILL'): the two magics already differ at the SECOND byte (0x43 'C' vs 0x49 'I'), so a canvas frame fed to the op-batch decoder — and an op-batch batch fed to the canvas decoder — fails the u32 magic compare immediately (fail-closed, decode nothing) before any field is read. A decoder MUST read a u32 LE and reject if it is not exactly this value (reason 'bad-magic').",
+    "u32le": 1447969618,
+    "hex": "0x564e4352",
+    "asciiBytes": "52 43 4E 56"
+  },
+
+  "protocolVersion": {
+    "$comment": "u16 immediately after magic. A decoder MUST reject any value it does not implement (reason 'bad-version'). This file describes version 1 only. Promoting binary from opt-in to default (the capability handshake in canvas-wire.DESIGN.md) does NOT bump this — the wire is unchanged, only the guest's default channel choice flips. protocolVersion bumps only on a breaking wire change.",
+    "value": 1
+  },
+
+  "typeAtoms": {
+    "$comment": "The scalar building blocks referenced by the layouts below. All little-endian. 'internRef' is a u16 index into this frame's intern table (colors), used wherever an interned string is referenced. NUMBER POLICY v1: every coordinate/dimension/style scalar is 'f64' — no per-value type tag, no int/float split (unlike op-batch's tagged SerializedValue). This matches the current JSON semantics exactly (the DrawList format!s f64 literals) so v1 is a correctness-first re-encoding, not a numeric-domain change. The 'f32' atom is DEFINED but UNUSED in v1 (see frameFlags.COORDS_F32): it exists only so a future half-precision coordinate variant is an additive flag flip over a schema that already names the atom, never a wire redesign.",
+    "u8": "1 byte unsigned",
+    "u16": "2 bytes unsigned, little-endian",
+    "u32": "4 bytes unsigned, little-endian",
+    "f64": "8 bytes IEEE-754 double, little-endian. The ONLY numeric atom emitted or decoded in a v1 frame. Every f64 on the wire MUST be finite: NaN and +/-Infinity are rejected fail-closed (reason 'non-finite') by both encoder and decoder — this mirrors the guest DrawList's finite() latch, where one non-finite op invalidates the whole frame.",
+    "f32": "4 bytes IEEE-754 single, little-endian. RESERVED and UNUSED in v1: no f32 field is emitted or decoded anywhere in a v1 frame (the COORDS_F32 flag that would switch coordinates to f32 is itself reserved + rejected, see frameFlags). Kept in this table only as the forward-compat hook for a future half-precision variant.",
+    "internRef": "u16 index into the intern table; MUST be < the table's count (else reason 'bad-intern-ref', fail-closed).",
+    "utf8": "raw UTF-8 code units, no terminator; always length-prefixed by the field that precedes it."
+  },
+
+  "header": {
+    "$comment": "Fixed 16-byte prefix, written first, fields in exactly this order. The op count lives HERE (not derived by walking the ops) SO THE HOST CAN PRE-CHECK IT AGAINST limits.maxOps BEFORE the decode loop starts — the frontline defense against a decode-amplification frame (a tiny buffer claiming a huge op stream). 'reserved' is one zero byte rounding the header to 16.",
+    "byteLength": 16,
+    "layout": [
+      {
+        "name": "magic",
+        "type": "u32",
+        "value": 1447969618,
+        "note": "0x564e4352 = 'RCNV'; reject on mismatch (reason 'bad-magic')."
+      },
+      {
+        "name": "version",
+        "type": "u16",
+        "value": 1,
+        "note": "protocol version; reject if unsupported (reason 'bad-version')."
+      },
+      {
+        "name": "frameId",
+        "type": "u32",
+        "note": "monotonic per-frame sequence id chosen by the guest; opaque to the wire (diagnostics/ordering only). Not the canvasId — that is the variable-length field immediately after this header."
+      },
+      {
+        "name": "opCount",
+        "type": "u32",
+        "note": "number of draw-op records that follow the canvasId and the intern table. A u32 (not u16) so the field width comfortably covers the platform's per-frame budget of 20000 ops with headroom; the VALUE is nonetheless capped at limits.maxOps (20000). The decoder MUST validate opCount <= limits.maxOps BEFORE the decode loop (reason 'op-budget') and then read EXACTLY this many records — never more."
+      },
+      {
+        "name": "flags",
+        "type": "u8",
+        "note": "bitmask, see frameFlags. Default emission is NONE (0x00). A decoder MUST reject fail-closed (reason 'reserved-flag') any frame that sets a RESERVED bit (COORDS_F32 and all currently-undefined bits)."
+      },
+      {
+        "name": "reserved",
+        "type": "u8[1]",
+        "value": [0],
+        "note": "one padding byte rounding the header to 16. The encoder MUST write it 0. A decoder MUST ignore it on read and MUST NOT reject a frame when it is nonzero — this is a forward-compat field, so a future version may repurpose it without breaking a v1 decoder (same posture as op-batch's reserved bytes)."
+      }
+    ]
+  },
+
+  "frameFlags": {
+    "$comment": "Bit values OR'd into header.flags. NONE is what the reference encoder emits by default in v1. COORDS_F32 is a RESERVED bit position in v1: the v1 encoder never sets it (coordinates are always f64) and a v1 decoder MUST reject fail-closed (reason 'reserved-flag') any frame that sets it OR any other undefined bit. COORDS_F32 is defined now only so the future half-precision variant (switch typeAtoms.f64 coordinate fields to f32) is an additive flag flip, and so a v1 decoder can RECOGNISE and cleanly reject a frame that uses a feature it does not implement.",
+    "NONE": 0,
+    "COORDS_F32": 1
+  },
+
+  "canvasId": {
+    "$comment": "The target <Canvas> identifier for this whole frame, written IMMEDIATELY AFTER the 16-byte header and BEFORE the intern table. It is INLINE (u16 byte length + UTF-8), NOT interned: exactly one canvasId occurs per frame, so interning would only waste a table slot and a u16 ref. Placing it before the intern table lets the host resolve/short-circuit an unknown-canvas frame early. A frame targets exactly ONE canvas (a guest with multiple <Canvas> surfaces sends one frame per canvas).",
+    "layout": [
+      {
+        "name": "byteLen",
+        "type": "u16",
+        "note": "UTF-8 byte length of the canvasId; bounded by limits.maxStringBytes (a length that would not fit u16 MUST be rejected, never wrapped)."
+      },
+      {
+        "name": "bytes",
+        "type": "utf8",
+        "length": "byteLen",
+        "note": "raw UTF-8 canvasId, no terminator."
+      }
+    ]
+  },
+
+  "intern": {
+    "$comment": "The per-frame color-string dedup table, written immediately after the canvasId and BEFORE the ops. ONLY setFillStyle/setStrokeStyle COLOR strings are interned here (they repeat heavily within a frame — a chart re-uses '#fff'/'red'/'rgba(0,0,0,.5)' across dozens of ops). fillText TEXT is deliberately NOT interned (high cardinality; inline instead — see ops.fillText). Indices are 0-based and assigned in FIRST-APPEARANCE order during a pre-pass that walks the ops in array order (each setFillStyle/setStrokeStyle contributes its color). PER-FRAME SEMANTICS: unlike op-batch's cross-batch persistent table, a canvas frame is fully self-contained — the table starts empty every frame and every internRef resolves within the same frame (frames are independent; no cross-frame index stability is promised or needed).",
+    "layout": [
+      {
+        "name": "count",
+        "type": "u16",
+        "note": "number of interned color strings; also the exclusive upper bound for every internRef in this frame. See limits.maxInternStrings."
+      },
+      {
+        "name": "entries",
+        "repeat": "count",
+        "record": [
+          {
+            "name": "byteLen",
+            "type": "u16",
+            "note": "UTF-8 byte length of this color string; see limits.maxStringBytes (a length that would not fit u16, or would exceed the cap, MUST be rejected — never wrapped)."
+          },
+          {
+            "name": "bytes",
+            "type": "utf8",
+            "length": "byteLen",
+            "note": "raw UTF-8 color bytes, no terminator."
+          }
+        ]
+      }
+    ]
+  },
+
+  "opcodes": {
+    "$comment": "u8 tag that leads every draw-op record. Flat map for codegen (name -> byte). The 21 canvas ops in the SAME order as the guest DrawList builder (crates/rill-guest/src/lib.rs canvas module) and the graphics-seams.json host:canvas.ops whitelist. An unknown opcode is a fail-closed whole-frame reject (reason 'bad-opcode').",
+    "beginPath": 1,
+    "closePath": 2,
+    "moveTo": 3,
+    "lineTo": 4,
+    "rect": 5,
+    "arc": 6,
+    "fill": 7,
+    "stroke": 8,
+    "fillRect": 9,
+    "strokeRect": 10,
+    "clearRect": 11,
+    "setFillStyle": 12,
+    "setStrokeStyle": 13,
+    "setLineWidth": 14,
+    "fillText": 15,
+    "save": 16,
+    "restore": 17,
+    "translate": 18,
+    "scale": 19,
+    "rotate": 20,
+    "setTransform": 21
+  },
+
+  "ops": {
+    "$comment": "Fixed-order record layout for EVERY canvas op. Each record begins with its u8 opcode, then its fields in EXACTLY the order listed (no per-op trailer, no id — canvas ops target the frame's single canvasId, not per-op nodes). Numeric fields are f64 (finite; NaN/Inf rejected 'non-finite'). Colors are internRef (u16); fillText.text is INLINE (u32 len + UTF-8). arc.ccw is a u8 bool (0 or 1; any other byte is fail-closed 'bad-opcode'-class malformed record). STRICT TRAILING (whole-frame decode contract): a decoder reads EXACTLY opCount records and MUST then have fully consumed the buffer — ZERO bytes may remain (reason 'truncated' on underrun OR trailing bytes). FRAME ATOMICITY: the decoder MUST decode the entire frame into an in-memory op array FIRST and only then replay it; on ANY violation it drops the WHOLE frame with a reason and replays nothing — never a half-frame.",
+    "beginPath": {
+      "opcode": 1,
+      "description": "ctx.beginPath().",
+      "layout": [{ "name": "opcode", "type": "u8", "value": 1 }]
+    },
+    "closePath": {
+      "opcode": 2,
+      "description": "ctx.closePath().",
+      "layout": [{ "name": "opcode", "type": "u8", "value": 2 }]
+    },
+    "moveTo": {
+      "opcode": 3,
+      "description": "ctx.moveTo(x, y).",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 3 },
+        { "name": "x", "type": "f64" },
+        { "name": "y", "type": "f64" }
+      ]
+    },
+    "lineTo": {
+      "opcode": 4,
+      "description": "ctx.lineTo(x, y).",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 4 },
+        { "name": "x", "type": "f64" },
+        { "name": "y", "type": "f64" }
+      ]
+    },
+    "rect": {
+      "opcode": 5,
+      "description": "ctx.rect(x, y, w, h) (adds a rectangle sub-path).",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 5 },
+        { "name": "x", "type": "f64" },
+        { "name": "y", "type": "f64" },
+        { "name": "w", "type": "f64" },
+        { "name": "h", "type": "f64" }
+      ]
+    },
+    "arc": {
+      "opcode": 6,
+      "description": "ctx.arc(x, y, r, start, end, ccw).",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 6 },
+        { "name": "x", "type": "f64" },
+        { "name": "y", "type": "f64" },
+        { "name": "r", "type": "f64" },
+        { "name": "start", "type": "f64" },
+        { "name": "end", "type": "f64" },
+        {
+          "name": "ccw",
+          "type": "u8",
+          "note": "boolean: 0 = clockwise (false), 1 = counter-clockwise (true). Any other byte is a malformed record and a fail-closed whole-frame reject."
+        }
+      ]
+    },
+    "fill": {
+      "opcode": 7,
+      "description": "ctx.fill() the current path.",
+      "layout": [{ "name": "opcode", "type": "u8", "value": 7 }]
+    },
+    "stroke": {
+      "opcode": 8,
+      "description": "ctx.stroke() the current path.",
+      "layout": [{ "name": "opcode", "type": "u8", "value": 8 }]
+    },
+    "fillRect": {
+      "opcode": 9,
+      "description": "ctx.fillRect(x, y, w, h).",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 9 },
+        { "name": "x", "type": "f64" },
+        { "name": "y", "type": "f64" },
+        { "name": "w", "type": "f64" },
+        { "name": "h", "type": "f64" }
+      ]
+    },
+    "strokeRect": {
+      "opcode": 10,
+      "description": "ctx.strokeRect(x, y, w, h).",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 10 },
+        { "name": "x", "type": "f64" },
+        { "name": "y", "type": "f64" },
+        { "name": "w", "type": "f64" },
+        { "name": "h", "type": "f64" }
+      ]
+    },
+    "clearRect": {
+      "opcode": 11,
+      "description": "ctx.clearRect(x, y, w, h).",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 11 },
+        { "name": "x", "type": "f64" },
+        { "name": "y", "type": "f64" },
+        { "name": "w", "type": "f64" },
+        { "name": "h", "type": "f64" }
+      ]
+    },
+    "setFillStyle": {
+      "opcode": 12,
+      "description": "ctx.fillStyle = color (CSS color STRING only — never a gradient/pattern). Color is INTERNED.",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 12 },
+        {
+          "name": "color",
+          "type": "internRef",
+          "note": "index into the intern table; the CSS color string."
+        }
+      ]
+    },
+    "setStrokeStyle": {
+      "opcode": 13,
+      "description": "ctx.strokeStyle = color (CSS color STRING only). Color is INTERNED.",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 13 },
+        {
+          "name": "color",
+          "type": "internRef",
+          "note": "index into the intern table; the CSS color string."
+        }
+      ]
+    },
+    "setLineWidth": {
+      "opcode": 14,
+      "description": "ctx.lineWidth = w.",
+      "layout": [{ "name": "opcode", "type": "u8", "value": 14 }, { "name": "w", "type": "f64" }]
+    },
+    "fillText": {
+      "opcode": 15,
+      "description": "ctx.fillText(text, x, y). Text is INLINE (NOT interned: high cardinality). Field order is x, y, then text — matching the guest DrawList JSON emission and the graphics-seams.json host:canvas.ops table.",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 15 },
+        { "name": "x", "type": "f64" },
+        { "name": "y", "type": "f64" },
+        {
+          "name": "textLen",
+          "type": "u32",
+          "note": "UTF-8 byte length of the text; bounded by limits.maxTextBytes (a length exceeding the cap is a fail-closed 'text-too-big' reject — never wrapped/truncated)."
+        },
+        {
+          "name": "text",
+          "type": "utf8",
+          "length": "textLen",
+          "note": "raw UTF-8 text bytes, no terminator; inline, not interned."
+        }
+      ]
+    },
+    "save": {
+      "opcode": 16,
+      "description": "ctx.save() the drawing state.",
+      "layout": [{ "name": "opcode", "type": "u8", "value": 16 }]
+    },
+    "restore": {
+      "opcode": 17,
+      "description": "ctx.restore() the drawing state.",
+      "layout": [{ "name": "opcode", "type": "u8", "value": 17 }]
+    },
+    "translate": {
+      "opcode": 18,
+      "description": "ctx.translate(x, y).",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 18 },
+        { "name": "x", "type": "f64" },
+        { "name": "y", "type": "f64" }
+      ]
+    },
+    "scale": {
+      "opcode": 19,
+      "description": "ctx.scale(x, y).",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 19 },
+        { "name": "x", "type": "f64" },
+        { "name": "y", "type": "f64" }
+      ]
+    },
+    "rotate": {
+      "opcode": 20,
+      "description": "ctx.rotate(angle) (radians).",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 20 },
+        { "name": "angle", "type": "f64" }
+      ]
+    },
+    "setTransform": {
+      "opcode": 21,
+      "description": "ctx.setTransform(a, b, c, d, e, f).",
+      "layout": [
+        { "name": "opcode", "type": "u8", "value": 21 },
+        { "name": "a", "type": "f64" },
+        { "name": "b", "type": "f64" },
+        { "name": "c", "type": "f64" },
+        { "name": "d", "type": "f64" },
+        { "name": "e", "type": "f64" },
+        { "name": "f", "type": "f64" }
+      ]
+    }
+  },
+
+  "reasons": {
+    "$comment": "The fail-closed 'reason' vocabulary. On ANY violation the decoder drops the WHOLE frame (never a half-frame) and reports one of these reasons — surfaced in the host:canvas.draw response, whose shape becomes { ok:false, dropped:<opCount>, reason:<string> } (the platform recently added an ADDITIVE 'reason' field to its canvas-failure response; this vocabulary is chosen to align with it, and 'dropped' remains the pre-existing count field). A well-formed frame resolves { ok:true, dropped:0 }. These are stable string tokens (not numbers) so both codecs and the platform log the same words.",
+    "bad-magic": "header magic u32 != 0x564e4352 (wrong protocol or corrupt buffer; check FIRST).",
+    "bad-version": "header version is not an implemented protocolVersion.",
+    "reserved-flag": "header flags set a reserved bit (COORDS_F32 or any undefined bit).",
+    "op-budget": "header opCount > limits.maxOps; checked BEFORE the decode loop (decode-amplification guard).",
+    "frame-too-big": "the frame buffer exceeds limits.maxBatchBytes.",
+    "intern-overflow": "intern count > limits.maxInternStrings.",
+    "string-too-big": "a canvasId or intern color string byte length > limits.maxStringBytes.",
+    "text-too-big": "a fillText textLen > limits.maxTextBytes.",
+    "bad-intern-ref": "a setFillStyle/setStrokeStyle internRef >= intern count.",
+    "bad-opcode": "an unknown opcode byte, or a malformed fixed field (e.g. arc.ccw not 0/1).",
+    "non-finite": "an f64 field is NaN or +/-Infinity (canvas requires finite numbers).",
+    "truncated": "buffer underrun mid-record, OR trailing bytes after exactly opCount records (a frame is exactly its declared ops)."
+  },
+
+  "limits": {
+    "$comment": "FAIL-CLOSED caps. 'Fail-closed' means: on any breach the codec MUST abort the WHOLE frame and let NOTHING partial cross the seam — an encoder throws before/without emitting a truncated buffer; a decoder throws and discards the whole frame (with a reason) rather than replaying a partial op list. Canvas has NO recursive/nested value trees (unlike op-batch's SerializedValue), so there is deliberately NO maxValueDepth / maxTotalElements: the decoder's entire allocation footprint is bounded by (opCount <= maxOps) fixed-size records plus inline text/colors, the whole thing under maxBatchBytes — and opCount is validated against maxOps BEFORE the loop, so a small buffer can never claim a huge op stream. A native codec SHOULD generate these as constants (as crates/rill-guest/build.rs does for the graphics budget and the op-batch limits).",
+    "maxOps": {
+      "value": 20000,
+      "reason": "Aligns with the platform's per-frame draw-op budget (20000 ops/frame). header.opCount is a u32 field (ample width) but its VALUE is capped here.",
+      "reject": "The decoder MUST validate header.opCount <= this BEFORE the decode loop and reject fail-closed (reason 'op-budget') — this is the decode-amplification defense. The encoder MUST NOT start a frame with more ops than this. A streaming/interruptible decoder MAY additionally stop replay when the platform's live per-frame sliding budget tops out, but the header pre-check is the structural bound."
+    },
+    "maxInternStrings": {
+      "value": 4096,
+      "reason": "Distinct color strings per frame is small in practice (a chart re-uses a handful); 4096 is generous headroom while staying far under the u16 field/internRef ceiling (65535).",
+      "reject": "On interning the (maxInternStrings+1)-th distinct color the encoder throws and emits nothing; a decoder whose intern count exceeds this rejects fail-closed (reason 'intern-overflow'). Every internRef is additionally bounded by the actual table count (reason 'bad-intern-ref')."
+    },
+    "maxStringBytes": {
+      "value": 256,
+      "reason": "A CSS color string ('#rrggbbaa', 'rgba(255, 255, 255, 0.999)', a named color) and a canvasId are short; 256 bytes is generous. Bounds each intern entry's byteLen and the canvasId byteLen (both u16 fields).",
+      "reject": "A canvasId or color string whose UTF-8 length exceeds this MUST be rejected fail-closed (reason 'string-too-big'); the u16 length MUST NOT be allowed to wrap/truncate."
+    },
+    "maxTextBytes": {
+      "value": 8192,
+      "reason": "A single fillText draws one text run; 8192 UTF-8 bytes is far beyond any realistic label/paragraph while bounding the inline payload of one op. fillText.textLen is a u32 field, so the CAP (not the field width) is the bound.",
+      "reject": "A fillText whose textLen exceeds this MUST be rejected fail-closed (reason 'text-too-big') — never truncated."
+    },
+    "maxBatchBytes": {
+      "value": 8388608,
+      "reason": "8 MiB hard ceiling on one encoded frame buffer. The heaviest fixed op is setTransform (1 + 6*8 = 49 bytes); 20000 of them is ~1 MiB, so 8 MiB leaves ample room for inline text/colors while bounding the outer decoder allocation.",
+      "reject": "If the growing output would exceed this the encoder throws and emits nothing; a decoder handed a buffer larger than this rejects fail-closed (reason 'frame-too-big') before decoding."
+    }
+  },
+
+  "golden": {
+    "$comment": "canvas-wire.golden.json (next phase) holds byte-exact vectors: each entry pairs a source DrawList (guest-side ops JSON, plus canvasId/frameId) with its EXACT on-the-wire encoding as a lowercase hex string. It is the shared cross-language ORACLE, mirroring op-batch-wire.golden.json: the Rust encoder (oracle) MUST produce 'hex' byte-for-byte from the source frame, and the TS decoder MUST reconstruct the source frame (structure-exact) from 'hex' — so encoder and decoder cannot silently drift together. Vectors assume a FRESH encoder per frame (intern table starts empty, indices from 0), header.flags = NONE, all scalars little-endian, all numbers f64. The conformance chain and run instructions live in canvas-wire.CONFORMANCE.md."
+  }
+}

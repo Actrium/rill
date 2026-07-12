@@ -18,7 +18,7 @@ TenantHandle::~TenantHandle() {
 }
 
 void TenantHandle::createSandbox(facebook::jsi::Runtime& hostRuntime,
-                                 double timeout) {
+                                 double timeout, double maxHeapBytes) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (disposed_) return;
 
@@ -41,14 +41,20 @@ void TenantHandle::createSandbox(facebook::jsi::Runtime& hostRuntime,
 
   auto module = global.getPropertyAsObject(hostRuntime, kModuleGlobal);
 
-  // Create a runtime via module.createRuntime({ timeout })
+  // Create a runtime via module.createRuntime({ timeout, maxHeapBytes }).
+  // Engines that don't support an option simply ignore it.
   auto createRuntimeFn =
       module.getPropertyAsFunction(hostRuntime, "createRuntime");
 
   facebook::jsi::Value runtimeVal;
-  if (timeout > 0) {
+  if (timeout > 0 || maxHeapBytes > 0) {
     auto opts = facebook::jsi::Object(hostRuntime);
-    opts.setProperty(hostRuntime, "timeout", timeout);
+    if (timeout > 0) {
+      opts.setProperty(hostRuntime, "timeout", timeout);
+    }
+    if (maxHeapBytes > 0) {
+      opts.setProperty(hostRuntime, "maxHeapBytes", maxHeapBytes);
+    }
     runtimeVal = createRuntimeFn.call(hostRuntime, opts);
   } else {
     runtimeVal = createRuntimeFn.call(hostRuntime);

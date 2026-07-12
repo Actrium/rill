@@ -6,6 +6,7 @@
   "devDependencies": {
     "@babel/core": "^7.28.5",
     "@babel/plugin-transform-arrow-functions": "^7.29.7",
+    "@babel/plugin-transform-block-scoping": "^7.29.7",
     "@babel/preset-env": "^7.28.6",
     "@biomejs/biome": "^2.3.9",
     "@happy-dom/global-registrator": "^15.0.0",
@@ -38,7 +39,8 @@
     "./host/web": "./src/host/web/index.ts",
     "./devtools": "./src/devtools/index.ts",
     "./contract": "./src/contract/index.ts",
-    "./cli": "./src/cli/index.ts"
+    "./cli": "./src/cli/index.ts",
+    "./wire": "./src/host/wire/index.ts"
   },
   "bin": {
     "rill": "./src/cli/bin.ts"

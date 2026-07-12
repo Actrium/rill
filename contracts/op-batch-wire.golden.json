@@ -1,0 +1,154 @@
+{
+  "$comment": "GOLDEN VECTORS for the op-batch binary wire protocol defined in op-batch-wire.json. Each entry is a batch (the guest-side SerializedOperationBatch JSON) paired with its EXACT expected on-the-wire encoding as a lowercase hex string. These are the fixed cross-language ORACLE: an encoder must produce 'hex' byte-for-byte, and a decoder must reconstruct 'batch' from 'hex' — so encoder and decoder cannot silently drift together (a bug that agrees on both sides still fails the golden). Vectors assume a FRESH encoder per batch (intern table starts empty, indices from 0), header.flags = NONE (no timestamps), and the number rule (integers in i32 range -> INT32, else FLOAT64). All scalars little-endian. 'byteLength' is len(hex)/2. The 'breakdown' annotates each byte group for human review; it is documentation, not part of the wire.",
+  "version": 1,
+  "vectors": [
+    {
+      "name": "empty-batch",
+      "description": "Zero operations: header + an empty intern table. The irreducible floor of the format = 18 bytes.",
+      "batch": { "version": 1, "batchId": 0, "operations": [] },
+      "hex": "52494c4c0100000000000000000000000000",
+      "byteLength": 18,
+      "breakdown": [
+        { "bytes": "52494c4c", "field": "magic 'RILL' (0x4c4c4952 LE)" },
+        { "bytes": "0100", "field": "version = 1" },
+        { "bytes": "00000000", "field": "batchId = 0" },
+        { "bytes": "0000", "field": "opCount = 0" },
+        { "bytes": "00", "field": "flags = NONE" },
+        { "bytes": "000000", "field": "reserved[3]" },
+        { "bytes": "0000", "field": "intern count = 0" }
+      ]
+    },
+    {
+      "name": "one-create",
+      "description": "A single CREATE of a 'View' node with no props. 'View' is the only interned string (index 0).",
+      "batch": {
+        "version": 1,
+        "batchId": 1,
+        "operations": [{ "op": "CREATE", "id": 1, "type": "View", "props": {} }]
+      },
+      "hex": "52494c4c0100010000000100000000000100040056696577010100000000000000",
+      "byteLength": 33,
+      "breakdown": [
+        { "bytes": "52494c4c", "field": "magic" },
+        { "bytes": "0100", "field": "version = 1" },
+        { "bytes": "01000000", "field": "batchId = 1" },
+        { "bytes": "0100", "field": "opCount = 1" },
+        { "bytes": "00", "field": "flags = NONE" },
+        { "bytes": "000000", "field": "reserved[3]" },
+        { "bytes": "0100", "field": "intern count = 1" },
+        { "bytes": "0400", "field": "intern[0] byteLen = 4" },
+        { "bytes": "56696577", "field": "intern[0] utf8 = 'View'" },
+        { "bytes": "01", "field": "opcode CREATE" },
+        { "bytes": "01000000", "field": "id = 1" },
+        { "bytes": "0000", "field": "type = internRef 0 ('View')" },
+        { "bytes": "0000", "field": "props entryCount = 0" }
+      ]
+    },
+    {
+      "name": "setprop-repeated-key",
+      "description": "Two UPDATE ops (setProp) on different nodes that set the SAME prop key 'className'. Proves interning: 'className' is stored ONCE (intern index 0) and referenced by internRef 0 in BOTH ops; only the distinct values 'a' (1) and 'b' (2) add entries.",
+      "batch": {
+        "version": 1,
+        "batchId": 2,
+        "operations": [
+          { "op": "UPDATE", "id": 1, "props": { "className": "a" } },
+          { "op": "UPDATE", "id": 2, "props": { "className": "b" } }
+        ]
+      },
+      "hex": "52494c4c01000200000002000000000003000900636c6173734e616d6501006101006202010000000100000006010000000202000000010000000602000000",
+      "byteLength": 63,
+      "breakdown": [
+        { "bytes": "52494c4c", "field": "magic" },
+        { "bytes": "0100", "field": "version = 1" },
+        { "bytes": "02000000", "field": "batchId = 2" },
+        { "bytes": "0200", "field": "opCount = 2" },
+        { "bytes": "00", "field": "flags = NONE" },
+        { "bytes": "000000", "field": "reserved[3]" },
+        { "bytes": "0300", "field": "intern count = 3" },
+        { "bytes": "0900", "field": "intern[0] byteLen = 9" },
+        { "bytes": "636c6173734e616d65", "field": "intern[0] utf8 = 'className'" },
+        { "bytes": "0100", "field": "intern[1] byteLen = 1" },
+        { "bytes": "61", "field": "intern[1] utf8 = 'a'" },
+        { "bytes": "0100", "field": "intern[2] byteLen = 1" },
+        { "bytes": "62", "field": "intern[2] utf8 = 'b'" },
+        { "bytes": "02", "field": "opcode UPDATE" },
+        { "bytes": "01000000", "field": "id = 1" },
+        { "bytes": "0100", "field": "props entryCount = 1" },
+        { "bytes": "0000", "field": "key = internRef 0 ('className')" },
+        { "bytes": "06", "field": "value tag STRING" },
+        { "bytes": "0100", "field": "value = internRef 1 ('a')" },
+        { "bytes": "0000", "field": "removedCount = 0" },
+        { "bytes": "02", "field": "opcode UPDATE" },
+        { "bytes": "02000000", "field": "id = 2" },
+        { "bytes": "0100", "field": "props entryCount = 1" },
+        { "bytes": "0000", "field": "key = internRef 0 ('className') REUSED" },
+        { "bytes": "06", "field": "value tag STRING" },
+        { "bytes": "0200", "field": "value = internRef 2 ('b')" },
+        { "bytes": "0000", "field": "removedCount = 0" }
+      ]
+    },
+    {
+      "name": "mixed-five-ops",
+      "description": "A 5-op batch exercising CREATE (with a string prop), a second CREATE, APPEND, TEXT, and UPDATE. The prop key 'id' first appears in op0 (intern 1) and is REUSED by op4, again proving cross-op interning inside one batch. Intern order (first-appearance walk): 'View'(0), 'id'(1), 'root'(2), 'Text'(3), 'Hi'(4), 'main'(5).",
+      "batch": {
+        "version": 1,
+        "batchId": 3,
+        "operations": [
+          { "op": "CREATE", "id": 1, "type": "View", "props": { "id": "root" } },
+          { "op": "CREATE", "id": 2, "type": "Text", "props": {} },
+          { "op": "APPEND", "id": 0, "parentId": 1, "childId": 2 },
+          { "op": "TEXT", "id": 2, "text": "Hi" },
+          { "op": "UPDATE", "id": 1, "props": { "id": "main" } }
+        ]
+      },
+      "hex": "52494c4c0100030000000500000000000600040056696577020069640400726f6f740400546578740200486904006d61696e010100000000000100010006020001020000000300000004000000000100000002000000080200000004000201000000010001000605000000",
+      "byteLength": 107,
+      "breakdown": [
+        { "bytes": "52494c4c", "field": "magic" },
+        { "bytes": "0100", "field": "version = 1" },
+        { "bytes": "03000000", "field": "batchId = 3" },
+        { "bytes": "0500", "field": "opCount = 5" },
+        { "bytes": "00", "field": "flags = NONE" },
+        { "bytes": "000000", "field": "reserved[3]" },
+        { "bytes": "0600", "field": "intern count = 6" },
+        { "bytes": "0400", "field": "intern[0] byteLen = 4" },
+        { "bytes": "56696577", "field": "intern[0] utf8 = 'View'" },
+        { "bytes": "0200", "field": "intern[1] byteLen = 2" },
+        { "bytes": "6964", "field": "intern[1] utf8 = 'id'" },
+        { "bytes": "0400", "field": "intern[2] byteLen = 4" },
+        { "bytes": "726f6f74", "field": "intern[2] utf8 = 'root'" },
+        { "bytes": "0400", "field": "intern[3] byteLen = 4" },
+        { "bytes": "54657874", "field": "intern[3] utf8 = 'Text'" },
+        { "bytes": "0200", "field": "intern[4] byteLen = 2" },
+        { "bytes": "4869", "field": "intern[4] utf8 = 'Hi'" },
+        { "bytes": "0400", "field": "intern[5] byteLen = 4" },
+        { "bytes": "6d61696e", "field": "intern[5] utf8 = 'main'" },
+        { "bytes": "01", "field": "op0 opcode CREATE" },
+        { "bytes": "01000000", "field": "id = 1" },
+        { "bytes": "0000", "field": "type = internRef 0 ('View')" },
+        { "bytes": "0100", "field": "props entryCount = 1" },
+        { "bytes": "0100", "field": "key = internRef 1 ('id')" },
+        { "bytes": "06", "field": "value tag STRING" },
+        { "bytes": "0200", "field": "value = internRef 2 ('root')" },
+        { "bytes": "01", "field": "op1 opcode CREATE" },
+        { "bytes": "02000000", "field": "id = 2" },
+        { "bytes": "0300", "field": "type = internRef 3 ('Text')" },
+        { "bytes": "0000", "field": "props entryCount = 0" },
+        { "bytes": "04", "field": "op2 opcode APPEND" },
+        { "bytes": "00000000", "field": "id = 0" },
+        { "bytes": "01000000", "field": "parentId = 1" },
+        { "bytes": "02000000", "field": "childId = 2" },
+        { "bytes": "08", "field": "op3 opcode TEXT" },
+        { "bytes": "02000000", "field": "id = 2" },
+        { "bytes": "0400", "field": "text = internRef 4 ('Hi')" },
+        { "bytes": "02", "field": "op4 opcode UPDATE" },
+        { "bytes": "01000000", "field": "id = 1" },
+        { "bytes": "0100", "field": "props entryCount = 1" },
+        { "bytes": "0100", "field": "key = internRef 1 ('id') REUSED" },
+        { "bytes": "06", "field": "value tag STRING" },
+        { "bytes": "0500", "field": "value = internRef 5 ('main')" },
+        { "bytes": "0000", "field": "removedCount = 0" }
+      ]
+    }
+  ]
+}

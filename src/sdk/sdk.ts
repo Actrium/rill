@@ -6,6 +6,7 @@
  */
 
 import type { ReviewedUnknown } from '../shared';
+import { REF_RESULT_EVENT, RENDER_ERROR_EVENT } from '../shared/events';
 import { KBD_EVENT, KBD_SUBSCRIBE, KBD_UNSUBSCRIBE, type RillKeyEvent } from '../shared/keyboard';
 import type {
   ImageSource,
@@ -118,20 +119,131 @@ function getComponents(): Record<ComponentName, string> {
   return result;
 }
 
+// ============ Host-injected platform info ============
+
 /**
- * Get APIs - either stubs (sandbox) or real (react-native)
+ * Platform information a host can optionally inject for the guest.
  *
- * API Categories:
- * - Pure JS: StyleSheet, Easing (no Host interaction needed)
- * - Platform Info: Platform, Dimensions, PixelRatio, Appearance, I18nManager (Host injected)
- * - Event Subscription: AppState, Keyboard (Host→Guest push)
- * - Host Capability: Alert, Linking, Share, Vibration (Guest→Host request)
- * - Animation: Animated
+ * Convention: the host exposes this on `globalThis.__rill_platform`, either as a
+ * plain object or as a zero-argument function returning one (the same injection
+ * style as `__rill_getConfig`). The SDK re-reads the channel on every access, so
+ * a host may update the values over time (e.g. on window resize).
+ *
+ * Every field is optional: a host only injects what it truthfully knows. When a
+ * field is absent, the corresponding SDK API reports `isInjected === false` and
+ * falls back to a neutral, documented default instead of pretending to be a real
+ * platform.
+ */
+export interface RillPlatformInfo {
+  /** Host OS identifier (e.g. 'ios', 'android', 'web'). */
+  os?: string;
+  /** OS or platform version. */
+  version?: string | number;
+  /** Logical window metrics. */
+  window?: { width: number; height: number; scale?: number; fontScale?: number };
+  /** Physical screen metrics, when the host distinguishes them from `window`. */
+  screen?: { width: number; height: number; scale?: number; fontScale?: number };
+  /** Device pixel ratio; `window.scale` is used when absent. */
+  pixelRatio?: number;
+  /** Font scale; `window.fontScale` is used when absent. */
+  fontScale?: number;
+  /** Current color scheme. Absent means the host does not know. */
+  colorScheme?: 'light' | 'dark';
+  /** Layout direction. Absent means the host does not know. */
+  isRTL?: boolean;
+  /** App lifecycle state (e.g. 'active', 'background'). Absent means unknown. */
+  appState?: string;
+}
+
+/** Read host-injected platform info; `null` when the host provided none. */
+function readPlatformInfo(): RillPlatformInfo | null {
+  const g = globalThis as { __rill_platform?: RillPlatformInfo | (() => RillPlatformInfo) };
+  const raw = g.__rill_platform;
+  if (typeof raw === 'function') {
+    const value = raw();
+    return value && typeof value === 'object' ? value : null;
+  }
+  return raw && typeof raw === 'object' ? raw : null;
+}
+
+/** Device pixel ratio from injected info; 1 when the host injected none. */
+function readPixelRatio(): number {
+  const info = readPlatformInfo();
+  return info?.pixelRatio ?? info?.window?.scale ?? 1;
+}
+
+/**
+ * Window/screen metrics from injected info.
+ *
+ * Without injection this returns the neutral 0×0 fallback; callers that need to
+ * tell "the host reported a 0×0 window" apart from "the host injected nothing"
+ * must check `Dimensions.isInjected`.
+ */
+function readDimensions(dimension: 'window' | 'screen'): {
+  width: number;
+  height: number;
+  scale: number;
+  fontScale: number;
+} {
+  const info = readPlatformInfo();
+  const metrics = dimension === 'screen' ? (info?.screen ?? info?.window) : info?.window;
+  if (!metrics) {
+    return { width: 0, height: 0, scale: 1, fontScale: 1 };
+  }
+  return {
+    width: metrics.width,
+    height: metrics.height,
+    scale: metrics.scale ?? info?.pixelRatio ?? 1,
+    fontScale: metrics.fontScale ?? info?.fontScale ?? 1,
+  };
+}
+
+function unavailableError(api: string): Error {
+  return new Error(
+    `[rill] ${api} is not available: the host has not provided this capability. ` +
+      'Register it as a host:* module.'
+  );
+}
+
+/**
+ * Throw for a synchronous capability no host has provided.
+ *
+ * Deliberately synchronous and loud — a silent no-op would let guest code
+ * believe the action happened.
+ */
+function unavailable(api: string): never {
+  throw unavailableError(api);
+}
+
+/**
+ * Reject for a Promise-returning capability no host has provided.
+ *
+ * Still fails loud (an unhandled rejection surfaces), but as a rejection rather
+ * than a synchronous throw — so idiomatic `.catch()` / `await` error handling
+ * actually catches it. A synchronous throw here would fire before the caller's
+ * `.catch()` is attached, defeating correct async handling.
+ */
+function unavailableAsync<T = never>(api: string): Promise<T> {
+  return Promise.reject(unavailableError(api));
+}
+
+/**
+ * Guest-facing platform APIs, tiered by how honest they can be in a sandbox:
+ *
+ * - Pure JS (StyleSheet, Easing): real local implementations, no host involved.
+ * - Platform info (Platform, Dimensions, PixelRatio, Appearance, I18nManager,
+ *   AppState.currentState): read-only values from the optional host-injected
+ *   `globalThis.__rill_platform` channel (see {@link RillPlatformInfo}); each
+ *   exposes `isInjected` and falls back to a neutral, documented default when
+ *   the host injects nothing.
+ * - Host capabilities (Alert, Linking, Share, Vibration, Keyboard.dismiss) and
+ *   change-event subscriptions (Dimensions/Appearance/AppState/Keyboard/Linking
+ *   listeners): no host implements them yet, so they throw via `unavailable`
+ *   instead of silently pretending to succeed.
  */
 function getAPIs() {
-  // Sandbox stubs
-  const stubs = {
-    // Pure JS
+  const apis = {
+    // ---- Pure JS (real implementations) ----
     StyleSheet: {
       create: <T extends object>(styles: T): T => styles,
       flatten: (s: ReviewedUnknown): ReviewedUnknown => s,
@@ -146,61 +258,138 @@ function getAPIs() {
       out: (e: (t: number) => number) => e,
       inOut: (e: (t: number) => number) => e,
     },
-    // Platform Info
+
+    // ---- Platform info (host-injected, read-only) ----
     Platform: {
-      OS: 'unknown' as string,
-      Version: 0,
-      select: <T>(spec: { default?: T }) => spec.default,
+      /** True when the host injected an OS identifier. */
+      get isInjected(): boolean {
+        return typeof readPlatformInfo()?.os === 'string';
+      },
+      /** Host OS, or the literal 'unknown' when the host injected none. */
+      get OS(): string {
+        return readPlatformInfo()?.os ?? 'unknown';
+      },
+      /** Host OS version, or `undefined` when the host injected none. */
+      get Version(): string | number | undefined {
+        return readPlatformInfo()?.version;
+      },
+      select: <T>(spec: Record<string, T> & { default?: T }): T | undefined => {
+        const os = readPlatformInfo()?.os;
+        return os !== undefined && os in spec ? spec[os] : spec.default;
+      },
     },
     Dimensions: {
-      get: () => ({ width: 0, height: 0, scale: 1, fontScale: 1 }),
-      addEventListener: () => ({ remove: () => {} }),
+      /** True when the host injected window metrics. */
+      get isInjected(): boolean {
+        return readPlatformInfo()?.window !== undefined;
+      },
+      /**
+       * Window/screen metrics. Returns the neutral 0×0 fallback when the host
+       * injected nothing — check `isInjected` to distinguish the two cases.
+       */
+      get: (dimension: 'window' | 'screen' = 'window') => readDimensions(dimension),
+      /** Throws: no host pushes dimension-change events yet. */
+      addEventListener: (): { remove(): void } => unavailable('Dimensions.addEventListener'),
     },
     PixelRatio: {
-      get: () => 1,
-      getFontScale: () => 1,
-      getPixelSizeForLayoutSize: (size: number) => size,
-      roundToNearestPixel: (size: number) => size,
+      /** True when the host injected a pixel ratio (directly or via window.scale). */
+      get isInjected(): boolean {
+        const info = readPlatformInfo();
+        return info?.pixelRatio !== undefined || info?.window?.scale !== undefined;
+      },
+      /** Device pixel ratio, or 1 when the host injected none (see `isInjected`). */
+      get: (): number => readPixelRatio(),
+      /** Font scale, or 1 when the host injected none. */
+      getFontScale: (): number => {
+        const info = readPlatformInfo();
+        return info?.fontScale ?? info?.window?.fontScale ?? 1;
+      },
+      getPixelSizeForLayoutSize: (size: number): number => Math.round(size * readPixelRatio()),
+      roundToNearestPixel: (size: number): number => {
+        const ratio = readPixelRatio();
+        return Math.round(size * ratio) / ratio;
+      },
     },
     Appearance: {
-      getColorScheme: () => 'light' as 'light' | 'dark' | null,
-      addChangeListener: () => ({ remove: () => {} }),
+      /** True when the host injected a color scheme. */
+      get isInjected(): boolean {
+        return readPlatformInfo()?.colorScheme !== undefined;
+      },
+      /** Host color scheme, or `null` (= unknown) when the host injected none. */
+      getColorScheme: (): 'light' | 'dark' | null => readPlatformInfo()?.colorScheme ?? null,
+      /** Throws: no host pushes appearance-change events yet. */
+      addChangeListener: (): { remove(): void } => unavailable('Appearance.addChangeListener'),
     },
-    I18nManager: { isRTL: false, allowRTL: () => {}, forceRTL: () => {} },
-    // Event Subscription
+    I18nManager: {
+      /** True when the host injected a layout direction. */
+      get isInjected(): boolean {
+        return readPlatformInfo()?.isRTL !== undefined;
+      },
+      /** Layout direction, or `false` when the host injected none (see `isInjected`). */
+      get isRTL(): boolean {
+        return readPlatformInfo()?.isRTL ?? false;
+      },
+      /** Throws: the sandbox cannot change the host layout direction. */
+      allowRTL: (): void => unavailable('I18nManager.allowRTL'),
+      /** Throws: the sandbox cannot change the host layout direction. */
+      forceRTL: (): void => unavailable('I18nManager.forceRTL'),
+    },
     AppState: {
-      currentState: 'active' as string,
-      addEventListener: () => ({ remove: () => {} }),
+      /** True when the host injected a lifecycle state. */
+      get isInjected(): boolean {
+        return readPlatformInfo()?.appState !== undefined;
+      },
+      /** Lifecycle state, or the literal 'unknown' when the host injected none. */
+      get currentState(): string {
+        return readPlatformInfo()?.appState ?? 'unknown';
+      },
+      /** Throws: no host pushes app-state events yet. */
+      addEventListener: (): { remove(): void } => unavailable('AppState.addEventListener'),
     },
+
+    // ---- Host capabilities (Guest→Host requests; throw until a host provides them) ----
     Keyboard: {
-      dismiss: () => {},
-      addListener: () => ({ remove: () => {} }),
+      dismiss: (): void => unavailable('Keyboard.dismiss'),
+      addListener: (): { remove(): void } => unavailable('Keyboard.addListener'),
     },
-    // Host Capability
-    Alert: { alert: () => {}, prompt: () => {} },
+    Alert: {
+      alert: (): void => unavailable('Alert.alert'),
+      prompt: (): void => unavailable('Alert.prompt'),
+    },
     Linking: {
-      openURL: async () => {},
-      canOpenURL: async () => false,
-      getInitialURL: async () => null,
-      addEventListener: () => ({ remove: () => {} }),
+      openURL: (_url: string): Promise<void> => unavailableAsync('Linking.openURL'),
+      canOpenURL: (_url: string): Promise<boolean> => unavailableAsync('Linking.canOpenURL'),
+      getInitialURL: (): Promise<string | null> => unavailableAsync('Linking.getInitialURL'),
+      addEventListener: (): { remove(): void } => unavailable('Linking.addEventListener'),
     },
-    Share: { share: async () => ({ action: 'dismissedAction' }) },
-    Vibration: { vibrate: () => {}, cancel: () => {} },
-    // Animation
-    Animated: {},
+    Share: {
+      share: (_content?: {
+        message?: string;
+        url?: string;
+        title?: string;
+      }): Promise<{ action: string }> => unavailableAsync('Share.share'),
+    },
+    Vibration: {
+      vibrate: (): void => unavailable('Vibration.vibrate'),
+      cancel: (): void => unavailable('Vibration.cancel'),
+    },
   };
-  return stubs;
+  return apis;
 }
 
 /**
- * Get RN Hooks - either stubs (sandbox) or real (react-native)
+ * RN-compatible hooks backed by the same host-injected platform info as the
+ * Platform/Dimensions/Appearance APIs.
+ *
+ * There is no change-event channel yet, so values refresh only when the guest
+ * re-renders. Fallbacks match the underlying APIs: `null` color scheme and 0×0
+ * dimensions mean "host injected nothing" (see `Dimensions.isInjected`).
  */
 function getRNHooks() {
-  const stubs = {
-    useColorScheme: () => 'light' as 'light' | 'dark' | null,
-    useWindowDimensions: () => ({ width: 0, height: 0, scale: 1, fontScale: 1 }),
+  return {
+    useColorScheme: (): 'light' | 'dark' | null => readPlatformInfo()?.colorScheme ?? null,
+    useWindowDimensions: () => readDimensions('window'),
   };
-  return stubs;
 }
 
 const _components = getComponents();
@@ -254,8 +443,8 @@ export const Alert = _apis.Alert;
 export const Linking = _apis.Linking;
 export const Share = _apis.Share;
 export const Vibration = _apis.Vibration;
-// Animation
-export const Animated = _apis.Animated;
+// Animated is intentionally NOT exported: there is no animation runtime in the
+// sandbox, and an empty placeholder would crash guests at first property access.
 
 // ============ RN Hook Exports ============
 export const useColorScheme = _rnHooks.useColorScheme;
@@ -589,7 +778,7 @@ export function useKeyboard(spec: UseKeyboardSpec): void {
 
   // Re-subscribe only when the key set or preventDefault intent changes.
   const specKeys = spec.keys ?? null;
-  const keysKey = specKeys === null ? '*' : [...specKeys].sort().join(' ');
+  const keysKey = specKeys === null ? '*' : [...specKeys].sort().join('\u0000');
   const preventDefault = spec.preventDefault ?? false;
 
   useEffect(() => {
@@ -744,10 +933,10 @@ export function useRemoteRef<T = unknown>(options?: {
       }
     };
 
-    // Subscribe to __REF_RESULT__ events
+    // Subscribe to REF_RESULT_EVENT messages from the host
     const unsubscribe = (
       g.__rill_onHostEvent as (name: string, cb: (payload: RefMethodResult) => void) => () => void
-    )('__REF_RESULT__', handleResult);
+    )(REF_RESULT_EVENT, handleResult);
 
     return unsubscribe;
   }, [nodeId]);
@@ -921,7 +1110,7 @@ export class RillErrorBoundary extends (React.Component as unknown as new (
     if ('__rill_emitEvent' in g) {
       // Reason: Error payload can be any serializable type
       const sendToHost = g.__rill_emitEvent as (name: string, payload: unknown) => void;
-      sendToHost('RENDER_ERROR', {
+      sendToHost(RENDER_ERROR_EVENT, {
         message: error.message,
         stack: error.stack,
         componentStack: info.componentStack,

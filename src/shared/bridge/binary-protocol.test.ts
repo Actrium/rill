@@ -11,7 +11,13 @@ import {
   detectPayloadEncoding,
   type PayloadEncoding,
 } from './binary-protocol';
-import type { SerializedOperationBatch, SerializedOperation } from '../types';
+import { BinaryEncoder } from '../../guest/runtime/reconciler/binary-encoder';
+import { decodeBatchStreaming } from '../../host/wire/wire-decoder';
+import type {
+  SerializedFunction,
+  SerializedOperationBatch,
+  SerializedOperation,
+} from '../types';
 
 // ============================================
 // Test Helpers
@@ -520,5 +526,178 @@ describe('BinaryProtocol Performance', () => {
 
     // Binary should be smaller
     expect((binaryResult as ArrayBuffer).byteLength).toBeLessThan((jsonResult as string).length);
+  });
+});
+
+// ============================================
+// FUNCTION anti-drift convergence
+//
+// Proves the LEGACY TS codec pair (binary-encoder.ts + binary-protocol.ts) no
+// longer drifts from contracts/op-batch-wire.json on FUNCTION values:
+//   (a) binary-protocol.ts round-trips name/sourceFile/sourceLine, and
+//   (b) the SAME bytes decode identically via the AUTHORITATIVE streaming
+//       decoder src/host/wire/wire-decoder.ts (cross-decoder agreement), and
+//   (c) a fresh encoder reproduces the checked-in golden matrix bytes for the
+//       function-with-debug vector byte-for-byte.
+// ============================================
+
+function toHex(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let s = '';
+  for (const b of bytes) s += b.toString(16).padStart(2, '0');
+  return s;
+}
+
+/** Decode a binary batch via the authoritative wire-decoder into an op array. */
+function decodeViaWireDecoder(buffer: ArrayBuffer): SerializedOperation[] {
+  const ops: SerializedOperation[] = [];
+  decodeBatchStreaming(buffer, (op) => ops.push(op));
+  return ops;
+}
+
+describe('FUNCTION anti-drift (legacy codec ⇄ schema)', () => {
+  const fnFull: SerializedFunction = {
+    __type: 'function',
+    __fnId: 'fn_1',
+    __name: 'onPress',
+    __sourceFile: 'App.tsx',
+    __sourceLine: 42,
+  };
+  const fnBare: SerializedFunction = { __type: 'function', __fnId: 'fn_1' };
+
+  it('emits the schema FUNCTION layout: bare fnId + flags=0x00, no trailing fields', () => {
+    // Prop key 'v' is chosen so it never collides with a metadata string,
+    // keeping the intern indices deterministic for the byte assertion.
+    const batch: SerializedOperationBatch = {
+      version: 1,
+      batchId: 7,
+      operations: [{ op: 'CREATE', id: 1, type: 'View', props: { v: fnBare } }],
+    };
+    const bytes = new BinaryEncoder().encodeBatch(batch);
+    const hex = toHex(bytes);
+    // intern order: View(0), v[key](1), fn_1(2).
+    // value bytes: 07 (FUNCTION) 0200 (fnId ref 2) 00 (flags=0, no metadata).
+    // Bare function is exactly one flags byte over a raw fnId (tag+u16+u8 = 4B).
+    expect(hex).toContain('07020000');
+
+    // (a) legacy decoder round-trips it.
+    const back = new BinaryProtocol().decodeBatch(bytes);
+    const value = (back.operations[0] as Extract<SerializedOperation, { op: 'CREATE' }>).props
+      .v as SerializedFunction;
+    expect(value).toEqual(fnBare);
+    expect(value.__name).toBeUndefined();
+    expect(value.__sourceFile).toBeUndefined();
+    expect(value.__sourceLine).toBeUndefined();
+
+    // (b) cross-decoder agreement with the authoritative wire-decoder.
+    const wireOps = decodeViaWireDecoder(bytes);
+    expect((wireOps[0] as Extract<SerializedOperation, { op: 'CREATE' }>).props.v).toEqual(fnBare);
+  });
+
+  it('emits + round-trips FUNCTION metadata (name/sourceFile/sourceLine)', () => {
+    const batch: SerializedOperationBatch = {
+      version: 1,
+      batchId: 7,
+      operations: [{ op: 'CREATE', id: 1, type: 'View', props: { v: fnFull } }],
+    };
+    const bytes = new BinaryEncoder().encodeBatch(batch);
+    const hex = toHex(bytes);
+    // intern order: View(0), v[key](1), fn_1(2), onPress[name](3), App.tsx(4).
+    // value bytes: 07 0200 (fnId ref 2) 07 (flags bit0|bit1|bit2) 0300 (name ref 3)
+    //              0400 (sourceFile ref 4) 2a000000 (sourceLine 42 inline u32).
+    expect(hex).toContain('07020007030004002a000000');
+
+    // (a) legacy decoder round-trips ALL metadata exactly.
+    const back = new BinaryProtocol().decodeBatch(bytes);
+    const value = (back.operations[0] as Extract<SerializedOperation, { op: 'CREATE' }>).props
+      .v as SerializedFunction;
+    expect(value).toEqual(fnFull);
+
+    // (b) cross-decoder agreement: the SAME bytes decode identically via the
+    // authoritative streaming wire-decoder — the anti-drift proof.
+    const wireOps = decodeViaWireDecoder(bytes);
+    expect((wireOps[0] as Extract<SerializedOperation, { op: 'CREATE' }>).props.v).toEqual(fnFull);
+  });
+
+  it('reproduces the golden matrix bytes for create-value-function-debug', () => {
+    // contracts/op-batch-wire.matrix.json → "create-value-function-debug":
+    // CREATE View props {v: fn_9/onPress/App.tsx/42}, batchId 1074. A fresh
+    // encoder (index-from-0) MUST reproduce the checked-in bytes exactly.
+    const golden =
+      '52494c4c01003204000001000000000005000400566965770100760400666e5f39' +
+      '07006f6e507265737307004170702e747378010100000000000100010007020007' +
+      '030004002a000000';
+    const batch: SerializedOperationBatch = {
+      version: 1,
+      batchId: 1074,
+      operations: [
+        {
+          op: 'CREATE',
+          id: 1,
+          type: 'View',
+          props: {
+            v: {
+              __type: 'function',
+              __fnId: 'fn_9',
+              __name: 'onPress',
+              __sourceFile: 'App.tsx',
+              __sourceLine: 42,
+            },
+          },
+        },
+      ],
+    };
+    const bytes = new BinaryEncoder().encodeBatch(batch);
+    expect(toHex(bytes)).toBe(golden);
+  });
+});
+
+// ============================================
+// Fail-closed: FUNCTION reserved flag bits
+// ============================================
+
+describe('BinaryProtocol FUNCTION reserved flag bits (fail-closed)', () => {
+  it('rejects a batch whose FUNCTION flags byte has a reserved bit set', () => {
+    const protocol = new BinaryProtocol({ encoding: 'binary' });
+    // A single CREATE whose only prop is a metadata-free function: the wire
+    // then ends [..., ValueType.FUNCTION, fnId u16, flags u8], so the flags
+    // byte is the LAST byte of the buffer (0x00 for no metadata).
+    const batch = createTestBatch([
+      createCreateOp(1, 'View', { onPress: { __type: 'function', __fnId: 'fn-1' } }),
+    ]);
+    const encoded = protocol.encodeBatch(batch) as ArrayBuffer;
+    const bytes = new Uint8Array(encoded.slice(0));
+    expect(bytes[bytes.length - 1]).toBe(0x00); // sanity: metadata-free flags
+
+    // Sanity: the untampered buffer round-trips.
+    expect(protocol.decodeBatch(bytes.buffer.slice(0))).toEqual(batch);
+
+    // bits 3..7 are reserved and MUST be 0; a set bit implies unknown
+    // trailing fields the decoder cannot length — reject, never desync.
+    bytes[bytes.length - 1] = 0x08;
+    expect(() => protocol.decodeBatch(bytes.buffer)).toThrow(/reserved flag bit/);
+  });
+});
+
+// ============================================
+// Fail-closed: full consumption (no trailing bytes)
+// ============================================
+
+describe('BinaryProtocol full-consumption (fail-closed trailing bytes)', () => {
+  it('rejects a binary batch that leaves trailing bytes unconsumed', () => {
+    const protocol = new BinaryProtocol({ encoding: 'binary' });
+    const batch = createTestBatch([createCreateOp(1, 'View', { a: 1 })]);
+    const encoded = protocol.encodeBatch(batch) as ArrayBuffer;
+
+    // Sanity: the exact buffer round-trips.
+    expect(protocol.decodeBatch(encoded.slice(0))).toEqual(batch);
+
+    // A fully-parsed batch must leave the buffer exactly spent; one extra byte
+    // is a corrupt/oversized frame or a desynced stream. The authoritative
+    // streaming decoder rejects it too, so the legacy decoder must not diverge.
+    const padded = new Uint8Array(encoded.byteLength + 1);
+    padded.set(new Uint8Array(encoded), 0);
+    padded[padded.length - 1] = 0xff;
+    expect(() => protocol.decodeBatch(padded.buffer)).toThrow(/Trailing bytes/);
   });
 });

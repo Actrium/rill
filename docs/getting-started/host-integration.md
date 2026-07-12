@@ -140,15 +140,17 @@ useEffect(() => {
 ### Health and Diagnostics
 
 ```tsx
-// Returns a health snapshot: status, uptime, error count, render stats
-const health = engine.getHealth();
-
-// Returns resource usage: memory, active timers, pending callbacks
-const resources = engine.getResourceStats();
-
-// Returns diagnostic data (requires diagnostics: true)
+// Single observability entry point -- always available
 const diagnostics = engine.getDiagnostics();
+
+// Health snapshot: loaded/destroyed flags, error count, receiver node count
+const health = diagnostics.health;
+
+// Resource usage: active timers, live UI nodes, registered callbacks
+const resources = diagnostics.resources;
 ```
+
+The `diagnostics` option in `EngineOptions` only tunes the activity-stats windows and timeline buckets; `getDiagnostics()` works whether or not it is set.
 
 ### Pause and Resume
 

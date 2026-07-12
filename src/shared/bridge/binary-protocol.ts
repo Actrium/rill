@@ -1,6 +1,20 @@
 /**
  * binary-protocol.ts
  *
+ * LEGACY / DORMANT op-batch codec (decoder half; encoder is
+ * src/guest/runtime/reconciler/binary-encoder.ts). This is the SAME guest→host
+ * op-batch BINARY wire format described by contracts/op-batch-wire.json, but it
+ * is NOT on the live path — JSON is the real transport (BinaryProtocolConfig
+ * defaults to 'json'); this pair exists only for tests/benchmarks. It is kept
+ * BYTE-ALIGNED with contracts/op-batch-wire.json and is superseded by the
+ * authoritative implementations locked to that schema: the Rust encoder
+ * (crates/rill-guest/src/wire_encode.rs, the byte oracle) plus the streaming
+ * decoders (src/host/wire/wire-decoder.ts, native WireDecoder.cpp), all
+ * conformance-tested against the golden/matrix vectors. Per the maturity
+ * roadmap this pair is to be REPLACED by a wire_encode.rs port when the web
+ * op-batch route is promoted — do not extend it with new features; only keep it
+ * from drifting off the schema.
+ *
  * P3-X.5: Bridge Binary Protocol Adapter
  *
  * Provides binary encoding/decoding support for Bridge.
@@ -14,6 +28,7 @@
 
 import { BinaryEncoder } from '../../guest/runtime/reconciler/binary-encoder';
 import type {
+  SerializedFunction,
   SerializedOperation,
   SerializedOperationBatch,
   SerializedValue,
@@ -160,6 +175,17 @@ class BinaryDecoder {
     const operations: SerializedOperation[] = [];
     for (let i = 0; i < opCount; i++) {
       operations.push(this.readOperation(flags));
+    }
+
+    // Full-consumption check: every declared op has been read, so the buffer
+    // must be exactly spent. Trailing bytes mean either a corrupt/oversized
+    // frame or a desynced stream we silently mis-parsed — reject fail-closed,
+    // matching the authoritative streaming decoder (wire-decoder.ts) which also
+    // refuses a batch that does not end on a frame boundary. Reachable because
+    // Engine.injectRuntimeAPI routes ArrayBuffer batches through
+    // Bridge.sendBinaryBatch() into this decoder.
+    if (this.pos !== this.uint8.length) {
+      throw new Error(`Trailing bytes after batch: consumed ${this.pos} of ${this.uint8.length}`);
     }
 
     return {
@@ -335,11 +361,29 @@ class BinaryDecoder {
       }
 
       case ValueType.FUNCTION: {
+        // Byte layout locked to contracts/op-batch-wire.json values.FUNCTION:
+        // fnId (internRef u16), a u8 flags byte, then ONLY the present optional
+        // fields IN ORDER — name (internRef u16, bit0), sourceFile (internRef
+        // u16, bit1), sourceLine (u32 inline, NOT interned, bit2). flags=0 =>
+        // no metadata. Mirrors src/host/wire/wire-decoder.ts.
         const fnIdIdx = this.readU16();
-        return {
+        const fn: SerializedFunction = {
           __type: 'function' as const,
           __fnId: this.internTable[fnIdIdx] ?? '',
         };
+        const fnFlags = this.readU8();
+        // bits 3..7 are reserved and MUST be written 0 (contracts/
+        // op-batch-wire.json values.FUNCTION flags note). A set reserved bit
+        // implies unknown trailing fields we cannot length, so reject
+        // fail-closed rather than desync the stream — matching
+        // wire-decoder.ts and the C++ WireDecoder.
+        if ((fnFlags & 0xf8) !== 0) {
+          throw new Error(`FUNCTION reserved flag bit set: 0x${fnFlags.toString(16)}`);
+        }
+        if ((fnFlags & 0x01) !== 0) fn.__name = this.internTable[this.readU16()] ?? '';
+        if ((fnFlags & 0x02) !== 0) fn.__sourceFile = this.internTable[this.readU16()] ?? '';
+        if ((fnFlags & 0x04) !== 0) fn.__sourceLine = this.readU32();
+        return fn;
       }
 
       case ValueType.OBJECT: {

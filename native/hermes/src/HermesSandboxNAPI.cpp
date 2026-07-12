@@ -163,6 +163,11 @@ HermesSandboxNAPIContext::HermesSandboxNAPIContext(jsi::Runtime &hostRuntime,
                                                    double timeout)
     : runtime_(nullptr), env_(nullptr),
       hostRuntime_(&hostRuntime), disposed_(false) {
+  // NOT ENFORCED: the Hermes N-API surface exposes no interrupt/watchdog
+  // hook, so the createRuntime({timeout}) option is accepted but ignored
+  // here. A tenant infinite loop will block the calling (host) thread
+  // indefinitely. (The C++ JSI variant, HermesSandboxJSI, DOES enforce it
+  // via HermesRuntime::watchTimeLimit.)
   (void)timeout;
 
   jsr_config config = nullptr;
@@ -342,6 +347,12 @@ napi_value HermesSandboxNAPIContext::jsiToNapi(jsi::Runtime &rt,
 
 // ---- Value conversion: N-API -> JSI ----
 
+// KNOWN GAP (Windows): unlike the JSI/JSC converters, this one has NO
+// ArrayBuffer/TypedArray branch — a sandbox ArrayBuffer falls into the
+// generic property copy and arrives host-side as an empty object, so binary
+// wires (op-batch binaryEncoding) must stay gated OFF on this provider until
+// a napi_get_arraybuffer_info / napi_get_typedarray_info branch lands and is
+// verified on a Windows host.
 jsi::Value HermesSandboxNAPIContext::napiToJsi(jsi::Runtime &rt,
                                                napi_value value, int depth) {
   if (depth > 32)

@@ -438,6 +438,201 @@
   assert(ctx.eval('-0') === 0, 'Negative zero'); // Note: -0 === 0 in JS
   assert(ctx.eval("''") === '', 'Empty string literal');
 
+  // 30. Execution timeout (wall-clock interrupt)
+  console.log('\n30. Execution Timeout');
+  var timeoutRt = sandbox.createRuntime({ timeout: 250 });
+  var timeoutCtx = timeoutRt.createContext();
+  var start = Date.now();
+  var threw = false;
+  var errMsg = '';
+  try {
+    timeoutCtx.eval('while (true) {}');
+  } catch (e) {
+    threw = true;
+    errMsg = String(e?.message || e);
+  }
+  var elapsed = Date.now() - start;
+  assert(threw, 'Infinite loop eval throws instead of hanging');
+  assert(errMsg.indexOf('timed out') !== -1, 'Timeout error message is explicit', `got: ${errMsg}`);
+  assert(elapsed >= 200, 'Interrupt fires no earlier than the deadline', `elapsed: ${elapsed}`);
+  assert(elapsed < 5000, 'Interrupt fires promptly after the deadline', `elapsed: ${elapsed}`);
+  assert(timeoutCtx.eval('1 + 1') === 2, 'Context stays usable after a timeout');
+  timeoutRt.dispose();
+
+  var unlimitedRt = sandbox.createRuntime({ timeout: 0 });
+  var unlimitedCtx = unlimitedRt.createContext();
+  assert(
+    unlimitedCtx.eval('var s = 0; for (var i = 0; i < 100000; i++) s += i; s') === 4999950000,
+    'timeout: 0 means unlimited (long loop completes)'
+  );
+  unlimitedRt.dispose();
+
+  // timeout: Infinity must mean "no limit" — not a bogus int64 deadline in
+  // the past (double->int64 overflow) that kills every non-trivial eval.
+  var infinityRt = sandbox.createRuntime({ timeout: Infinity });
+  var infinityCtx = infinityRt.createContext();
+  assert(
+    infinityCtx.eval('var s = 0; for (var i = 0; i < 100000; i++) s += i; s') === 4999950000,
+    'timeout: Infinity means unlimited (long loop completes)'
+  );
+  infinityRt.dispose();
+
+  // dispose() must return even when a timed-out tenant left a self-requeueing
+  // promise job in the queue (the drain loop is bounded, leftovers are freed
+  // with the runtime).
+  var drainRt = sandbox.createRuntime({ timeout: 200 });
+  var drainCtx = drainRt.createContext();
+  try {
+    drainCtx.eval(
+      'Promise.resolve().then(function f() { Promise.resolve().then(f); }); while (true) {}'
+    );
+  } catch (_e) {
+    // expected: eval times out; the self-requeueing job stays queued
+  }
+  var disposeStart = Date.now();
+  drainRt.dispose();
+  assert(
+    Date.now() - disposeStart < 5000,
+    'dispose() returns despite a self-requeueing pending job'
+  );
+
+  // 31. Heap quota (maxHeapBytes -> JS_SetMemoryLimit)
+  console.log('\n31. Heap Quota');
+  var quotaRt = sandbox.createRuntime({ maxHeapBytes: 8 * 1024 * 1024 });
+  var quotaCtx = quotaRt.createContext();
+  var oomThrew = false;
+  var oomMsg = '';
+  try {
+    quotaCtx.eval('var big = new Uint8Array(64 * 1024 * 1024); big.length');
+  } catch (e) {
+    oomThrew = true;
+    oomMsg = String(e?.message || e);
+  }
+  assert(oomThrew, 'Allocation beyond maxHeapBytes throws', `got: ${oomMsg}`);
+  assert(quotaCtx.eval('1 + 1') === 2, 'Context stays usable after quota OOM');
+  assert(
+    quotaCtx.eval('new Uint8Array(1024 * 1024).length') === 1048576,
+    'Small allocations still work under the quota'
+  );
+  quotaRt.dispose();
+
+  var defaultHeapRt = sandbox.createRuntime({});
+  var defaultHeapCtx = defaultHeapRt.createContext();
+  assert(
+    defaultHeapCtx.eval('new Uint8Array(64 * 1024 * 1024).length') === 67108864,
+    'Default heap limit still allows a 64MB allocation'
+  );
+  defaultHeapRt.dispose();
+
+  console.log('\n32. Binary values crossing the sandbox boundary');
+  // An ArrayBuffer/TypedArray from the sandbox must arrive host-side as REAL
+  // binary (bytes copied), never as the generic property-copy's empty object —
+  // that silent destruction was the binary op-batch failure mode.
+  var binRt = sandbox.createRuntime({});
+  var binCtx = binRt.createContext();
+
+  var gotBatch = null;
+  binCtx.inject('sendBinary', (buf) => {
+    gotBatch = buf;
+  });
+  binCtx.eval(
+    'var ab = new ArrayBuffer(4); var w = new Uint8Array(ab); ' +
+      'w[0] = 0x52; w[1] = 0x49; w[2] = 0x4c; w[3] = 0x4c; sendBinary(ab);'
+  );
+  assert(gotBatch instanceof ArrayBuffer, 'sandbox ArrayBuffer arrives as host ArrayBuffer');
+  var gotBytes = gotBatch instanceof ArrayBuffer ? new Uint8Array(gotBatch) : null;
+  assert(
+    gotBytes &&
+      gotBytes.length === 4 &&
+      gotBytes[0] === 0x52 &&
+      gotBytes[1] === 0x49 &&
+      gotBytes[2] === 0x4c &&
+      gotBytes[3] === 0x4c,
+    'ArrayBuffer bytes survive the boundary intact'
+  );
+
+  var gotView = null;
+  binCtx.inject('sendView', (v) => {
+    gotView = v;
+  });
+  binCtx.eval('var backing = new Uint8Array([1, 2, 3, 4, 5]); sendView(backing.subarray(1, 4));');
+  assert(gotView instanceof Uint8Array, 'sandbox Uint8Array arrives as host Uint8Array');
+  assert(
+    gotView && gotView.length === 3 && gotView[0] === 2 && gotView[1] === 3 && gotView[2] === 4,
+    "only the view's byte window crosses, bytes intact"
+  );
+
+  var evalAb = binCtx.eval('new Uint8Array([9, 8, 7]).buffer');
+  assert(
+    evalAb instanceof ArrayBuffer && new Uint8Array(evalAb)[0] === 9,
+    'eval-returned ArrayBuffer crosses intact'
+  );
+
+  var evalEmpty = binCtx.eval('new ArrayBuffer(0)');
+  assert(
+    evalEmpty instanceof ArrayBuffer && evalEmpty.byteLength === 0,
+    'zero-length ArrayBuffer crosses as an empty ArrayBuffer'
+  );
+
+  console.log('\n33. Binary values crossing host -> sandbox');
+  // The symmetric direction: a host capability that RETURNS an ArrayBuffer /
+  // typed-array must reach the guest as real bytes, not the generic empty
+  // object copy. The assertions run INSIDE the sandbox (eval returns a bool).
+  binCtx.inject('getBytesAb', () => {
+    var ab = new ArrayBuffer(3);
+    var w = new Uint8Array(ab);
+    w[0] = 1;
+    w[1] = 2;
+    w[2] = 3;
+    return ab;
+  });
+  assert(
+    binCtx.eval(
+      'var v = getBytesAb();' +
+        '(v instanceof ArrayBuffer) && v.byteLength === 3 && ' +
+        'new Uint8Array(v)[0] === 1 && new Uint8Array(v)[2] === 3'
+    ) === true,
+    'host ArrayBuffer return arrives in sandbox as ArrayBuffer, bytes intact'
+  );
+
+  binCtx.inject('getView', () => new Uint8Array([5, 6, 7, 8]).subarray(1, 3));
+  assert(
+    binCtx.eval(
+      'var v = getView();' +
+        '(v instanceof Uint8Array) && v.length === 2 && v[0] === 6 && v[1] === 7'
+    ) === true,
+    'host Uint8Array view return arrives in sandbox as Uint8Array window, bytes intact'
+  );
+
+  binCtx.inject('getEmptyAb', () => new ArrayBuffer(0));
+  assert(
+    binCtx.eval('var v = getEmptyAb(); (v instanceof ArrayBuffer) && v.byteLength === 0') === true,
+    'host zero-length ArrayBuffer return arrives as an empty ArrayBuffer'
+  );
+
+  // A merely view-SHAPED plain object with an out-of-range byteOffset must be
+  // rejected by extractHostViewBytes (bounded in the double domain against the
+  // real backing size) and fall through to the generic object copy — never a
+  // UB size_t cast. 2**64 specifically defeats a naive static_cast<double>
+  // (SIZE_MAX) upper bound, which rounds up to 2**64.
+  binCtx.inject('getFakeView', () => ({
+    constructor: { name: 'Uint8Array' },
+    buffer: new ArrayBuffer(4),
+    byteOffset: Math.pow(2, 64),
+    byteLength: 2,
+  }));
+  assert(
+    binCtx.eval(
+      'var v = getFakeView();' +
+        // Not real bytes: a plain object copy, NOT a Uint8Array / ArrayBuffer.
+        '!(v instanceof Uint8Array) && !(v instanceof ArrayBuffer) && ' +
+        'typeof v === "object" && v.byteLength === 2 && v.byteOffset === Math.pow(2,64)'
+    ) === true,
+    'fake view with byteOffset 2**64 is rejected, copied as a plain object (no UB cast)'
+  );
+
+  binRt.dispose();
+
   // Summary
   console.log('\n=== Test Summary ===');
   console.log(`Total: ${testsRun}`);

@@ -1,0 +1,10 @@
+# Pin the Rust toolchain so the committed wasm guest fixtures
+# (src/host/wasm-guest/__tests__/fixtures/*.wasm, built by crates/build.sh)
+# are byte-reproducible. rustc codegen differs across versions, so an
+# unpinned toolchain makes a clean rebuild drift from the committed blobs
+# even with no source change. Bump this channel and rebuild the fixtures
+# in the same commit.
+[toolchain]
+channel = "1.93.0"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

@@ -1,3 +1,15 @@
+// -----------------------------------------------------------------------------
+// TEST-ONLY JSI HOST - excluded from the shipped pod (see RillSandboxNative.podspec
+// exclude_files). This file is part of a full jsi::Runtime over JavaScriptCore. It is
+// NOT the sandbox product: production hosts install the *SandboxJSI HostObject into
+// their OWN runtime and never link this cluster (verified: no rill downstream links
+// it). It is retained solely as a self-contained, dependency-free JSI host that lets
+// the sandbox be unit- and leak-tested natively via native/jsc/run-tests.sh
+// (JavaScriptCore tests build via native/jsc/Makefile and need the JSC framework, so
+// they run on Apple/macOS - not plain Linux).
+// Do NOT add production code that depends on this file; if you do, it must be moved
+// back into the shipped source set deliberately.
+// -----------------------------------------------------------------------------
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -1067,8 +1079,26 @@ jsi::Array JSCRuntime::createArray(size_t length) {
 
 jsi::ArrayBuffer
 JSCRuntime::createArrayBuffer(std::shared_ptr<jsi::MutableBuffer> buffer) {
-  (void)buffer;
-  throw std::logic_error("Not implemented");
+  if (!buffer) {
+    throw jsi::JSError(*this, "Cannot create ArrayBuffer from null buffer");
+  }
+  // No-copy over the MutableBuffer's storage: a heap cell keeps the
+  // shared_ptr alive until JSC garbage-collects the ArrayBuffer and calls the
+  // deallocator (same lifetime pattern as QuickJSRuntime::createArrayBuffer).
+  auto *cell = new std::shared_ptr<jsi::MutableBuffer>(std::move(buffer));
+  auto deallocator = [](void *bytes, void *deallocatorContext) {
+    (void)bytes;
+    delete static_cast<std::shared_ptr<jsi::MutableBuffer> *>(
+        deallocatorContext);
+  };
+  JSValueRef exc = nullptr;
+  JSObjectRef obj = JSObjectMakeArrayBufferWithBytesNoCopy(
+      ctx_, (*cell)->data(), (*cell)->size(), deallocator, cell, &exc);
+  if (!obj || exc) {
+    delete cell;
+    checkException(obj, exc);
+  }
+  return createObject(obj).getArrayBuffer(*this);
 }
 
 size_t JSCRuntime::size(const jsi::Array &arr) {

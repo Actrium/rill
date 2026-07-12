@@ -1,3 +1,6 @@
+// WIP subsystem — gated behind RILL_WIP_NATIVE_SECURITY (off by default in production builds).
+// Rationale, goals, current status, and completion TODO live in security/SecurityManager.h.
+#if RILL_WIP_NATIVE_SECURITY
 #include "FileSandbox.h"
 #include <algorithm>
 #include <filesystem>
@@ -288,3 +291,4 @@ FilePolicy FileSandbox::getPolicy() const {
 }
 
 } // namespace rill::security
+#endif // RILL_WIP_NATIVE_SECURITY

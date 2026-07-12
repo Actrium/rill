@@ -1,0 +1,13 @@
+[package]
+name = "heap-churn-guest"
+version.workspace = true
+edition.workspace = true
+description = "Native rill guest that churns alloc/free far past the old 1 MiB heap cap, proving talc reclaims freed memory and keeps linear memory bounded."
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rill-guest = { path = "../rill-guest" }

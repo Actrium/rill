@@ -4,14 +4,16 @@ import { join } from 'node:path';
 import { createHostModuleDispatch, defineRillContract, implementHostModules, rpc } from '../../../contract';
 import { ComponentRegistry } from '../../registry';
 import { Receiver } from '../../receiver';
+import { type CanvasOp, decodeCanvasFrame } from '../../wire/canvas-wire-decoder';
 import { WasmGuestHost } from '../wasm-guest-host';
 
 // Real Rust guests built via the rill-guest canvas/asset/gpu SDK (crates/build.sh).
 // These drive the SDK modules end-to-end over the native-guest ABI: rill knows
 // nothing about host:canvas / host:gpu, so a test-local dispatch RECORDS what the
-// guest emitted — exactly as kvDispatch does for host:kv in wasm-guest-host.test.ts.
+// guest emitted — exactly as storeDispatch does for host:store in wasm-guest-host.test.ts.
 const fx = (n: string) => readFileSync(join(import.meta.dir, 'fixtures', n));
 const CANVAS_GUEST = fx('canvas-guest.wasm'); // ① host:canvas.draw display list
+const CANVAS_BINARY_GUEST = fx('canvas-binary-guest.wasm'); // wip binary-wire draw (feature ON)
 const PRESENT_GUEST = fx('canvas-present-guest.wasm'); // ② framebuffer present
 const GPU_GUEST = fx('canvas-gpu-guest.wasm'); // ③ host:gpu command buffer
 const ESCAPE_GUEST = fx('canvas-escape-guest.wasm'); // guest->host JSON escaping
@@ -157,7 +159,8 @@ describe('canvas guests — ① host:canvas.draw display list', () => {
     const list = field(draw.input, 'ops');
     const names = opNames(list);
     // The house scene exercises many distinct 2D ctx ops; the op NAMES on the wire
-    // match host-canvas.ts OP_SPECS exactly (camelCase ctx method names).
+    // match contracts/graphics-seams.json host:canvas.ops (the authoritative op
+    // schema a downstream host validator's OP_SPECS must mirror too).
     for (const op of [
       'setFillStyle',
       'fillRect',
@@ -334,5 +337,178 @@ describe('canvas guests — guest->host JSON escaping', () => {
     const text = ops(list).find((o) => asStr(o.op) === 'fillText');
     // Metacharacters mixed with 2-byte (é) and 4-byte (emoji) UTF-8 all round-trip.
     expect(text?.text).toBe('hé"llo\\\n\t😀');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Capability handshake — WIP binary canvas wire (canvas-wire.DESIGN.md §1)
+//
+// A binary-CAPABLE host: it advertises `host:canvas.getInfo -> {binaryDraw:true,
+// wireVersion:1}` AND its `draw` accepts BOTH encodings — a binary RCNV frame
+// (delivered as raw bytes, decoded with the TS decoder) or the legacy JSON body.
+// This is exactly the host wiring the design mandates: peek the payload, decode
+// binary via the zero-DOM decoder OR JSON.parse, replay the SAME op array.
+// ─────────────────────────────────────────────────────────────────────────────
+type DrawRecord = { encoding: 'binary' | 'json'; canvasId: string; ops: CanvasOp[] };
+
+function binaryCanvasDispatch(
+  options: { advertise?: boolean; binaryDraw?: boolean; wireVersion?: number } = {}
+) {
+  const advertise = options.advertise ?? true;
+  const advBinaryDraw = options.binaryDraw ?? true;
+  const advWireVersion = options.wireVersion ?? 1;
+  const draws: DrawRecord[] = [];
+  const probes: Array<Record<string, unknown>> = [];
+  // The draw method accepts BOTH encodings; pass-through parseInput so the
+  // handler sees either a decoded JSON object or the raw binary frame bytes.
+  const drawRpc = rpc<unknown, { ok: boolean; dropped: number }>({
+    schema: {
+      parseInput: (x) => x,
+      parseOutput: (x) => ({
+        ok: !!(x as { ok?: unknown })?.ok,
+        dropped: asNum((x as { dropped?: unknown })?.dropped),
+      }),
+    },
+  });
+  // The additive capability probe: the guest asks once whether binary draw is
+  // supported. An OLD host does not declare it at all (advertise: false) — that
+  // absence IS the "unsupported" answer (the guest's probe resolves ok=0).
+  const getInfoRpc = rpc<Record<string, unknown>, { binaryDraw: boolean; wireVersion: number }>({
+    schema: {
+      parseInput: (x) => (x ?? {}) as Record<string, unknown>,
+      parseOutput: (x) => ({
+        binaryDraw: !!(x as { binaryDraw?: unknown })?.binaryDraw,
+        wireVersion: asNum((x as { wireVersion?: unknown })?.wireVersion),
+      }),
+    },
+  });
+  const canvasSeam: Record<string, unknown> = { draw: drawRpc };
+  if (advertise) canvasSeam.getInfo = getInfoRpc;
+  const contract = defineRillContract({
+    version: '1',
+    // biome-ignore lint/suspicious/noExplicitAny: the seam shape is built conditionally above.
+    hostModules: { 'host:canvas': canvasSeam as any },
+    guestExports: {},
+  });
+  const hostModules: Record<string, unknown> = {
+    draw: async (input: unknown) => {
+      if (input instanceof Uint8Array) {
+        // Binary path: decode the RCNV frame with the TS decoder and replay ops.
+        const { header, ops } = decodeCanvasFrame(input);
+        draws.push({ encoding: 'binary', canvasId: header.canvasId, ops });
+      } else {
+        // JSON fallback: the same op array, JSON-shaped.
+        const obj = (input ?? {}) as Record<string, unknown>;
+        draws.push({
+          encoding: 'json',
+          canvasId: asStr(field(obj, 'canvasId')),
+          ops: ops(field(obj, 'ops')) as unknown as CanvasOp[],
+        });
+      }
+      return { ok: true, dropped: 0 };
+    },
+  };
+  if (advertise) {
+    hostModules.getInfo = async (input: Record<string, unknown>) => {
+      probes.push(input);
+      return { binaryDraw: advBinaryDraw, wireVersion: advWireVersion };
+    };
+  }
+  const impl = implementHostModules(contract, { 'host:canvas': hostModules });
+  return { table: createHostModuleDispatch(contract, impl), draws, probes };
+}
+
+// The deterministic scene canvas-binary-guest paints (crates/canvas-binary-guest).
+const EXPECTED_BINARY_OPS: CanvasOp[] = [
+  { op: 'setFillStyle', color: '#ff0000' },
+  { op: 'fillRect', x: 0, y: 0, w: 100, h: 50 },
+  { op: 'setFillStyle', color: '#ff0000' },
+  { op: 'beginPath' },
+  { op: 'arc', x: 50, y: 25, r: 10, start: 0, end: 6.28, ccw: false },
+  { op: 'fill' },
+  { op: 'setFillStyle', color: '#00ff00' },
+  { op: 'fillText', x: 4, y: 20, text: 'hi ☕' },
+];
+
+describe('canvas guests — capability handshake (WIP binary wire)', () => {
+  it('round-trip: advertised host gets a BINARY frame the TS decoder replays to the exact ops', async () => {
+    const { table, draws, probes } = binaryCanvasDispatch({ advertise: true });
+    const host = new WasmGuestHost({ dispatch: table });
+    await host.load(CANVAS_BINARY_GUEST);
+    await host.drain();
+
+    // The guest probed getInfo exactly once (cached for its lifetime).
+    expect(probes).toHaveLength(1);
+
+    // Exactly one draw, delivered as BINARY, decoded to the expected op array.
+    expect(draws).toHaveLength(1);
+    expect(draws[0].encoding).toBe('binary');
+    expect(draws[0].canvasId).toBe('scene');
+    expect(draws[0].ops).toEqual(EXPECTED_BINARY_OPS);
+  });
+
+  it('fallback: a host that does NOT advertise gets JSON from the SAME guest (graceful degrade)', async () => {
+    // The wip-enabled guest probes getInfo; this dispatch never registered it,
+    // so the probe resolves ok=0 and the guest emits JSON — no flag-day.
+    const { table, draws, probes } = binaryCanvasDispatch({ advertise: false });
+    const host = new WasmGuestHost({ dispatch: table });
+    await host.load(CANVAS_BINARY_GUEST);
+    await host.drain();
+
+    expect(probes).toHaveLength(0); // getInfo unregistered → never recorded
+    expect(draws).toHaveLength(1);
+    expect(draws[0].encoding).toBe('json'); // fell back to JSON
+    expect(draws[0].canvasId).toBe('scene');
+    // The JSON path carries the identical op sequence (same picture).
+    expect(draws[0].ops).toEqual(EXPECTED_BINARY_OPS);
+  });
+
+  it('declines: an advertised host answering binaryDraw:false gets JSON (probe says no)', async () => {
+    // Distinct from an OLD host (getInfo unregistered): here getInfo IS present
+    // and the guest DOES probe — but the host declines, so `supported =
+    // has_flag && has_version` is false on the has_flag half and the guest emits
+    // JSON. This is the declining branch a hardcoded {binaryDraw:true} never hit.
+    const { table, draws, probes } = binaryCanvasDispatch({ advertise: true, binaryDraw: false });
+    const host = new WasmGuestHost({ dispatch: table });
+    await host.load(CANVAS_BINARY_GUEST);
+    await host.drain();
+
+    expect(probes).toHaveLength(1); // it DID probe (unlike the old-host case)
+    expect(draws).toHaveLength(1);
+    expect(draws[0].encoding).toBe('json'); // ...but the host declined binary
+    expect(draws[0].ops).toEqual(EXPECTED_BINARY_OPS);
+  });
+
+  it('declines: an advertised host with a wireVersion this encoder cannot produce gets JSON', async () => {
+    // The has_version half of the gate: binaryDraw:true but wireVersion 0 (not the
+    // encoder's version) also declines to JSON — a host on a future/unknown wire
+    // must not receive a frame this guest cannot speak.
+    const { table, draws, probes } = binaryCanvasDispatch({
+      advertise: true,
+      binaryDraw: true,
+      wireVersion: 0,
+    });
+    const host = new WasmGuestHost({ dispatch: table });
+    await host.load(CANVAS_BINARY_GUEST);
+    await host.drain();
+
+    expect(probes).toHaveLength(1);
+    expect(draws).toHaveLength(1);
+    expect(draws[0].encoding).toBe('json');
+  });
+
+  it('DEFAULT guest (wip OFF) stays JSON EVEN when the host advertises binary', async () => {
+    // canvas-guest.wasm is built WITHOUT the wip feature, so its draw path never
+    // probes getInfo and never encodes binary — promotion is a guest rebuild,
+    // not a host advertisement. Proves the shipped default is still JSON.
+    const { table, draws, probes } = binaryCanvasDispatch({ advertise: true });
+    const host = new WasmGuestHost({ dispatch: table });
+    await host.load(CANVAS_GUEST);
+    await host.drain();
+
+    expect(probes).toHaveLength(0); // default guest never probes
+    expect(draws).toHaveLength(1);
+    expect(draws[0].encoding).toBe('json');
+    expect(draws[0].canvasId).toBe('scene');
   });
 });

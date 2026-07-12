@@ -1,7 +1,8 @@
 //! Demo native (non-JS) rill guest, written in Rust against the `rill-guest`
-//! SDK. It calls `host:kv.put("a", "b")` and stashes the outcome behind exports
-//! the test reads. The whole thing compiles to a `.wasm` the Phase A
-//! `WasmGuestHost` loads unchanged — proving the ergonomic SDK path end to end.
+//! SDK. It calls `store::put("a", "b")` (`host:store.putText` on the wire) and
+//! stashes the outcome behind exports the test reads. The whole thing compiles
+//! to a `.wasm` the Phase A `WasmGuestHost` loads unchanged — proving the
+//! ergonomic SDK path end to end.
 #![no_std]
 #![allow(static_mut_refs)]
 

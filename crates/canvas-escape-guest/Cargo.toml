@@ -1,9 +1,10 @@
 [package]
 name = "canvas-escape-guest"
-version = "0.0.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Native rill guest that draws with special-character strings to prove the canvas SDK's guest->host JSON escaping round-trips."
-license = "Apache-2.0"
+license.workspace = true
+publish = false
 
 [lib]
 crate-type = ["cdylib"]

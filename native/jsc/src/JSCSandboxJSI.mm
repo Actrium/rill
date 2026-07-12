@@ -1,9 +1,256 @@
 #import "JSCSandboxJSI.h"
 #import <Foundation/Foundation.h>
 #import <JavaScriptCore/JavaScriptCore.h>
+#import <dlfcn.h>
 #import <os/log.h>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
 
 namespace jsc_sandbox {
+
+// MARK: - Execution time limit (private JSC API, resolved via dlsym)
+//
+// JavaScriptCore's ONLY mechanism to interrupt running JS is
+// JSContextGroupSetExecutionTimeLimit / JSContextGroupClearExecutionTimeLimit,
+// declared in the PRIVATE header JSContextRefPrivate.h. Referencing them
+// statically would embed private symbols in the binary and trip App Store
+// review, so they are looked up at runtime with dlsym(RTLD_DEFAULT, ...) and
+// only used when the embedder explicitly opts in via
+// createRuntime({ enableExecutionTimeLimit: true }). Default builds never
+// touch the symbols beyond the (legal) dlsym probe guarded by that flag.
+//
+// Function pointer types mirror WebKit's JSContextRefPrivate.h:
+//   typedef bool (*JSShouldTerminateCallback)(JSContextRef ctx, void* context);
+//   JS_EXPORT void JSContextGroupSetExecutionTimeLimit(
+//       JSContextGroupRef group, double limit /* SECONDS */,
+//       JSShouldTerminateCallback callback, void* context);
+//   JS_EXPORT void JSContextGroupClearExecutionTimeLimit(JSContextGroupRef);
+// Note the limit is in SECONDS (double), while our public option is in ms.
+
+namespace {
+
+// Byte-owning jsi::MutableBuffer used to rebuild a HOST-realm ArrayBuffer
+// from bytes copied out of the sandbox. A copy is mandatory: the sandbox
+// value's backing store dies with the sandbox GC, and the two realms must
+// never alias each other's memory.
+class VectorBuffer : public jsi::MutableBuffer {
+public:
+  VectorBuffer(const uint8_t *data, size_t size) : bytes_(data, data + size) {}
+  size_t size() const override { return bytes_.size(); }
+  uint8_t *data() override { return bytes_.data(); }
+
+private:
+  std::vector<uint8_t> bytes_;
+};
+
+// Copy `size` bytes into a fresh host-realm ArrayBuffer. Throws (loudly) if
+// the host runtime does not implement createArrayBuffer — never a silent
+// empty object.
+jsi::Value makeHostArrayBuffer(jsi::Runtime &rt, const uint8_t *data,
+                               size_t size) {
+  return jsi::ArrayBuffer(rt, std::make_shared<VectorBuffer>(data, size));
+}
+
+// Host-realm constructor name for a JSC typed-array kind; nullptr when the
+// kind has no same-name reconstruction (the caller falls back to the raw
+// ArrayBuffer of the view's byte window).
+const char *typedArrayCtorName(JSTypedArrayType type) {
+  switch (type) {
+  case kJSTypedArrayTypeInt8Array:
+    return "Int8Array";
+  case kJSTypedArrayTypeInt16Array:
+    return "Int16Array";
+  case kJSTypedArrayTypeInt32Array:
+    return "Int32Array";
+  case kJSTypedArrayTypeUint8Array:
+    return "Uint8Array";
+  case kJSTypedArrayTypeUint8ClampedArray:
+    return "Uint8ClampedArray";
+  case kJSTypedArrayTypeUint16Array:
+    return "Uint16Array";
+  case kJSTypedArrayTypeUint32Array:
+    return "Uint32Array";
+  case kJSTypedArrayTypeFloat32Array:
+    return "Float32Array";
+  case kJSTypedArrayTypeFloat64Array:
+    return "Float64Array";
+  default:
+    return nullptr;
+  }
+}
+
+// Inverse of typedArrayCtorName: the JSC typed-array kind for a host view
+// constructor name, or kJSTypedArrayTypeNone when JSC has no matching kind
+// (BigInt64Array / BigUint64Array / DataView — the caller falls back to the
+// raw ArrayBuffer, so the bytes still cross).
+JSTypedArrayType typedArrayTypeForCtorName(const std::string &name) {
+  if (name == "Int8Array") return kJSTypedArrayTypeInt8Array;
+  if (name == "Uint8Array") return kJSTypedArrayTypeUint8Array;
+  if (name == "Uint8ClampedArray") return kJSTypedArrayTypeUint8ClampedArray;
+  if (name == "Int16Array") return kJSTypedArrayTypeInt16Array;
+  if (name == "Uint16Array") return kJSTypedArrayTypeUint16Array;
+  if (name == "Int32Array") return kJSTypedArrayTypeInt32Array;
+  if (name == "Uint32Array") return kJSTypedArrayTypeUint32Array;
+  if (name == "Float32Array") return kJSTypedArrayTypeFloat32Array;
+  if (name == "Float64Array") return kJSTypedArrayTypeFloat64Array;
+  return kJSTypedArrayTypeNone;
+}
+
+// Host-realm ArrayBufferView constructor names eligible for host->sandbox
+// same-kind reconstruction (also the shape-detection allowlist).
+bool isViewCtorName(const std::string &name) {
+  static const char *kNames[] = {
+      "Int8Array",    "Uint8Array",    "Uint8ClampedArray", "Int16Array",
+      "Uint16Array",  "Int32Array",    "Uint32Array",       "Float32Array",
+      "Float64Array", "BigInt64Array", "BigUint64Array",    "DataView"};
+  for (const char *candidate : kNames) {
+    if (name == candidate) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Extract the byte WINDOW + view constructor name from a HOST jsi::Object that
+// is an ArrayBufferView shape ({buffer: ArrayBuffer, byteOffset, byteLength}).
+// Returns false when `obj` is not view-shaped or the window is out of range.
+// byteOffset/byteLength are validated as doubles BEFORE narrowing to size_t
+// (NaN/Infinity/negative/non-integer rejected): a merely view-shaped plain
+// object could otherwise force a UB / implementation-defined cast.
+bool extractHostViewBytes(jsi::Runtime &hostRt, const jsi::Object &obj,
+                          std::vector<uint8_t> &out, std::string &ctorName) {
+  jsi::Value ctorVal = obj.getProperty(hostRt, "constructor");
+  if (!ctorVal.isObject()) {
+    return false;
+  }
+  jsi::Value nameVal = ctorVal.getObject(hostRt).getProperty(hostRt, "name");
+  if (!nameVal.isString()) {
+    return false;
+  }
+  std::string name = nameVal.getString(hostRt).utf8(hostRt);
+  if (!isViewCtorName(name)) {
+    return false;
+  }
+
+  jsi::Value bufferVal = obj.getProperty(hostRt, "buffer");
+  jsi::Value offsetVal = obj.getProperty(hostRt, "byteOffset");
+  jsi::Value lengthVal = obj.getProperty(hostRt, "byteLength");
+  if (!bufferVal.isObject() || !offsetVal.isNumber() || !lengthVal.isNumber()) {
+    return false;
+  }
+  jsi::Object bufferObj = bufferVal.getObject(hostRt);
+  if (!bufferObj.isArrayBuffer(hostRt)) {
+    return false;
+  }
+
+  // Bound byteOffset/byteLength by the REAL backing size in the DOUBLE domain
+  // before narrowing to size_t. backingSize is a true allocation (<< 2^53, so
+  // exactly representable as double); this closes the 2^64-rounding hole of
+  // static_cast<double>(SIZE_MAX) — where byteOffset == 2**64 slips past and
+  // then casts out of range — and makes the narrowing below lossless.
+  jsi::ArrayBuffer backing = bufferObj.getArrayBuffer(hostRt);
+  const size_t backingSize = backing.size(hostRt);
+  const double backingSizeD = static_cast<double>(backingSize);
+  const double offsetD = offsetVal.getNumber();
+  const double lengthD = lengthVal.getNumber();
+  if (!std::isfinite(offsetD) || !std::isfinite(lengthD) || offsetD < 0 ||
+      lengthD < 0 || offsetD != std::floor(offsetD) ||
+      lengthD != std::floor(lengthD) || offsetD > backingSizeD ||
+      lengthD > backingSizeD - offsetD) {
+    return false;
+  }
+
+  const auto offset = static_cast<size_t>(offsetD);
+  const auto length = static_cast<size_t>(lengthD);
+
+  const uint8_t *base = backing.data(hostRt) + offset;
+  out.assign(base, base + length);
+  ctorName = name;
+  return true;
+}
+
+// Build a sandbox-realm JSValue* from COPIED bytes: a raw ArrayBuffer when
+// `viewCtorName` is nullptr, otherwise the same-kind typed-array view (falling
+// back to the raw ArrayBuffer when JSC has no matching kind). The copy is owned
+// by the new ArrayBuffer and freed by its deallocator on GC.
+void *makeSandboxBytes(JSContext *ctx, const uint8_t *data, size_t len,
+                       const char *viewCtorName) {
+  JSContextRef ctxRef = [ctx JSGlobalContextRef];
+  void *buf = malloc(len ? len : 1);
+  if (len) {
+    memcpy(buf, data, len);
+  }
+  JSValueRef exc = nullptr;
+  JSObjectRef abRef = JSObjectMakeArrayBufferWithBytesNoCopy(
+      ctxRef, buf, len, [](void *bytes, void *) { free(bytes); }, nullptr, &exc);
+  if (exc || !abRef) {
+    // Ownership is NOT transferred when creation fails — free it ourselves.
+    free(buf);
+    return (__bridge void *)[JSValue valueWithUndefinedInContext:ctx];
+  }
+
+  if (viewCtorName) {
+    JSTypedArrayType type = typedArrayTypeForCtorName(viewCtorName);
+    if (type != kJSTypedArrayTypeNone) {
+      JSValueRef viewExc = nullptr;
+      JSObjectRef viewRef =
+          JSObjectMakeTypedArrayWithArrayBuffer(ctxRef, type, abRef, &viewExc);
+      if (!viewExc && viewRef) {
+        return (__bridge void *)[JSValue valueWithJSValueRef:viewRef
+                                                   inContext:ctx];
+      }
+    }
+    // Unknown/unsupported kind (or wrap failure): fall back to the ArrayBuffer.
+  }
+  return (__bridge void *)[JSValue valueWithJSValueRef:abRef inContext:ctx];
+}
+
+using JSCShouldTerminateCallback = bool (*)(JSContextRef ctx, void *context);
+using JSCSetExecutionTimeLimitFn = void (*)(JSContextGroupRef group,
+                                            double limitSeconds,
+                                            JSCShouldTerminateCallback callback,
+                                            void *context);
+using JSCClearExecutionTimeLimitFn = void (*)(JSContextGroupRef group);
+
+struct TimeLimitAPI {
+  JSCSetExecutionTimeLimitFn set = nullptr;
+  JSCClearExecutionTimeLimitFn clear = nullptr;
+};
+
+// Resolve both symbols once, process-wide. Either both resolve or the API is
+// treated as unavailable — we must never arm a limit we cannot clear.
+const TimeLimitAPI &timeLimitAPI() {
+  static const TimeLimitAPI api = [] {
+    TimeLimitAPI a;
+    a.set = reinterpret_cast<JSCSetExecutionTimeLimitFn>(
+        dlsym(RTLD_DEFAULT, "JSContextGroupSetExecutionTimeLimit"));
+    a.clear = reinterpret_cast<JSCClearExecutionTimeLimitFn>(
+        dlsym(RTLD_DEFAULT, "JSContextGroupClearExecutionTimeLimit"));
+    if (!a.set || !a.clear) {
+      a.set = nullptr;
+      a.clear = nullptr;
+    }
+    return a;
+  }();
+  return api;
+}
+
+// Invoked by JSC on the JS-executing thread once the armed limit expires.
+// Returning true terminates execution (script throws an uncatchable
+// termination exception); `context` is the owning JSCSandboxContext's
+// timeLimitFired_ flag.
+bool timeLimitShouldTerminate(JSContextRef ctx, void *context) {
+  (void)ctx;
+  auto *fired = static_cast<std::atomic<bool> *>(context);
+  fired->store(true, std::memory_order_release);
+  return true;
+}
+
+} // namespace
 
 // Safe extraction of error message from a JSValue without triggering
 // toString recursion. [JSValue toString] executes JS code which can throw,
@@ -25,13 +272,50 @@ static NSString *safeExceptionMessage(JSValue *exception) {
 
 // MARK: - JSCSandboxContext Implementation
 
-JSCSandboxContext::JSCSandboxContext(jsi::Runtime &hostRuntime, double timeout)
-    : jsContext_(nullptr), hostRuntime_(&hostRuntime), disposed_(false) {
-  (void)timeout; // Reserved for future use
+JSCSandboxContext::JSCSandboxContext(jsi::Runtime &hostRuntime,
+                                     double timeoutMs,
+                                     bool enableExecutionTimeLimit)
+    : jsContext_(nullptr), contextGroup_(nullptr), hostRuntime_(&hostRuntime),
+      timeoutMs_(timeoutMs), timeLimitEnabled_(false), timeLimitDepth_(0),
+      timeLimitFired_(false), disposed_(false) {
+  // Execution timeout has TWO states:
+  // - Default (enableExecutionTimeLimit == false): NOT ENFORCED.
+  //   JavaScriptCore's public API has no way to interrupt running JS (no
+  //   equivalent of QuickJS's JS_SetInterruptHandler), so the
+  //   createRuntime({timeout}) option is accepted but ignored and a tenant
+  //   infinite loop blocks the calling (host) thread indefinitely. Callers
+  //   must not rely on this engine for CPU isolation in this state.
+  // - Opt-in (enableExecutionTimeLimit == true): ENFORCED via the private
+  //   JSContextGroupSetExecutionTimeLimit API resolved through dlsym (see
+  //   timeLimitAPI() above). Each top-level eval / host->sandbox call gets a
+  //   wall-clock budget of timeoutMs; on expiry JSC terminates the script and
+  //   the call throws a clear timeout error while the context stays usable.
+  //   If the private symbols cannot be resolved, this logs and falls back to
+  //   the unenforced behavior above.
   @autoreleasepool {
     JSContext *ctx = [[JSContext alloc] init];
     if (!ctx) {
       throw jsi::JSError(hostRuntime, "Failed to create JSContext");
+    }
+
+    if (enableExecutionTimeLimit) {
+      if (timeLimitAPI().set != nullptr) {
+        // JSContextGetGroup is public API; the group is owned by the
+        // context's VM, which we keep alive via jsContext_ until dispose().
+        contextGroup_ =
+            const_cast<void *>((const void *)JSContextGetGroup(
+                [ctx JSGlobalContextRef]));
+        timeLimitEnabled_ = (contextGroup_ != nullptr);
+      }
+      if (!timeLimitEnabled_) {
+        // WARNING-level: the caller explicitly asked for enforcement but this
+        // JSC build does not export the private API — timeouts will NOT be
+        // enforced and a tenant loop can hang the host thread.
+        os_log_error(OS_LOG_DEFAULT,
+                     "[JSCSandbox] enableExecutionTimeLimit requested but "
+                     "JSContextGroupSetExecutionTimeLimit is unavailable; "
+                     "falling back to UNENFORCED timeouts");
+      }
     }
 
     // Set up exception handler - must store exception for later checking.
@@ -97,7 +381,45 @@ void JSCSandboxContext::dispose() {
     }
     jsContext_ = nullptr;
   }
+  // The group was owned by the released context's VM; never touch it again.
+  contextGroup_ = nullptr;
+  timeLimitEnabled_ = false;
   callbacks_.clear();
+}
+
+// MARK: - TimeLimitScope
+
+JSCSandboxContext::TimeLimitScope::TimeLimitScope(JSCSandboxContext &ctx)
+    : ctx_(ctx) {
+  // Guard the budget before handing it to JSC: NaN and <= 0 are rejected by
+  // the `> 0` comparison, and non-finite / absurdly large values (Infinity,
+  // Number.MAX_VALUE, ...) are treated as "no limit" rather than armed.
+  // Only the outermost entry arms, so nested host<->sandbox bounces keep the
+  // original deadline.
+  constexpr double kMaxTimeoutMs = 9.0e15; // ~285k years; clearly "unlimited"
+  if (ctx_.timeLimitEnabled_ && ctx_.timeoutMs_ > 0 &&
+      ctx_.timeoutMs_ < kMaxTimeoutMs && ctx_.timeLimitDepth_ == 0) {
+    ctx_.timeLimitFired_.store(false, std::memory_order_relaxed);
+    // The private API takes the limit in SECONDS; our option is milliseconds.
+    timeLimitAPI().set((JSContextGroupRef)ctx_.contextGroup_,
+                       ctx_.timeoutMs_ / 1000.0, &timeLimitShouldTerminate,
+                       &ctx_.timeLimitFired_);
+    armedHere_ = true;
+  }
+  ctx_.timeLimitDepth_++;
+}
+
+JSCSandboxContext::TimeLimitScope::~TimeLimitScope() {
+  ctx_.timeLimitDepth_--;
+  // contextGroup_ can only go null via dispose(); guard against a dispose()
+  // issued from a host callback while this scope was still armed.
+  if (armedHere_ && ctx_.contextGroup_) {
+    timeLimitAPI().clear((JSContextGroupRef)ctx_.contextGroup_);
+  }
+}
+
+bool JSCSandboxContext::TimeLimitScope::timedOut() const {
+  return armedHere_ && ctx_.timeLimitFired_.load(std::memory_order_acquire);
 }
 
 jsi::Value JSCSandboxContext::get(jsi::Runtime &rt,
@@ -202,7 +524,21 @@ jsi::Value JSCSandboxContext::eval(jsi::Runtime &rt, const std::string &code) {
     JSContext *ctx = (__bridge JSContext *)jsContext_;
     NSString *nsCode = [NSString stringWithUTF8String:code.c_str()];
 
+    // Arm the wall-clock execution deadline for this top-level eval. No-op
+    // unless enableExecutionTimeLimit was requested at createRuntime and the
+    // private JSC API resolved (timeLimitEnabled_), and timeoutMs_ > 0.
+    TimeLimitScope timeLimit(*this);
     JSValue *result = [ctx evaluateScript:nsCode];
+
+    // Translate JSC's opaque termination exception into a clear timeout
+    // error. The context itself stays valid and usable for later evals.
+    if (timeLimit.timedOut()) {
+      ctx.exception = nil;
+      throw jsi::JSError(
+          rt, "JSC eval timed out after " +
+                  std::to_string(static_cast<long long>(timeoutMs_)) +
+                  "ms (execution interrupted)");
+    }
 
     // Check for exceptions
     if (ctx.exception) {
@@ -720,6 +1056,24 @@ void *JSCSandboxContext::jsiToJSValue(jsi::Runtime &rt,
       return wrapFunctionForSandbox(rt, std::move(func));
     }
 
+    // Binary passthrough (host -> sandbox): a host capability result carrying
+    // an ArrayBuffer / typed-array must reach the guest as real bytes, not the
+    // generic Object.keys copy below (which sees zero own props and drops it to
+    // {}). Symmetric with jsValueToJSI's sandbox->host branch. Bytes are COPIED
+    // into the sandbox realm; the two realms never alias.
+    if (obj.isArrayBuffer(rt)) {
+      jsi::ArrayBuffer ab = obj.getArrayBuffer(rt);
+      return makeSandboxBytes(ctx, ab.data(rt), ab.size(rt), nullptr);
+    }
+    {
+      std::vector<uint8_t> window;
+      std::string viewCtor;
+      if (extractHostViewBytes(rt, obj, window, viewCtor)) {
+        return makeSandboxBytes(ctx, window.empty() ? nullptr : window.data(),
+                                window.size(), viewCtor.c_str());
+      }
+    }
+
     // Handle arrays
     if (obj.isArray(rt)) {
       jsi::Array arr = obj.asArray(rt);
@@ -903,8 +1257,19 @@ jsi::Value JSCSandboxContext::jsValueToJSI(jsi::Runtime &rt, void *jsValue,
                                   ?: [JSValue valueWithUndefinedInContext:ctx]];
               }
 
-              // Call the sandbox function
+              // Host->sandbox function calls execute tenant JS too: same
+              // budget as eval (nested entries keep the outermost deadline).
+              TimeLimitScope timeLimit(*self);
               JSValue *result = [sandboxFunc callWithArguments:jsArgs];
+
+              if (timeLimit.timedOut()) {
+                ctx.exception = nil;
+                throw jsi::JSError(
+                    rt, "JSC sandbox function timed out after " +
+                            std::to_string(
+                                static_cast<long long>(self->timeoutMs_)) +
+                            "ms (execution interrupted)");
+              }
 
               // Check for exceptions
               if (ctx.exception) {
@@ -916,6 +1281,68 @@ jsi::Value JSCSandboxContext::jsValueToJSI(jsi::Runtime &rt, void *jsValue,
               return self->jsValueToJSI(rt, (__bridge void *)result);
             }
           });
+    }
+
+    // Binary passthrough — MUST come before the generic Object.keys copy,
+    // which sees zero own enumerable props on an ArrayBuffer and would emit
+    // an empty host object, silently destroying the bytes (the binary
+    // op-batch failure mode). Bytes are COPIED into the host realm.
+    {
+      JSContextRef ctxRef = [ctx JSGlobalContextRef];
+      JSValueRef probeExc = nullptr;
+      JSTypedArrayType typedArrayType =
+          JSValueGetTypedArrayType(ctxRef, valueRef, &probeExc);
+      if (!probeExc && typedArrayType != kJSTypedArrayTypeNone) {
+        JSValueRef exc = nullptr;
+        JSObjectRef objRef = JSValueToObject(ctxRef, valueRef, &exc);
+        if (!exc && objRef) {
+          if (typedArrayType == kJSTypedArrayTypeArrayBuffer) {
+            void *bytes = JSObjectGetArrayBufferBytesPtr(ctxRef, objRef, &exc);
+            size_t byteLength =
+                exc ? 0 : JSObjectGetArrayBufferByteLength(ctxRef, objRef, &exc);
+            if (!exc) {
+              if (addedToVisited) visited->erase(valueRef);
+              return makeHostArrayBuffer(
+                  rt, static_cast<const uint8_t *>(bytes), byteLength);
+            }
+          } else {
+            // Typed-array view. Verified on-device (macOS 26 JSC):
+            // JSObjectGetTypedArrayBytesPtr returns the BACKING ArrayBuffer's
+            // start, NOT the view's data start — the view's byteOffset must
+            // be applied explicitly or a subarray crosses with shifted bytes.
+            void *bytes = JSObjectGetTypedArrayBytesPtr(ctxRef, objRef, &exc);
+            size_t byteLength =
+                exc ? 0 : JSObjectGetTypedArrayByteLength(ctxRef, objRef, &exc);
+            size_t byteOffset =
+                exc ? 0 : JSObjectGetTypedArrayByteOffset(ctxRef, objRef, &exc);
+            if (!exc && bytes) {
+              if (addedToVisited) visited->erase(valueRef);
+              jsi::Value hostBuffer = makeHostArrayBuffer(
+                  rt, static_cast<const uint8_t *>(bytes) + byteOffset,
+                  byteLength);
+              // Same-kind reconstruction, best-effort: a host realm without
+              // the constructor still gets the raw bytes.
+              const char *ctorName = typedArrayCtorName(typedArrayType);
+              if (ctorName && rt.global().hasProperty(rt, ctorName)) {
+                jsi::Value hostCtor = rt.global().getProperty(rt, ctorName);
+                if (hostCtor.isObject() &&
+                    hostCtor.getObject(rt).isFunction(rt)) {
+                  try {
+                    return hostCtor.getObject(rt)
+                        .getFunction(rt)
+                        .callAsConstructor(rt, hostBuffer);
+                  } catch (...) {
+                    // fall through to the raw ArrayBuffer
+                  }
+                }
+              }
+              return hostBuffer;
+            }
+          }
+        }
+        // Detached buffer / JSC error: fall through to the generic copy
+        // (visited bookkeeping untouched — no early return happened).
+      }
     }
 
     // Not a function, convert as regular object
@@ -990,8 +1417,10 @@ jsi::Value JSCSandboxContext::jsValueToJSI(jsi::Runtime &rt, void *jsValue,
 
 // MARK: - JSCSandboxRuntime Implementation
 
-JSCSandboxRuntime::JSCSandboxRuntime(jsi::Runtime &hostRuntime, double timeout)
-    : hostRuntime_(&hostRuntime), timeout_(timeout), disposed_(false) {}
+JSCSandboxRuntime::JSCSandboxRuntime(jsi::Runtime &hostRuntime, double timeout,
+                                     bool enableExecutionTimeLimit)
+    : hostRuntime_(&hostRuntime), timeout_(timeout),
+      enableExecutionTimeLimit_(enableExecutionTimeLimit), disposed_(false) {}
 
 JSCSandboxRuntime::~JSCSandboxRuntime() { dispose(); }
 
@@ -1063,7 +1492,8 @@ jsi::Value JSCSandboxRuntime::createContext(jsi::Runtime &rt) {
     throw jsi::JSError(rt, "Runtime has been disposed");
   }
 
-  auto context = std::make_shared<JSCSandboxContext>(*hostRuntime_, timeout_);
+  auto context = std::make_shared<JSCSandboxContext>(
+      *hostRuntime_, timeout_, enableExecutionTimeLimit_);
   contexts_.push_back(context);
 
   return jsi::Object::createFromHostObject(rt, context);
@@ -1088,6 +1518,9 @@ jsi::Value JSCSandboxModule::get(jsi::Runtime &rt,
            size_t count) -> jsi::Value {
           (void)thisVal;
           double timeout = 30000; // default 30s
+          // Default OFF: enforcement uses a private JSC API (via dlsym) that
+          // enterprise/internal builds may opt into; see header comment.
+          bool enableExecutionTimeLimit = false;
 
           if (count > 0 && args[0].isObject()) {
             jsi::Object opts = args[0].asObject(rt);
@@ -1097,9 +1530,17 @@ jsi::Value JSCSandboxModule::get(jsi::Runtime &rt,
                 timeout = timeoutVal.getNumber();
               }
             }
+            if (opts.hasProperty(rt, "enableExecutionTimeLimit")) {
+              jsi::Value enableVal =
+                  opts.getProperty(rt, "enableExecutionTimeLimit");
+              if (enableVal.isBool()) {
+                enableExecutionTimeLimit = enableVal.getBool();
+              }
+            }
           }
 
-          auto runtime = std::make_shared<JSCSandboxRuntime>(rt, timeout);
+          auto runtime = std::make_shared<JSCSandboxRuntime>(
+              rt, timeout, enableExecutionTimeLimit);
           return jsi::Object::createFromHostObject(rt, runtime);
         });
   }

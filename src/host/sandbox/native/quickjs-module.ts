@@ -9,7 +9,8 @@ import type { ReviewedUnknown } from '../../types';
 declare global {
   var __QuickJSSandboxJSI:
     | {
-        createRuntime(options?: { timeout?: number }): QuickJSRuntimeNative;
+        /** `maxHeapBytes` caps the QuickJS heap (JS_SetMemoryLimit); <= 0 uses the 256MB default. */
+        createRuntime(options?: { timeout?: number; maxHeapBytes?: number }): QuickJSRuntimeNative;
         isAvailable(): boolean;
       }
     | undefined;

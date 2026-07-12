@@ -11,7 +11,7 @@
 //! ```
 //!
 //! Under the hood the SDK owns the ABI exports (`rill_alloc` / `rill_resolve` /
-//! `rill_init`), a bump allocator, and a minimal single-task async executor. A
+//! `rill_init`), a global allocator (talc), and a minimal single-task async executor. A
 //! host call is a future: on first poll it issues `rill_host_call` and parks;
 //! when the host later calls `rill_resolve(cb, …)` the executor re-polls and the
 //! future completes. This is the guest side of the same callback-resolve model
@@ -22,8 +22,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::alloc::{GlobalAlloc, Layout};
-use core::cell::UnsafeCell;
+use core::alloc::Layout;
 use core::future::Future;
 use core::pin::Pin;
 use core::ptr::addr_of_mut;
@@ -42,42 +41,40 @@ extern "C" {
     );
     // One-way render channel: hand the host an operation batch (UTF-8 JSON).
     fn rill_send_batch(batch_ptr: *const u8, batch_len: usize);
+    // One-way diagnostics channel: hand the host a UTF-8 log line
+    // (wasm-guest-host.ts wires it to its `onLog` sink).
+    fn rill_log(msg_ptr: *const u8, msg_len: usize);
 }
 
-// ---- Bump allocator (leaks; fine for short-lived guests) ----
-const HEAP_SIZE: usize = 1 << 20; // 1 MiB
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
+/// ABI version this SDK speaks. The generated `rill_abi_version` export hands
+/// it to the host, which rejects versions it does not support (fail-closed)
+/// and tolerates guests that predate the export. Bump ONLY on a breaking
+/// wire/export change; additive changes keep the number.
+pub const RILL_ABI_VERSION: u32 = 1;
 
-pub struct BumpAlloc {
-    offset: UnsafeCell<usize>,
+/// Send a UTF-8 diagnostic message to the host (`env.rill_log` → the host's
+/// `onLog` sink). Fire-and-forget: the host may drop or ignore it, so use it
+/// for observability, never as a data channel. This is a native guest's ONLY
+/// window for "what went wrong" — the panic handler reports through it too.
+pub fn log(msg: &str) {
+    unsafe { rill_log(msg.as_ptr(), msg.len()) }
 }
-// Single-threaded wasm: no real concurrency.
-unsafe impl Sync for BumpAlloc {}
-impl BumpAlloc {
-    pub const fn new() -> Self {
-        Self {
-            offset: UnsafeCell::new(0),
-        }
-    }
-}
-impl Default for BumpAlloc {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-unsafe impl GlobalAlloc for BumpAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let off = &mut *self.offset.get();
-        let aligned = (*off + layout.align() - 1) & !(layout.align() - 1);
-        let end = aligned + layout.size();
-        if end > HEAP_SIZE {
-            return core::ptr::null_mut();
-        }
-        *off = end;
-        (addr_of_mut!(HEAP) as *mut u8).add(aligned)
-    }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
-}
+
+// ---- Global allocator: talc (memory.grow-backed, growable, real free) ----
+//
+// The guest's own Rust allocations (Box/Vec/String/…) are served by talc, wired
+// as the `#[global_allocator]` inside `rill_guest_main!` so each cdylib guest
+// instantiates it. On wasm it is `talc::wasm::WasmDynamicTalc`: a single-threaded
+// bump-and-free allocator whose backing memory is claimed on demand via
+// `memory.grow` (WebAssembly's `memory_grow`), and — unlike the retired
+// `BumpAlloc` — it maintains a real free list, so freed blocks are RECLAIMED
+// regardless of order. The heap therefore grows to fit the working set and then
+// PLATEAUS under alloc/free churn instead of only ever growing (the R3 fix).
+//
+// These two symbols are re-exported (hidden) so the macro can name them through
+// `$crate` — the downstream guest crate does not depend on talc directly.
+#[doc(hidden)]
+pub use talc::wasm::{new_wasm_dynamic_allocator, WasmDynamicTalc};
 
 /// Runtime the generated ABI exports call into. Not part of the public API.
 pub mod rt {
@@ -92,17 +89,153 @@ pub mod rt {
     // that leak is bounded rather than unbounded.
     const MAX_ORPHAN_RESULTS: usize = 64;
 
+    // ---- wire arena: buffers the HOST writes via rill_alloc ----
+    // Invariant (load-bearing): a host-written wire buffer is fully consumed
+    // before the host->guest entry that delivers it returns (resolve copies at
+    // entry via to_vec; dispatch hands handlers a &[u8] that must not escape the
+    // call). So the arena is recycled when the outermost turn closes. Before the
+    // arena existed these came straight from the global heap and were never freed
+    // — structural heap exhaustion for long-lived guests. Oversized requests still
+    // fall back to the global heap (talc); on the RETURN path `resolve` now frees
+    // that fallback buffer after copying it out (see FALLBACK_ALLOCS + resolve),
+    // closing the large-binary-response leak.
+    pub(crate) const WIRE_SIZE: usize = 64 * 1024;
+    #[repr(C, align(16))]
+    struct WireArena([u8; WIRE_SIZE]);
+    static mut WIRE: WireArena = WireArena([0; WIRE_SIZE]);
+    static mut WIRE_OFF: usize = 0;
+    // Depth of nested host->guest entries. A nested entry (e.g. the host's onLog
+    // callback synchronously emitting an event mid-dispatch) must NOT recycle the
+    // arena while an outer turn may still be reading its payload.
+    static mut TURN_DEPTH: u32 = 0;
+
+    // Outstanding talc-FALLBACK allocations `(ptr, size)` that `alloc` handed out
+    // for oversized (> WIRE_SIZE) host-written buffers. Each host->guest entry
+    // frees its SOURCE buffers by looking them up here after copying/consuming
+    // (`resolve` for returns, `events::dispatch` for events) — so it frees ONLY
+    // buffers the guest itself allocated, exactly once. This is the load-bearing
+    // safety invariant: these are raw ABI entries whose `ptr` is guest-allocated
+    // in the real host (the host always writes via `rill_alloc` first), but a
+    // test harness or a misbehaving host could pass a foreign pointer; matching
+    // against this table means such a pointer is NEVER wild-freed (a bare
+    // "off-arena => free" rule would double-free it). Arena buffers are recycled
+    // per turn and never appear here. Bounded by MAX_FALLBACK_TRACKED so a
+    // fallback whose entry never consumes it cannot grow the table without limit.
+    static mut FALLBACK_ALLOCS: Vec<(usize, usize)> = Vec::new();
+    pub(crate) const MAX_FALLBACK_TRACKED: usize = 64;
+
+    pub(crate) fn begin_wire_turn() {
+        unsafe { TURN_DEPTH += 1 };
+    }
+    pub(crate) fn end_wire_turn() {
+        unsafe {
+            TURN_DEPTH = TURN_DEPTH.saturating_sub(1);
+            if TURN_DEPTH == 0 {
+                WIRE_OFF = 0;
+            }
+        }
+    }
+
+    /// Test-only accessor for the wire arena's address range, so unit tests can
+    /// assert whether a returned pointer landed inside the arena or fell back to
+    /// the global heap.
+    #[cfg(test)]
+    pub(crate) fn wire_range() -> (usize, usize) {
+        let base = addr_of_mut!(WIRE) as usize;
+        (base, base + WIRE_SIZE)
+    }
+
+    /// Whether `ptr` points inside the WIRE arena (vs the talc-fallback heap).
+    /// A fast pre-filter for the return-path dealloc: an arena buffer (the common
+    /// case) is recycled per turn and must NEVER be freed, so `resolve` skips the
+    /// FALLBACK_ALLOCS lookup for it. Available in every build, unlike the
+    /// test-only [`wire_range`].
+    pub(crate) fn wire_contains(ptr: *const u8) -> bool {
+        let base = addr_of_mut!(WIRE) as usize;
+        let p = ptr as usize;
+        p >= base && p < base + WIRE_SIZE
+    }
+
+    /// Number of still-tracked talc-fallback allocations. A deterministic,
+    /// noise-free no-leak signal for tests: after every fallback has been
+    /// resolved (copied out + freed), this is 0 regardless of what other
+    /// concurrently-running tests allocate on the shared global heap.
+    #[cfg(test)]
+    pub(crate) fn fallback_count() -> usize {
+        unsafe { (*addr_of_mut!(FALLBACK_ALLOCS)).len() }
+    }
+
+    /// Test-only: drop all fallback TRACKING (the buffers themselves are left as
+    /// they are — an untracked fallback simply leaks, which is exactly what the
+    /// bounded table tolerates). Lets a test that deliberately fills the table
+    /// give itself a clean baseline and tidy up after, so it does not perturb the
+    /// shared static that other rt-touching tests observe. Call under `wire_lock`.
+    #[cfg(test)]
+    pub(crate) fn clear_fallback() {
+        unsafe { (*addr_of_mut!(FALLBACK_ALLOCS)).clear() }
+    }
+
+    /// Free the talc-fallback buffer at `ptr` IFF `alloc` handed it out (it is in
+    /// FALLBACK_ALLOCS), using the tracked size. A no-op for an arena pointer or
+    /// any pointer the guest did not allocate — so it can never wild-free a
+    /// foreign buffer. Called by `resolve` after the source has been copied out.
+    ///
+    /// # Safety
+    /// If `ptr` is tracked, it must still be live (not already freed) — upheld
+    /// because a fallback ptr is recorded once by `alloc` and removed on the first
+    /// matching entry consumer (`resolve`, or `events::dispatch` for events).
+    pub(crate) unsafe fn free_fallback_source(ptr: *const u8) {
+        if wire_contains(ptr) {
+            return; // arena buffer: recycled per turn, never freed here
+        }
+        let p = ptr as usize;
+        if let Some(idx) = FALLBACK_ALLOCS.iter().position(|&(fp, _)| fp == p) {
+            let (_, size) = FALLBACK_ALLOCS.remove(idx);
+            alloc::alloc::dealloc(ptr as *mut u8, Layout::from_size_align_unchecked(size, 1));
+        }
+    }
+
     /// `rill_init` body: box the guest's async entry and drive it once.
     pub fn init(future: impl Future<Output = ()> + 'static) {
+        begin_wire_turn();
         unsafe {
             TASK = Some(alloc::boxed::Box::pin(future));
             poll();
         }
+        end_wire_turn();
     }
 
     /// `rill_alloc` body: hand the host a buffer from the guest heap.
+    ///
+    /// Host-written wire buffers come from the per-turn WIRE arena (recycled at
+    /// each outermost turn boundary); an oversized request falls back to the
+    /// global heap (talc) and is recorded in FALLBACK_ALLOCS so the consuming
+    /// entry can free it after copying it out — `resolve` for returns,
+    /// `events::dispatch` for event name/payload.
     pub fn alloc(size: usize) -> *mut u8 {
-        unsafe { alloc::alloc::alloc(Layout::from_size_align_unchecked(size.max(1), 1)) }
+        unsafe {
+            let need = size.max(1);
+            if let Some(end) = WIRE_OFF.checked_add(need) {
+                if end <= WIRE_SIZE {
+                    let p = (addr_of_mut!(WIRE) as *mut u8).add(WIRE_OFF);
+                    WIRE_OFF = end;
+                    return p;
+                }
+            }
+            // Oversized wire payload: global heap (talc). Record it so a matching
+            // `resolve` can free it (the return-path leak fix). Bound the table:
+            // if a fallback never gets a matching resolve, dropping the oldest
+            // record only forgets our ability to free that one buffer later (it
+            // leaks, exactly as before this fix) — it never frees anything early.
+            let p = alloc::alloc::alloc(Layout::from_size_align_unchecked(need, 1));
+            if !p.is_null() {
+                if FALLBACK_ALLOCS.len() >= MAX_FALLBACK_TRACKED {
+                    FALLBACK_ALLOCS.remove(0);
+                }
+                FALLBACK_ALLOCS.push((p as usize, need));
+            }
+            p
+        }
     }
 
     /// `rill_resolve` body: stash the result for `cb` and re-drive the task.
@@ -111,8 +244,21 @@ pub mod rt {
     /// `ptr`/`len` must describe a valid buffer in guest memory — upheld by the
     /// host, which wrote the result there via `rill_alloc` before calling.
     pub unsafe fn resolve(cb: u32, ok: u32, ptr: *const u8, len: usize) {
+        begin_wire_turn();
         let bytes = if !ptr.is_null() && len > 0 {
-            core::slice::from_raw_parts(ptr, len).to_vec()
+            let copied = core::slice::from_raw_parts(ptr, len).to_vec();
+            // RETURN-PATH LEAK FIX. The host wrote this response via `rill_alloc`.
+            // A buffer that fit the WIRE arena is recycled by the per-turn reset
+            // and MUST NOT be freed here. But an OVERSIZED (> WIRE_SIZE) return
+            // took the talc fallback in `alloc`, which has no other owner and,
+            // before this, no matching dealloc — so every large binary response
+            // leaked, undoing the R3 bounded heap. Now that the source is copied
+            // out (`to_vec` above), free it IFF it is a fallback buffer WE
+            // allocated (tracked in FALLBACK_ALLOCS) — never a foreign pointer.
+            // The WIRE per-turn semantics and the R3 invariants are untouched;
+            // only the off-arena fallback the guest itself owns is reclaimed.
+            free_fallback_source(ptr);
+            copied
         } else {
             Vec::new()
         };
@@ -123,6 +269,7 @@ pub mod rt {
         while RESULTS.len() > MAX_ORPHAN_RESULTS {
             RESULTS.remove(0);
         }
+        end_wire_turn();
     }
 
     /// Re-drive the guest task from OUTSIDE a host-call resolution.
@@ -139,6 +286,39 @@ pub mod rt {
     /// cannot alias `&mut TASK`. Do NOT call it from inside a running poll.
     pub fn wake() {
         poll();
+    }
+
+    /// Report a panic's location + message to the host via `rill_log`, then
+    /// return so the caller (the generated panic handler) can trap.
+    ///
+    /// Uses a fixed-size STACK buffer with a truncating `core::fmt::Write` —
+    /// no allocation, because the panic may itself be an allocation failure
+    /// (heap exhausted — `memory.grow` refused). Truncation lands on a UTF-8 char boundary so the
+    /// host's text decoding never sees a split code point.
+    pub fn panic_log(info: &core::panic::PanicInfo) {
+        struct StackBuf {
+            buf: [u8; 512],
+            len: usize,
+        }
+        impl core::fmt::Write for StackBuf {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                let space = self.buf.len() - self.len;
+                let mut n = s.len().min(space);
+                while n > 0 && !s.is_char_boundary(n) {
+                    n -= 1;
+                }
+                self.buf[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
+                self.len += n;
+                Ok(()) // swallow overflow: a truncated report beats none
+            }
+        }
+        let mut out = StackBuf {
+            buf: [0; 512],
+            len: 0,
+        };
+        // PanicInfo's Display includes the source location and the message.
+        let _ = core::fmt::write(&mut out, format_args!("guest panic: {info}"));
+        unsafe { super::rill_log(out.buf.as_ptr(), out.len) };
     }
 
     pub(crate) fn next_cb() -> u32 {
@@ -229,19 +409,31 @@ pub fn host_call(module: &'static str, method: &'static str, input: Vec<u8>) -> 
     }
 }
 
-/// Typed wrapper over the `host:kv` capability (demo).
+/// Typed wrapper over the `host:store` capability — the platform's per-user,
+/// per-app E2EE key/value store. The wire mirrors the platform's `host-store.ts`
+/// contract EXACTLY (method names + payload field names), so a native guest
+/// built on this SDK talks to the module the platform actually registers.
+///
+/// A native guest works with UTF-8 strings, so this wraps the contract's text
+/// convenience methods (`putText` / `getText` — the HOST does the byte
+/// encoding) plus `delete`. The raw-byte `put` / `get` (`value` rides as a
+/// JSON number array) and `update` / `list` remain reachable via
+/// [`crate::host_call`] until typed wrappers land.
 pub mod store {
+    use crate::json_escape;
+    use crate::store_net_encode::{decode_reply, encode_envelope, Value};
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    /// `host:kv.put(k, v)` -> the response body on success (`{"version":n}`).
-    pub async fn put(k: &str, v: &str) -> Result<Vec<u8>, Vec<u8>> {
-        let mut body = String::from("{\"k\":");
-        push_json_string(&mut body, k);
-        body.push_str(",\"v\":");
-        push_json_string(&mut body, v);
+    /// `host:store.putText(key, text)` -> the response body on success
+    /// (`{"version":n}`).
+    pub async fn put(key: &str, text: &str) -> Result<Vec<u8>, Vec<u8>> {
+        let mut body = String::from("{\"key\":");
+        json_escape(&mut body, key);
+        body.push_str(",\"text\":");
+        json_escape(&mut body, text);
         body.push('}');
-        let (ok, bytes) = super::host_call("host:kv", "put", body.into_bytes()).await;
+        let (ok, bytes) = super::host_call("host:store", "putText", body.into_bytes()).await;
         if ok == 1 {
             Ok(bytes)
         } else {
@@ -249,12 +441,13 @@ pub mod store {
         }
     }
 
-    /// `host:kv.get(k)` -> the response body on success (`{"v":"…"}`).
-    pub async fn get(k: &str) -> Result<Vec<u8>, Vec<u8>> {
-        let mut body = String::from("{\"k\":");
-        push_json_string(&mut body, k);
+    /// `host:store.getText(key)` -> the response body on success
+    /// (`{"text":"…","version":n}`, or `null` for an absent key).
+    pub async fn get(key: &str) -> Result<Vec<u8>, Vec<u8>> {
+        let mut body = String::from("{\"key\":");
+        json_escape(&mut body, key);
         body.push('}');
-        let (ok, bytes) = super::host_call("host:kv", "get", body.into_bytes()).await;
+        let (ok, bytes) = super::host_call("host:store", "getText", body.into_bytes()).await;
         if ok == 1 {
             Ok(bytes)
         } else {
@@ -262,16 +455,190 @@ pub mod store {
         }
     }
 
-    fn push_json_string(out: &mut String, raw: &str) {
-        out.push('"');
-        for ch in raw.chars() {
-            match ch {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                _ => out.push(ch),
+    /// `host:store.delete(key)` -> the response body on success
+    /// (`{"deleted":bool}`).
+    pub async fn del(key: &str) -> Result<Vec<u8>, Vec<u8>> {
+        let mut body = String::from("{\"key\":");
+        json_escape(&mut body, key);
+        body.push('}');
+        let (ok, bytes) = super::host_call("host:store", "delete", body.into_bytes()).await;
+        if ok == 1 {
+            Ok(bytes)
+        } else {
+            Err(bytes)
+        }
+    }
+
+    /// `host:store.putBytes(key, value)` — store a RAW byte value under `key`.
+    /// The value rides the RBS1 envelope as a length-prefixed binary SEGMENT;
+    /// the control plane is `{"key":"…","value":{"$b":0}}` — the value bytes
+    /// (incl. `0x00`/`0xFF`) NEVER appear as a JSON number-array (the R2 goal).
+    /// Returns the host's ack body on success (`{"version":n}`), or a small
+    /// `{"error":"…"}` body if the value breaches a codec cap (fail-closed, no
+    /// partial write) or the host fails the call.
+    pub async fn put_bytes(key: &str, value: &[u8]) -> Result<Vec<u8>, Vec<u8>> {
+        let mut json = String::from("{\"key\":");
+        json_escape(&mut json, key);
+        json.push_str(",\"value\":{\"$b\":0}}");
+        // Hoist the value to segment 0; an over-cap value fails closed here
+        // before any host call is issued (nothing partial crosses the seam).
+        let frame = encode_envelope(&json, &[value]).map_err(crate::codec_error)?;
+        let (ok, resp) = super::host_call("host:store", "putBytes", frame).await;
+        if ok == 1 {
+            Ok(resp)
+        } else {
+            Err(resp)
+        }
+    }
+
+    /// `host:store.getBytes(key)` — read a raw byte value. The REQUEST carries no
+    /// bytes, so it is a plain-JSON body (`{"key":"…"}`); the RESPONSE is an RBS1
+    /// envelope `{"value":{"$b":0},"version":n}` whose segment 0 is the value.
+    /// Returns `Ok(Some(value))` when present, `Ok(None)` for an absent key (the
+    /// host replies with a bare `null`), or `Err(body)` on failure.
+    pub async fn get_bytes(key: &str) -> Result<Option<Vec<u8>>, Vec<u8>> {
+        let mut json = String::from("{\"key\":");
+        json_escape(&mut json, key);
+        json.push('}');
+        let (ok, resp) = super::host_call("host:store", "getBytes", json.into_bytes()).await;
+        if ok != 1 {
+            return Err(resp);
+        }
+        match decode_reply(&resp).map_err(crate::codec_error)? {
+            // Absent key: the host replies with a plain-JSON `null`.
+            Value::Null => Ok(None),
+            // Present: pull the revived byte field out of the reply object.
+            Value::Obj(entries) => {
+                for (k, v) in entries {
+                    if k == "value" {
+                        return match v {
+                            Value::Bytes(b) => Ok(Some(b)),
+                            _ => Err(Vec::from(
+                                &b"{\"error\":\"getBytes: value is not a byte stream\"}"[..],
+                            )),
+                        };
+                    }
+                }
+                Err(Vec::from(
+                    &b"{\"error\":\"getBytes: reply missing value field\"}"[..],
+                ))
+            }
+            _ => Err(Vec::from(
+                &b"{\"error\":\"getBytes: unexpected reply shape\"}"[..],
+            )),
+        }
+    }
+}
+
+/// Typed wrapper over the `host:net` capability — a host-mediated HTTP fetch for
+/// native guests, carrying a BINARY request/response body over the RBS1 envelope.
+///
+/// The request body (when present) rides as a length-prefixed binary SEGMENT and
+/// the response body comes back the same way — so arbitrary bytes (incl.
+/// `0x00`/`0xFF`) cross the seam untouched, NEVER as a JSON number-array. The
+/// control plane holds only the url/method/headers and a `{"$b":0}` sentinel for
+/// the body. A `body: None` request has no segment, so it is a plain-JSON control
+/// plane (byte-for-byte the back-compat shape).
+pub mod net {
+    use crate::json_escape;
+    use crate::store_net_encode::{decode_reply, encode_envelope, Value};
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    /// A decoded `host:net.fetchBytes` response: the HTTP status, the response
+    /// headers, and the raw response body (revived from the envelope's segment,
+    /// empty when the response carried none).
+    #[derive(Debug, Clone, PartialEq, Eq, Default)]
+    pub struct Response {
+        /// HTTP status code (e.g. 200).
+        pub status: u16,
+        /// Response headers as `(name, value)` pairs, in the host's order.
+        pub headers: Vec<(String, String)>,
+        /// The raw response body bytes (empty if the response had no body).
+        pub body: Vec<u8>,
+    }
+
+    /// `host:net.fetchBytes(url, method, headers, body?)` — issue an HTTP request
+    /// whose body (when `Some`) rides as a binary segment, and decode the binary
+    /// response body from the reply envelope.
+    ///
+    /// Control plane: `{"url":…,"method":…,"headers":[[k,v],…]}` plus
+    /// `,"body":{"$b":0}` when a body is supplied. Returns the decoded
+    /// [`Response`] on success, or a small `{"error":"…"}` body on a codec cap
+    /// breach (fail-closed) or a host failure.
+    pub async fn fetch_bytes(
+        url: &str,
+        method: &str,
+        headers: &[(&str, &str)],
+        body: Option<&[u8]>,
+    ) -> Result<Response, Vec<u8>> {
+        let mut json = String::from("{\"url\":");
+        json_escape(&mut json, url);
+        json.push_str(",\"method\":");
+        json_escape(&mut json, method);
+        json.push_str(",\"headers\":[");
+        for (i, (name, val)) in headers.iter().enumerate() {
+            if i > 0 {
+                json.push(',');
+            }
+            json.push('[');
+            json_escape(&mut json, name);
+            json.push(',');
+            json_escape(&mut json, val);
+            json.push(']');
+        }
+        json.push(']');
+
+        // Body rides segment 0 when present; otherwise the request stays a plain
+        // JSON control plane (no segment => back-compat shape).
+        let frame = match body {
+            Some(bytes) => {
+                json.push_str(",\"body\":{\"$b\":0}}");
+                encode_envelope(&json, &[bytes]).map_err(crate::codec_error)?
+            }
+            None => {
+                json.push('}');
+                json.into_bytes()
+            }
+        };
+
+        let (ok, resp) = crate::host_call("host:net", "fetchBytes", frame).await;
+        if ok != 1 {
+            return Err(resp);
+        }
+        parse_response(&resp)
+    }
+
+    /// Decode a `fetchBytes` reply (RBS1 envelope, or plain JSON when the response
+    /// had no body) into a [`Response`]. Fail-closed: a malformed frame or a reply
+    /// that is not the expected object surfaces as an `Err(body)`.
+    fn parse_response(resp: &[u8]) -> Result<Response, Vec<u8>> {
+        let entries = match decode_reply(resp).map_err(crate::codec_error)? {
+            Value::Obj(entries) => entries,
+            _ => {
+                return Err(Vec::from(
+                    &b"{\"error\":\"fetchBytes: reply is not an object\"}"[..],
+                ))
+            }
+        };
+        let mut out = Response::default();
+        for (key, value) in entries {
+            match (key.as_str(), value) {
+                ("status", Value::Num(n)) => out.status = n as u16,
+                ("headers", Value::Arr(items)) => {
+                    for item in items {
+                        if let Value::Arr(pair) = item {
+                            if let [Value::Str(name), Value::Str(val)] = &pair[..] {
+                                out.headers.push((name.clone(), val.clone()));
+                            }
+                        }
+                    }
+                }
+                ("body", Value::Bytes(b)) => out.body = b,
+                _ => {}
             }
         }
-        out.push('"');
+        Ok(out)
     }
 }
 
@@ -285,11 +652,15 @@ pub mod store {
 ///    guest's own linear memory; the host reads it back (bounds-checked) and
 ///    blits (stage ②; the host wiring for `present` may not exist yet).
 ///
-/// The wire shape mirrors `host-canvas.ts` `OP_SPECS` EXACTLY (op names + arg
-/// field names). Styles are color STRINGS only (no gradient/pattern object → no
-/// image/URL reference), and there is deliberately NO readback — the seal's
-/// isolation lives in the ABSENCE of those, not in a runtime check.
+/// The wire shape (op names + arg field names) follows the `host:canvas` seam of
+/// `contracts/graphics-seams.json` — the repo's single authoritative source, which
+/// downstream host validators (their `host-canvas.ts` `OP_SPECS`) must mirror; the
+/// conformance tests in `src/conformance.rs` lock this SDK to it. Styles are color
+/// STRINGS only (no gradient/pattern object → no image/URL reference), and there
+/// is deliberately NO readback — the seal's isolation lives in the ABSENCE of
+/// those, not in a runtime check.
 pub mod canvas {
+    use crate::json_escape;
     use alloc::format;
     use alloc::string::String;
     use alloc::vec;
@@ -302,15 +673,24 @@ pub mod canvas {
     pub struct DrawList {
         ops: String,
         count: usize,
+        // Latched when an op was fed a non-finite number. NaN/inf format as
+        // `NaN`/`inf` — not legal JSON — so ONE bad op would make the whole
+        // batch unparseable host-side and the entire frame would be dropped
+        // with no reason. Instead: skip the op, latch, and fail loud in draw().
+        non_finite: bool,
+        // Parallel typed op log for the WORK-IN-PROGRESS binary canvas wire
+        // (`canvas_encode`). Recorded only for ops that actually pass the
+        // `finite` guard and are pushed to `ops`, so the binary and JSON emit
+        // paths carry the IDENTICAL op sequence. Gated OFF by default: the live
+        // `draw` path never touches it and the shipped guest never builds it.
+        #[cfg(feature = "wip-binary-protocol")]
+        bin_ops: alloc::vec::Vec<crate::canvas_encode::CanvasOp>,
     }
 
     impl DrawList {
         /// A fresh, empty display list.
         pub fn new() -> Self {
-            Self {
-                ops: String::new(),
-                count: 0,
-            }
+            Self::default()
         }
 
         fn push(&mut self, op: String) {
@@ -319,6 +699,32 @@ pub mod canvas {
             }
             self.ops.push_str(&op);
             self.count += 1;
+        }
+
+        /// Record the typed op for the WIP binary wire (no-op when the feature
+        /// is off). Called right after `push`, so it mirrors the JSON path's op
+        /// sequence exactly (only finite, actually-emitted ops are recorded).
+        #[cfg(feature = "wip-binary-protocol")]
+        #[inline]
+        fn rec(&mut self, op: crate::canvas_encode::CanvasOp) {
+            self.bin_ops.push(op);
+        }
+
+        // Guard for every float-taking op: non-finite input skips the op and
+        // latches the list invalid (see `non_finite`).
+        fn finite(&mut self, vals: &[f64]) -> bool {
+            if vals.iter().all(|v| v.is_finite()) {
+                true
+            } else {
+                self.non_finite = true;
+                false
+            }
+        }
+
+        /// Whether every op so far had finite numeric arguments. A `false`
+        /// list is rejected by [`draw`] before it reaches the host.
+        pub fn is_valid(&self) -> bool {
+            !self.non_finite
         }
 
         /// Number of ops queued.
@@ -334,68 +740,118 @@ pub mod canvas {
         /// `beginPath()`.
         pub fn begin_path(&mut self) -> &mut Self {
             self.push(String::from("{\"op\":\"beginPath\"}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::BeginPath);
             self
         }
         /// `closePath()`.
         pub fn close_path(&mut self) -> &mut Self {
             self.push(String::from("{\"op\":\"closePath\"}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::ClosePath);
             self
         }
         /// `moveTo(x, y)`.
         pub fn move_to(&mut self, x: f64, y: f64) -> &mut Self {
+            if !self.finite(&[x, y]) {
+                return self;
+            }
             self.push(format!("{{\"op\":\"moveTo\",\"x\":{x},\"y\":{y}}}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::MoveTo { x, y });
             self
         }
         /// `lineTo(x, y)`.
         pub fn line_to(&mut self, x: f64, y: f64) -> &mut Self {
+            if !self.finite(&[x, y]) {
+                return self;
+            }
             self.push(format!("{{\"op\":\"lineTo\",\"x\":{x},\"y\":{y}}}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::LineTo { x, y });
             self
         }
         /// `rect(x, y, w, h)` (adds a rectangle sub-path).
         pub fn rect(&mut self, x: f64, y: f64, w: f64, h: f64) -> &mut Self {
+            if !self.finite(&[x, y, w, h]) {
+                return self;
+            }
             self.push(format!(
                 "{{\"op\":\"rect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}}}"
             ));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::Rect { x, y, w, h });
             self
         }
         /// `arc(x, y, r, start, end)` counter-clockwise=false.
         pub fn arc(&mut self, x: f64, y: f64, r: f64, start: f64, end: f64) -> &mut Self {
+            if !self.finite(&[x, y, r, start, end]) {
+                return self;
+            }
             self.push(format!(
                 "{{\"op\":\"arc\",\"x\":{x},\"y\":{y},\"r\":{r},\"start\":{start},\"end\":{end},\"ccw\":false}}"
             ));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::Arc {
+                x,
+                y,
+                r,
+                start,
+                end,
+                ccw: false,
+            });
             self
         }
         /// `fill()` the current path.
         pub fn fill(&mut self) -> &mut Self {
             self.push(String::from("{\"op\":\"fill\"}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::Fill);
             self
         }
         /// `stroke()` the current path.
         pub fn stroke(&mut self) -> &mut Self {
             self.push(String::from("{\"op\":\"stroke\"}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::Stroke);
             self
         }
 
         // ---- rectangles ----
         /// `fillRect(x, y, w, h)`.
         pub fn fill_rect(&mut self, x: f64, y: f64, w: f64, h: f64) -> &mut Self {
+            if !self.finite(&[x, y, w, h]) {
+                return self;
+            }
             self.push(format!(
                 "{{\"op\":\"fillRect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}}}"
             ));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::FillRect { x, y, w, h });
             self
         }
         /// `strokeRect(x, y, w, h)`.
         pub fn stroke_rect(&mut self, x: f64, y: f64, w: f64, h: f64) -> &mut Self {
+            if !self.finite(&[x, y, w, h]) {
+                return self;
+            }
             self.push(format!(
                 "{{\"op\":\"strokeRect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}}}"
             ));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::StrokeRect { x, y, w, h });
             self
         }
         /// `clearRect(x, y, w, h)`.
         pub fn clear_rect(&mut self, x: f64, y: f64, w: f64, h: f64) -> &mut Self {
+            if !self.finite(&[x, y, w, h]) {
+                return self;
+            }
             self.push(format!(
                 "{{\"op\":\"clearRect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}}}"
             ));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::ClearRect { x, y, w, h });
             self
         }
 
@@ -403,32 +859,54 @@ pub mod canvas {
         /// `fillStyle = color` (CSS color string).
         pub fn set_fill_style(&mut self, color: &str) -> &mut Self {
             let mut s = String::from("{\"op\":\"setFillStyle\",\"color\":");
-            json_string(&mut s, color);
+            json_escape(&mut s, color);
             s.push('}');
             self.push(s);
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::SetFillStyle {
+                color: alloc::string::String::from(color),
+            });
             self
         }
         /// `strokeStyle = color` (CSS color string).
         pub fn set_stroke_style(&mut self, color: &str) -> &mut Self {
             let mut s = String::from("{\"op\":\"setStrokeStyle\",\"color\":");
-            json_string(&mut s, color);
+            json_escape(&mut s, color);
             s.push('}');
             self.push(s);
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::SetStrokeStyle {
+                color: alloc::string::String::from(color),
+            });
             self
         }
         /// `lineWidth = w`.
         pub fn set_line_width(&mut self, w: f64) -> &mut Self {
+            if !self.finite(&[w]) {
+                return self;
+            }
             self.push(format!("{{\"op\":\"setLineWidth\",\"w\":{w}}}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::SetLineWidth { w });
             self
         }
 
         // ---- text ----
         /// `fillText(text, x, y)`.
         pub fn fill_text(&mut self, text: &str, x: f64, y: f64) -> &mut Self {
+            if !self.finite(&[x, y]) {
+                return self;
+            }
             let mut s = format!("{{\"op\":\"fillText\",\"x\":{x},\"y\":{y},\"text\":");
-            json_string(&mut s, text);
+            json_escape(&mut s, text);
             s.push('}');
             self.push(s);
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::FillText {
+                x,
+                y,
+                text: alloc::string::String::from(text),
+            });
             self
         }
 
@@ -436,26 +914,45 @@ pub mod canvas {
         /// `save()` the drawing state.
         pub fn save(&mut self) -> &mut Self {
             self.push(String::from("{\"op\":\"save\"}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::Save);
             self
         }
         /// `restore()` the drawing state.
         pub fn restore(&mut self) -> &mut Self {
             self.push(String::from("{\"op\":\"restore\"}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::Restore);
             self
         }
         /// `translate(x, y)`.
         pub fn translate(&mut self, x: f64, y: f64) -> &mut Self {
+            if !self.finite(&[x, y]) {
+                return self;
+            }
             self.push(format!("{{\"op\":\"translate\",\"x\":{x},\"y\":{y}}}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::Translate { x, y });
             self
         }
         /// `scale(x, y)`.
         pub fn scale(&mut self, x: f64, y: f64) -> &mut Self {
+            if !self.finite(&[x, y]) {
+                return self;
+            }
             self.push(format!("{{\"op\":\"scale\",\"x\":{x},\"y\":{y}}}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::Scale { x, y });
             self
         }
         /// `rotate(angle)` (radians).
         pub fn rotate(&mut self, angle: f64) -> &mut Self {
+            if !self.finite(&[angle]) {
+                return self;
+            }
             self.push(format!("{{\"op\":\"rotate\",\"angle\":{angle}}}"));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::Rotate { angle });
             self
         }
         /// `setTransform(a, b, c, d, e, f)`.
@@ -468,37 +965,132 @@ pub mod canvas {
             e: f64,
             f: f64,
         ) -> &mut Self {
+            if !self.finite(&[a, b, c, d, e, f]) {
+                return self;
+            }
             self.push(format!(
                 "{{\"op\":\"setTransform\",\"a\":{a},\"b\":{b},\"c\":{c},\"d\":{d},\"e\":{e},\"f\":{f}}}"
             ));
+            #[cfg(feature = "wip-binary-protocol")]
+            self.rec(crate::canvas_encode::CanvasOp::SetTransform { a, b, c, d, e, f });
             self
+        }
+
+        /// Encode this frame's ops to the binary CANVAS wire
+        /// (`contracts/canvas-wire.json`) targeting `<Canvas>` `canvas_id` with
+        /// diagnostic `frame_id`. WORK IN PROGRESS: the encoded bytes are an
+        /// alternative to the JSON `draw` payload, but the live `draw` path does
+        /// NOT use them yet — the capability-driven binary-vs-JSON selection is a
+        /// later phase. Fails closed on the same caps the encoder enforces.
+        #[cfg(feature = "wip-binary-protocol")]
+        pub fn encode_binary(
+            &self,
+            canvas_id: &str,
+            frame_id: u32,
+        ) -> Result<Vec<u8>, crate::canvas_encode::EncodeError> {
+            crate::canvas_encode::Encoder::new().encode_frame(canvas_id, frame_id, &self.bin_ops)
         }
     }
 
-    /// Minimal JSON string emitter (host caps length; we escape control chars so
-    /// the batch stays valid UTF-8 JSON regardless of guest input).
-    fn json_string(out: &mut String, raw: &str) {
-        out.push('"');
-        for ch in raw.chars() {
-            match ch {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-                c => out.push(c),
+    // ---- capability handshake (WIP binary canvas wire) ----
+    //
+    // Cache for the one-shot `host:canvas.getInfo` probe (see
+    // `host_supports_binary`). `None` = not probed yet; `Some(b)` = the host's
+    // answer, fixed for the guest's lifetime (a host's capability set is fixed
+    // per load, so the probe never repeats). Single-task guest, no threads.
+    #[cfg(feature = "wip-binary-protocol")]
+    static mut BINARY_SUPPORTED: Option<bool> = None;
+    // Monotonic diagnostic frame counter stamped into each binary frame header.
+    // Only the frame BYTES carry it; the replayed op array does not, so it never
+    // affects rendering — it is purely for host-side tracing.
+    #[cfg(feature = "wip-binary-protocol")]
+    static mut FRAME_ID: u32 = 0;
+
+    #[cfg(feature = "wip-binary-protocol")]
+    fn next_frame_id() -> u32 {
+        unsafe {
+            let f = FRAME_ID;
+            FRAME_ID = FRAME_ID.wrapping_add(1);
+            f
+        }
+    }
+
+    /// Naive substring search (`no_std`, no regex/JSON parser available). The
+    /// host's `getInfo` response is compact machine JSON (`JSON.stringify`, no
+    /// insignificant whitespace), so an exact-substring probe is deterministic.
+    #[cfg(feature = "wip-binary-protocol")]
+    fn contains(hay: &[u8], needle: &[u8]) -> bool {
+        if needle.is_empty() {
+            return true;
+        }
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// Capability handshake (`canvas-wire.DESIGN.md` §1.3): probe
+    /// `host:canvas.getInfo` EXACTLY ONCE and cache the answer. The host is
+    /// binary-capable only if it (a) resolves `ok=1` — an old host that never
+    /// registered `getInfo` fails closed with `ok=0` — and advertises both
+    /// (b) `binaryDraw:true` and (c) a `wireVersion` this encoder can produce.
+    /// Any non-affirmative answer ⇒ JSON, so a new guest degrades gracefully on
+    /// an old host with zero old-host code (no flag-day).
+    #[cfg(feature = "wip-binary-protocol")]
+    async fn host_supports_binary() -> bool {
+        unsafe {
+            if let Some(v) = BINARY_SUPPORTED {
+                return v;
             }
         }
-        out.push('"');
+        let (ok, resp) = crate::host_call("host:canvas", "getInfo", Vec::from(&b"{}"[..])).await;
+        let mut supported = false;
+        if ok == 1 {
+            let has_flag = contains(&resp, b"\"binaryDraw\":true");
+            let ver_needle = format!("\"wireVersion\":{}", crate::canvas_encode::WIRE_VERSION);
+            let has_version = contains(&resp, ver_needle.as_bytes());
+            supported = has_flag && has_version;
+        }
+        unsafe {
+            BINARY_SUPPORTED = Some(supported);
+        }
+        supported
     }
 
     /// `host:canvas.draw` — replay `list` onto the `<Canvas>` named `canvas_id`.
     /// Returns `Ok(response)` (`{"ok":true,"dropped":n}`) or `Err(response)` if
     /// the host fails closed (e.g. unknown/unmounted canvas id).
+    ///
+    /// Encoding selection (`canvas-wire.DESIGN.md` §1): when the crate is built
+    /// with `wip-binary-protocol` AND the host advertised `binaryDraw` for a
+    /// `wireVersion` this encoder produces, the frame goes out as the binary
+    /// `RCNV` wire; otherwise (default shipped guest, old host, over-cap frame)
+    /// it goes out as the legacy JSON op-list. Both paths hit the SAME `draw`
+    /// method and render the identical picture — the host forks on the payload's
+    /// first byte (`R` binary vs `{` JSON).
     pub async fn draw(canvas_id: &str, list: &DrawList) -> Result<Vec<u8>, Vec<u8>> {
+        if !list.is_valid() {
+            // Fail loud guest-side: a non-finite op would have produced invalid
+            // JSON and the host would drop the whole batch with no reason.
+            return Err(Vec::from(
+                &b"{\"error\":\"non-finite number in draw list\"}"[..],
+            ));
+        }
+
+        // WIP binary path: only taken when the feature is compiled in AND the
+        // host advertised support. A failed encode (over-cap frame) falls
+        // through to JSON so the guest never drops a frame just because binary
+        // could not represent it.
+        #[cfg(feature = "wip-binary-protocol")]
+        {
+            if host_supports_binary().await {
+                if let Ok(frame) = list.encode_binary(canvas_id, next_frame_id()) {
+                    let (ok, bytes) = crate::host_call("host:canvas", "draw", frame).await;
+                    return if ok == 1 { Ok(bytes) } else { Err(bytes) };
+                }
+            }
+        }
+
+        // Default / fallback: the legacy JSON op-list (unchanged).
         let mut body = String::from("{\"canvasId\":");
-        json_string(&mut body, canvas_id);
+        json_escape(&mut body, canvas_id);
         body.push_str(",\"ops\":[");
         body.push_str(&list.ops);
         body.push_str("]}");
@@ -514,18 +1106,18 @@ pub mod canvas {
     /// into `pixels_mut()`, then `present(id, &surface).await`.
     ///
     /// Straight-alpha (non-premultiplied), row-major, stride = `width * 4` — the
-    /// `putImageData` contract the host blit expects. Backed by the guest's
-    /// `BumpAlloc`, which only grows: allocate a Surface ONCE and reuse it across
-    /// frames (a `Surface::new` per frame leaks its buffer for the guest's life).
+    /// `putImageData` contract the host blit expects. Backed by the guest's global
+    /// heap (talc). talc reclaims freed buffers, so a `Surface::new` per frame no
+    /// longer leaks for the guest's life; still, prefer allocating a Surface ONCE
+    /// and reusing it across frames to avoid per-frame allocation churn.
     ///
     /// Double-buffering: `present(id, &surface).await` resolves only AFTER the host
     /// has finished reading these bytes, so with a single Surface it is already
     /// safe to overwrite for the next frame once the await returns (at most one
     /// frame in flight — the ack is the backpressure). A guest that wants to render
     /// frame N+1 while the host still blits frame N can instead allocate TWO
-    /// Surfaces once and alternate them (write A / present B, then swap); the same
-    /// "allocate once, BumpAlloc only grows" rule means the two buffers are made a
-    /// single time and reused forever.
+    /// Surfaces once and alternate them (write A / present B, then swap); allocating
+    /// the two buffers once and reusing them still avoids per-frame churn.
     pub struct Surface {
         width: u32,
         height: u32,
@@ -581,7 +1173,7 @@ pub mod canvas {
     /// flood the main thread, its excess presents just fail closed.
     pub async fn present(canvas_id: &str, surface: &Surface) -> Result<Vec<u8>, Vec<u8>> {
         let mut body = String::from("{\"canvasId\":");
-        json_string(&mut body, canvas_id);
+        json_escape(&mut body, canvas_id);
         body.push_str(&format!(
             ",\"ptr\":{},\"width\":{},\"height\":{},\"format\":\"rgba8\"}}",
             surface.ptr(),
@@ -599,6 +1191,9 @@ pub mod canvas {
 
 /// Typed wrapper over the `host:asset` capability — resolve an app-package
 /// `assetId` to decoded RGBA in the guest's OWN linear memory (the ④ pixera path).
+/// The wire (method + field names) follows the `host:asset` seam of
+/// `contracts/graphics-seams.json`, the authoritative source downstream host
+/// validators mirror too.
 ///
 /// The host owns the resolution + decode: `assetId` is looked up in the app
 /// manifest, gated (same-origin package raster only — never a guest URL, never
@@ -606,10 +1201,12 @@ pub mod canvas {
 /// The guest never fetches or decodes anything; it only:
 ///   1. `info(id)` → `(w, h)`,
 ///   2. allocates a `Surface` of `w×h` (its own memory),
-///   3. `blit(id, ptr, cap)` → the host writes the RGBA into that buffer.
+///   3. `blit(id, &mut buffer)` → the host writes the RGBA into that buffer.
+///
 /// `load(id)` does all three and hands back a ready-to-composite `Surface`.
 pub mod asset {
     use crate::canvas::Surface;
+    use crate::json_escape;
     use alloc::format;
     use alloc::string::String;
 
@@ -617,7 +1214,7 @@ pub mod asset {
     /// (unknown/invalid/undecodable id — fail-closed).
     pub async fn info(asset_id: &str) -> Option<(u32, u32)> {
         let mut body = String::from("{\"assetId\":");
-        json_string(&mut body, asset_id);
+        json_escape(&mut body, asset_id);
         body.push('}');
         let (ok, bytes) = crate::host_call("host:asset", "info", body.into_bytes()).await;
         if ok != 1 {
@@ -628,14 +1225,19 @@ pub mod asset {
         Some((w, h))
     }
 
-    /// `host:asset.blit(id, dst_ptr, dst_cap)` → the host writes the asset's RGBA
-    /// into guest memory at `dst_ptr` (bounds-checked host-side). `dst_cap` is the
-    /// number of bytes the guest reserved there; the host refuses if it is smaller
-    /// than `w*h*4`. Returns the bytes written on success, `None` on any failure
-    /// (JS guest / bad id / OOB ptr / too-small cap — all fail-closed).
-    pub async fn blit(asset_id: &str, dst_ptr: usize, dst_cap: usize) -> Option<usize> {
+    /// `host:asset.blit(id, dst)` → the host writes the asset's RGBA into `dst`
+    /// (bounds-checked host-side; it refuses if `dst.len()` is smaller than
+    /// `w*h*4`). Returns the bytes written on success, `None` on any failure
+    /// (JS guest / bad id / too-small buffer — all fail-closed).
+    ///
+    /// Taking `&mut [u8]` (not a raw ptr/cap pair) is deliberate: the host will
+    /// WRITE into this range, so safe Rust must only be able to hand it memory
+    /// it exclusively owns — never an arbitrary pointer into its own heap.
+    pub async fn blit(asset_id: &str, dst: &mut [u8]) -> Option<usize> {
+        let dst_ptr = dst.as_mut_ptr() as usize;
+        let dst_cap = dst.len();
         let mut body = String::from("{\"assetId\":");
-        json_string(&mut body, asset_id);
+        json_escape(&mut body, asset_id);
         body.push_str(&format!(",\"dstPtr\":{dst_ptr},\"dstCap\":{dst_cap}}}"));
         let (ok, bytes) = crate::host_call("host:asset", "blit", body.into_bytes()).await;
         if ok != 1 || !json_flag_true(&bytes, "ok") {
@@ -650,34 +1252,14 @@ pub mod asset {
     /// the usual "allocate once, reuse across frames" rule applies.
     pub async fn load(asset_id: &str) -> Option<Surface> {
         let (w, h) = info(asset_id).await?;
-        // The host writes RGBA straight into this buffer's linear-memory range via
-        // `blit(ptr, cap)`, so the binding stays immutable here (no `&mut` path).
-        let surface = Surface::new(w, h);
+        let mut surface = Surface::new(w, h);
         let cap = surface.pixels().len();
-        let written = blit(asset_id, surface.ptr(), cap).await?;
+        let written = blit(asset_id, surface.pixels_mut()).await?;
         // The host must have filled the WHOLE buffer, or the frame is incomplete.
         if written != cap {
             return None;
         }
         Some(surface)
-    }
-
-    /// Minimal JSON string emitter (escapes control chars so the request stays
-    /// valid UTF-8 JSON regardless of the id; the host caps/validates it anyway).
-    fn json_string(out: &mut String, raw: &str) {
-        out.push('"');
-        for ch in raw.chars() {
-            match ch {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-                c => out.push(c),
-            }
-        }
-        out.push('"');
     }
 
     /// Read an unsigned-integer JSON field (`"field":<digits>`) from a response
@@ -731,7 +1313,9 @@ pub mod asset {
 ///      host validates every op + the per-submit COST BUDGET and REPLAYS it against
 ///      HOST-PRESET pipelines (see [`preset`]) with NO readback.
 ///
-/// Seal (③-a scope — the wire shape mirrors `host-gpu.ts`'s validator EXACTLY):
+/// Seal (③-a scope — the wire shape follows the `host:gpu` seam of
+/// `contracts/graphics-seams.json`, the repo's single authoritative source that
+/// downstream host validators (their `host-gpu.ts`) must mirror):
 ///  - Opcode WHITELIST only: `SET_PIPELINE` / `SET_BINDGROUP` / `SET_VERTEX` /
 ///    `SET_INDEX` / `SET_VIEWPORT` / `BEGIN_PASS` / `DRAW` / `DRAW_INDEXED` /
 ///    `DRAW_INSTANCED` / `END_PASS` / `SUBMIT`. There is deliberately NO
@@ -756,27 +1340,17 @@ pub mod asset {
 ///    isolated origin but is NOT claimed green: TDR is a shared-hardware residual
 ///    that CSP / process isolation cannot contain.
 pub mod gpu {
+    use crate::json_escape;
     use alloc::format;
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    // ---- per-submit COST BUDGET (mirror of host-gpu.ts; host is authoritative) ----
-    /// Max ops (any opcode) in one command buffer.
-    pub const MAX_CMDS: usize = 4096;
-    /// Max DRAW*/draw-call ops in one submit.
-    pub const MAX_DRAW_CALLS: usize = 256;
-    /// Max total primitives (triangles) summed over the submit.
-    pub const MAX_PRIMITIVES: u64 = 4_000_000;
-    /// Max instances in a single DRAW_INSTANCED.
-    pub const MAX_INSTANCES_PER_DRAW: u32 = 4096;
-    /// Max instances summed over the submit.
-    pub const MAX_INSTANCES_TOTAL: u64 = 262_144;
-    /// Max index/vertex count in a single draw.
-    pub const MAX_ELEMENTS_PER_DRAW: u32 = 4_000_000;
-    /// Max estimated SHADED pixels (fill-rate proxy = Σ viewport_area × instances).
-    pub const MAX_PIXELS: u64 = 134_217_728; // ~128M px / submit
-    /// Max bytes for one uploaded vertex/index buffer.
-    pub const MAX_BUFFER_BYTES: usize = 64 * 1024 * 1024;
+    // ---- per-submit COST BUDGET + host-preset pipeline ids ----
+    // GENERATED by build.rs from `contracts/graphics-seams.json` (host:gpu.budget
+    // / .presets) — the single authoritative source for the graphics seam
+    // contracts. Downstream host validators align to THAT file, never to this
+    // crate; src/conformance.rs locks the rest of the wire shape to it too.
+    include!(concat!(env!("OUT_DIR"), "/graphics_contract.rs"));
 
     /// The gpu backend a canvas is configured for. `configure` fails closed if the
     /// canvas is already in a conflicting mode (2D / present / the other gpu mode).
@@ -813,18 +1387,6 @@ pub mod gpu {
         }
     }
 
-    /// HOST-PRESET pipeline ids. In ③-a the guest CANNOT author shaders; it picks
-    /// one of these fixed, host-compiled pipelines by integer id. Adding a preset
-    /// is a HOST change (audited), never a guest capability.
-    pub mod preset {
-        /// Flat-colored triangles from an interleaved `[x, y, r, g, b, a]` (f32)
-        /// vertex buffer. No texture, no guest shader.
-        pub const SOLID_2D: u32 = 0;
-        /// Textured quad: samples a host-preset texture bind group whose texture
-        /// came from an `assetId` (④ host:asset). Vertex buffer is `[x, y, u, v]`.
-        pub const TEXTURED_2D: u32 = 1;
-    }
-
     /// An OPAQUE resource handle: an integer key into the host's per-canvas
     /// handle→realObject table. The guest never sees the real GPU object.
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -854,8 +1416,9 @@ pub mod gpu {
     }
 
     /// A validated GPU command buffer. Chain ops from the OPCODE WHITELIST, then
-    /// `gpu::submit(id, &cmds).await`. Serializes to EXACTLY the op-list
-    /// `host-gpu.ts` accepts (op names + field names match its `OP_SPECS`); an
+    /// `gpu::submit(id, &cmds).await`. Serializes to EXACTLY the op-list of
+    /// `contracts/graphics-seams.json` `host:gpu.ops` (op names + field names —
+    /// the authoritative schema the downstream host validator also mirrors); an
     /// unknown/over-budget op would be dropped host-side, so build valid ops here.
     ///
     /// The builder also tracks a [`Cost`] estimate as ops are added so a cooperative
@@ -868,6 +1431,15 @@ pub mod gpu {
         // guest sets one, in which case pixel accounting is skipped guest-side (the
         // host applies the real canvas dimensions).
         viewport_area: u64,
+        // Latched when a SINGLE draw exceeds a per-draw cap (elements/instances).
+        // Those caps are not running sums, so they can't be checked in
+        // within_budget() from `cost` alone — one oversized draw is a violation
+        // on its own even if the submit totals look fine.
+        violated: bool,
+        // Latched when an op was fed a non-finite float: NaN/inf format as
+        // `NaN`/`inf` — not legal JSON — so one bad op would make the whole
+        // submit unparseable host-side. Skip the op, latch, fail loud in submit().
+        non_finite: bool,
     }
 
     impl CommandBuffer {
@@ -886,7 +1458,27 @@ pub mod gpu {
 
         /// `BEGIN_PASS` — open a render pass on the configured canvas, clearing to
         /// the given straight-alpha color (each channel in `[0, 1]`).
+        // Guard for float-taking ops: non-finite input skips the op and
+        // latches the buffer invalid (see `non_finite`).
+        fn finite(&mut self, vals: &[f32]) -> bool {
+            if vals.iter().all(|v| v.is_finite()) {
+                true
+            } else {
+                self.non_finite = true;
+                false
+            }
+        }
+
+        /// Whether every op so far had finite numeric arguments. A `false`
+        /// buffer is rejected by [`submit`] before it reaches the host.
+        pub fn is_valid(&self) -> bool {
+            !self.non_finite
+        }
+
         pub fn begin_pass(&mut self, r: f32, g: f32, b: f32, a: f32) -> &mut Self {
+            if !self.finite(&[r, g, b, a]) {
+                return self;
+            }
             self.push(format!(
                 "{{\"op\":\"BEGIN_PASS\",\"r\":{r},\"g\":{g},\"b\":{b},\"a\":{a}}}"
             ));
@@ -943,6 +1535,9 @@ pub mod gpu {
         /// `SET_VIEWPORT` — restrict rasterization to a rectangle (device px). Also
         /// sets the fill-rate estimate's current area for subsequent draws.
         pub fn set_viewport(&mut self, x: f32, y: f32, w: f32, h: f32) -> &mut Self {
+            if !self.finite(&[x, y, w, h]) {
+                return self;
+            }
             let aw = if w > 0.0 { w as u64 } else { 0 };
             let ah = if h > 0.0 { h as u64 } else { 0 };
             self.viewport_area = aw.saturating_mul(ah);
@@ -985,6 +1580,13 @@ pub mod gpu {
         }
 
         fn account_draw(&mut self, count: u32, instances: u32) {
+            // Per-draw caps, mirroring the host's per-op validation: a single
+            // draw over MAX_ELEMENTS_PER_DRAW / MAX_INSTANCES_PER_DRAW would be
+            // dropped host-side, so latch `violated` and let within_budget()
+            // report it before the guest wastes the submit.
+            if count > MAX_ELEMENTS_PER_DRAW || instances > MAX_INSTANCES_PER_DRAW {
+                self.violated = true;
+            }
             self.cost.draw_calls += 1;
             let tris = (count as u64) / 3;
             self.cost.primitives = self
@@ -994,7 +1596,8 @@ pub mod gpu {
             self.cost.instances = self.cost.instances.saturating_add(instances as u64);
             // Fill proxy = area × PRIMITIVES (tris × instances), not area × instances:
             // else full-screen triangles in non-instanced draws slip the budget and
-            // TDR the shared GPU. Mirrors the host (host-gpu.ts, authoritative).
+            // TDR the shared GPU. Matches `contracts/graphics-seams.json`
+            // `host:gpu.costFormula` (the host recomputes it; authoritative).
             self.cost.pixels = self.cost.pixels.saturating_add(
                 self.viewport_area
                     .saturating_mul(tris.saturating_mul(instances as u64)),
@@ -1020,7 +1623,8 @@ pub mod gpu {
         /// over-budget buffer is dropped host-side with a reason regardless.
         pub fn within_budget(&self) -> bool {
             let c = &self.cost;
-            c.cmds <= MAX_CMDS
+            !self.violated
+                && c.cmds <= MAX_CMDS
                 && c.draw_calls <= MAX_DRAW_CALLS
                 && c.primitives <= MAX_PRIMITIVES
                 && c.instances <= MAX_INSTANCES_TOTAL
@@ -1033,7 +1637,7 @@ pub mod gpu {
     /// CONFLICTING mode (2D / present / the other gpu backend) — fail-closed.
     pub async fn configure(canvas_id: &str, mode: Mode) -> bool {
         let mut body = String::from("{\"canvasId\":");
-        json_string(&mut body, canvas_id);
+        json_escape(&mut body, canvas_id);
         body.push_str(",\"mode\":\"");
         body.push_str(mode.as_str());
         body.push_str("\"}");
@@ -1069,7 +1673,7 @@ pub mod gpu {
             return None; // over the buffer cap; don't even ask the host
         }
         let mut body = String::from("{\"canvasId\":");
-        json_string(&mut body, canvas_id);
+        json_escape(&mut body, canvas_id);
         body.push_str(",\"kind\":\"");
         body.push_str(kind);
         body.push_str(&format!(
@@ -1096,9 +1700,9 @@ pub mod gpu {
     /// guest URL. `None` on any failure (fail-closed).
     pub async fn create_texture(canvas_id: &str, asset_id: &str) -> Option<Handle> {
         let mut body = String::from("{\"canvasId\":");
-        json_string(&mut body, canvas_id);
+        json_escape(&mut body, canvas_id);
         body.push_str(",\"kind\":\"texture\",\"assetId\":");
-        json_string(&mut body, asset_id);
+        json_escape(&mut body, asset_id);
         body.push('}');
         let (ok, bytes) = crate::host_call("host:gpu", "createResource", body.into_bytes()).await;
         if ok != 1 || !json_flag_true(&bytes, "ok") {
@@ -1114,8 +1718,15 @@ pub mod gpu {
     /// (unknown/unconfigured canvas, over-budget, device lost). The buffer is sent
     /// as-is; if it does not already end with a `SUBMIT` op the host appends one.
     pub async fn submit(canvas_id: &str, cmds: &CommandBuffer) -> Result<Vec<u8>, Vec<u8>> {
+        if !cmds.is_valid() {
+            // Fail loud guest-side: a non-finite op would have produced invalid
+            // JSON and the host would drop the whole submit with no reason.
+            return Err(Vec::from(
+                &b"{\"ok\":false,\"reason\":\"non-finite number in command buffer\"}"[..],
+            ));
+        }
         let mut body = String::from("{\"canvasId\":");
-        json_string(&mut body, canvas_id);
+        json_escape(&mut body, canvas_id);
         body.push_str(",\"ops\":[");
         body.push_str(&cmds.ops);
         body.push_str("]}");
@@ -1135,24 +1746,6 @@ pub mod gpu {
     /// subscription id for [`crate::events::off`].
     pub fn on_device_lost(handler: impl Fn(&[u8]) + 'static) -> u32 {
         crate::events::on("gpu.deviceLost", handler)
-    }
-
-    /// Minimal JSON string emitter (escapes control chars; the host caps/validates
-    /// the id anyway).
-    fn json_string(out: &mut String, raw: &str) {
-        out.push('"');
-        for ch in raw.chars() {
-            match ch {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-                c => out.push(c),
-            }
-        }
-        out.push('"');
     }
 
     /// Read an unsigned-integer JSON field (`"field":<digits>`). Tiny hand parser
@@ -1194,8 +1787,10 @@ pub mod gpu {
 }
 
 /// Declarative UI: build a small element tree and `render` it. The guest sends a
-/// render batch (CREATE / TEXT / APPEND ops) the host `receiver` materializes —
-/// the same rendering path JS guests use, only the batch is authored in Rust.
+/// render batch (CREATE / APPEND ops; text nodes are CREATE type "__TEXT__"
+/// with props.text, matching the JS reconciler) the host `receiver`
+/// materializes — the same rendering path JS guests use, only the batch is
+/// authored in Rust.
 pub mod ui {
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -1248,12 +1843,194 @@ pub mod ui {
     }
 }
 
-/// Materialize `root` on the host: walk the tree into an operation batch
-/// (`{version,batchId,operations:[…]}`, UTF-8 JSON) and hand it to the host's
-/// render channel. One-way; no host round-trip.
+// ---- WIP binary op-batch wire: runtime gate + emit fork ----
+//
+// Guest half of the op-batch binary route (`contracts/op-batch-wire.json`).
+// Two-level gate, mirroring the canvas binary wire: the `wip-binary-protocol`
+// cargo feature compiles the encoder in, and the HOST pushes the runtime half
+// via the optional `rill_wire_caps` export (bit0 = binary op-batch), called
+// between instantiation and `rill_init` so the flag is set before the first
+// render — `render()` is synchronous, so a canvas-style async `getInfo` probe
+// cannot work here. A host that never calls it (old host, gate off) leaves the
+// default `false` and the guest emits JSON: no flag-day in either direction.
+#[cfg(feature = "wip-binary-protocol")]
+mod op_batch_wire {
+    use crate::wire_encode::{Batch, Encoder, Op, Value};
+    use alloc::vec::Vec;
+
+    // Single-task guest, no threads — same unsafe-static pattern as the canvas
+    // handshake cache (`BINARY_SUPPORTED`).
+    static mut ENABLED: bool = false;
+    // Session-persistent encoder => stable cross-batch intern indices. An
+    // encoder that returned `Err` must be DISCARDED (its intern table may hold
+    // entries from the aborted batch), hence the Option: it is `take`n for the
+    // encode and only put back on success.
+    static mut ENCODER: Option<Encoder> = None;
+    // Monotonic batch id stamped into the binary header.
+    static mut BATCH_ID: u32 = 0;
+    // Latch: log the compiled-in-but-not-enabled diagnostic once, not per render.
+    static mut GATE_OFF_LOGGED: bool = false;
+
+    pub(crate) fn set_caps(flags: u32) {
+        unsafe { ENABLED = (flags & 0x1) != 0 };
+    }
+
+    pub(crate) fn enabled() -> bool {
+        unsafe { ENABLED }
+    }
+
+    /// The diagnostic that makes an unwired gate loud instead of silent: the
+    /// feature is compiled in but the host never pushed `rill_wire_caps`.
+    pub(crate) fn log_gate_off_once() {
+        unsafe {
+            if !GATE_OFF_LOGGED {
+                GATE_OFF_LOGGED = true;
+                crate::log(
+                    "[info] wip-binary-protocol compiled in but host did not enable binary op-batch (rill_wire_caps); using JSON",
+                );
+            }
+        }
+    }
+
+    fn next_batch_id() -> u32 {
+        unsafe {
+            BATCH_ID = BATCH_ID.wrapping_add(1);
+            BATCH_ID
+        }
+    }
+
+    /// Binary render emit. Returns `true` when the batch went out on the wire;
+    /// `false` means encode failed closed (warn logged, encoder discarded) and
+    /// the caller must fall through to JSON so the render is never dropped.
+    pub(crate) fn render_binary(root: &crate::ui::Node) -> bool {
+        let mut ops: Vec<Op<'_>> = Vec::new();
+        let mut next_id: u32 = 0;
+        let root_id = emit_node(root, &mut ops, &mut next_id);
+        // Attach the root to the receiver root (parentId 0).
+        ops.push(Op::Append {
+            id: 0,
+            parent_id: 0,
+            child_id: root_id,
+        });
+        let batch = Batch {
+            batch_id: next_batch_id(),
+            ops,
+        };
+
+        let mut encoder = unsafe { ENCODER.take() }.unwrap_or_default();
+        match encoder.encode_batch(&batch) {
+            Ok(bytes) => {
+                // Only a clean encoder goes back for reuse (stable interns).
+                unsafe { ENCODER = Some(encoder) };
+                unsafe { crate::rill_send_batch(bytes.as_ptr(), bytes.len()) };
+                true
+            }
+            Err(_) => {
+                crate::log(
+                    "[warn] op-batch binary encode failed; falling back to JSON for this batch",
+                );
+                false
+            }
+        }
+    }
+
+    /// The wire contract's NUMBER RULE (caller's responsibility): an integer in
+    /// i32 range is `Int32`, anything else finite is `Float64`.
+    fn num(v: u32) -> Value<'static> {
+        if v <= i32::MAX as u32 {
+            Value::Int32(v as i32)
+        } else {
+            Value::Float64(v as f64)
+        }
+    }
+
+    /// Typed twin of the JSON `emit_node` walk. MUST stay op-for-op identical
+    /// to it — same ids, same order, same prop shapes — so both routes
+    /// materialize the same tree on the host.
+    fn emit_node<'a>(node: &'a crate::ui::Node, ops: &mut Vec<Op<'a>>, next_id: &mut u32) -> u32 {
+        *next_id += 1;
+        let id = *next_id;
+        match node {
+            crate::ui::Node::View(children) => {
+                ops.push(Op::Create {
+                    id,
+                    ty: "View",
+                    props: Vec::new(),
+                });
+                for child in children {
+                    let child_id = emit_node(child, ops, next_id);
+                    ops.push(Op::Append {
+                        id: 0,
+                        parent_id: id,
+                        child_id,
+                    });
+                }
+            }
+            crate::ui::Node::Text(content) => {
+                ops.push(Op::Create {
+                    id,
+                    ty: "__TEXT__",
+                    props: alloc::vec![("text", Value::Str(content))],
+                });
+            }
+            crate::ui::Node::Canvas {
+                canvas_id,
+                width,
+                height,
+                mode,
+            } => {
+                ops.push(Op::Create {
+                    id,
+                    ty: "Canvas",
+                    props: alloc::vec![
+                        ("canvasId", Value::Str(canvas_id)),
+                        ("mode", Value::Str(mode)),
+                        (
+                            "style",
+                            Value::Object(alloc::vec![
+                                ("width", num(*width)),
+                                ("height", num(*height)),
+                            ])
+                        ),
+                    ],
+                });
+            }
+        }
+        id
+    }
+}
+
+/// Host→guest capability push for the WIP binary op-batch wire: bit0 of
+/// `flags` enables binary render batches. Optional in both directions — an old
+/// host never calls it (guest stays JSON), an old guest lacks the export (host
+/// skips the call). The host must call it BEFORE `rill_init` so the very first
+/// render already goes out on the negotiated wire.
+#[cfg(feature = "wip-binary-protocol")]
+#[no_mangle]
+pub extern "C" fn rill_wire_caps(flags: u32) {
+    op_batch_wire::set_caps(flags);
+}
+
+/// Materialize `root` on the host: walk the tree into an operation batch and
+/// hand it to the host's render channel (one-way; no host round-trip). Default
+/// wire is UTF-8 JSON (`{version,batchId,operations:[…]}`); with the
+/// `wip-binary-protocol` feature compiled in AND the host having enabled it
+/// via `rill_wire_caps`, the batch goes out on the binary op-batch wire
+/// instead (falling back to JSON if the encode fails closed).
 pub fn render(root: ui::Node) {
     use alloc::format;
     use alloc::string::String;
+
+    #[cfg(feature = "wip-binary-protocol")]
+    {
+        if op_batch_wire::enabled() {
+            if op_batch_wire::render_binary(&root) {
+                return;
+            }
+        } else {
+            op_batch_wire::log_gate_off_once();
+        }
+    }
 
     let mut ops = String::new();
     let mut next_id: u32 = 0;
@@ -1290,15 +2067,18 @@ fn emit_node(ops: &mut alloc::string::String, node: &ui::Node, next_id: &mut u32
             }
         }
         ui::Node::Text(content) => {
-            push_op(
-                ops,
-                format!("{{\"op\":\"CREATE\",\"id\":{id},\"type\":\"Text\",\"props\":{{}}}}"),
-            );
+            // Text nodes must be CREATE type "__TEXT__" with props.text — the
+            // only shape the host receiver's renderNode() routes through the
+            // Text-as-children branch, and what the JS reconciler emits
+            // (createTextInstance). A "Text"-typed node falls into the generic
+            // component branch and renders no children.
             let mut escaped = alloc::string::String::new();
             json_escape(&mut escaped, content);
             push_op(
                 ops,
-                format!("{{\"op\":\"TEXT\",\"id\":{id},\"text\":{escaped}}}"),
+                format!(
+                    "{{\"op\":\"CREATE\",\"id\":{id},\"type\":\"__TEXT__\",\"props\":{{\"text\":{escaped}}}}}"
+                ),
             );
         }
         ui::Node::Canvas {
@@ -1329,13 +2109,44 @@ fn push_op(ops: &mut alloc::string::String, op: alloc::string::String) {
     ops.push_str(&op);
 }
 
-fn json_escape(out: &mut alloc::string::String, raw: &str) {
+/// Escape `raw` into `out` as a double-quoted JSON string literal.
+///
+/// The ONE JSON string emitter for every wire path in this SDK (store / canvas /
+/// asset / gpu request bodies and the render batch). Escapes `"` and `\`, plus
+/// ALL control characters below 0x20 — `\n` / `\r` / `\t` as short escapes, the
+/// rest as `\u00XX`. Multi-byte UTF-8 passes through unchanged.
+///
+/// A missed control character is not cosmetic: the host `JSON.parse`s the whole
+/// batch/body, and one raw newline inside a string makes the ENTIRE message
+/// invalid — silently dropped host-side. So this must stay strict, and every
+/// module must use this function rather than growing a local copy.
+/// Format a codec [`store_net_encode::Reason`] as a compact `{"error":"<token>"}`
+/// JSON body, so a byte wrapper can surface a fail-closed cap breach through its
+/// `Err(Vec<u8>)` channel using the schema's stable reason vocabulary.
+pub(crate) fn codec_error(reason: store_net_encode::Reason) -> alloc::vec::Vec<u8> {
+    let mut s = alloc::string::String::from("{\"error\":");
+    json_escape(&mut s, reason.as_str());
+    s.push('}');
+    s.into_bytes()
+}
+
+pub(crate) fn json_escape(out: &mut alloc::string::String, raw: &str) {
     out.push('"');
     for ch in raw.chars() {
         match ch {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
-            _ => out.push(ch),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                let v = c as u32;
+                out.push_str("\\u00");
+                out.push(HEX[(v >> 4) as usize & 0xf] as char);
+                out.push(HEX[v as usize & 0xf] as char);
+            }
+            c => out.push(c),
         }
     }
     out.push('"');
@@ -1386,6 +2197,7 @@ pub mod events {
         payload_ptr: *const u8,
         payload_len: usize,
     ) {
+        crate::rt::begin_wire_turn();
         let name =
             core::str::from_utf8(core::slice::from_raw_parts(name_ptr, name_len)).unwrap_or("");
         let payload = core::slice::from_raw_parts(payload_ptr, payload_len);
@@ -1399,8 +2211,24 @@ pub mod events {
         for handler in &matched {
             handler(payload);
         }
+        // The payload is fully consumed here (handlers get a &[u8] that must
+        // not escape the call), so an OVERSIZED (> WIRE_SIZE) buffer that took
+        // the talc fallback in `alloc` has no other owner — free it now, same
+        // as `resolve` does for returns. Without this every oversized event
+        // payload leaked, so repeated large events grew wasm memory linearly.
+        // Arena buffers and foreign pointers are untouched (table-matched).
+        crate::rt::free_fallback_source(name_ptr);
+        crate::rt::free_fallback_source(payload_ptr);
+        crate::rt::end_wire_turn();
     }
 }
+
+/// RBS1 binary-value ENVELOPE codec (`contracts/store-net-bytes.json`) — the R2
+/// first-class-bytes wire. ADDITIVE INFRA: compiled into the shipped guest
+/// (unlike the `wip-binary-protocol` encoders), but it changes NO existing
+/// call's default path — a segment-free value stays byte-for-byte identical to
+/// today's raw JSON. See the module docs for the framing + value-walking layers.
+pub mod store_net_encode;
 
 /// Generate the ABI exports (`rill_init` / `rill_alloc` / `rill_resolve`), the
 /// global allocator, and a panic handler in the guest cdylib. `$main` is an
@@ -1408,21 +2236,34 @@ pub mod events {
 #[macro_export]
 macro_rules! rill_guest_main {
     ($main:path) => {
+        // talc, memory.grow-backed and growable: the guest heap grows to fit the
+        // working set then plateaus, reusing freed memory (see the SDK crate root).
         #[global_allocator]
-        static __RILL_GUEST_ALLOC: $crate::BumpAlloc = $crate::BumpAlloc::new();
+        static __RILL_GUEST_ALLOC: $crate::WasmDynamicTalc = $crate::new_wasm_dynamic_allocator();
 
         #[panic_handler]
-        fn __rill_guest_panic(_: &core::panic::PanicInfo) -> ! {
-            // Trap, don't spin: a panicking / aborting guest (incl. allocation
-            // failure) surfaces to the host as a catchable WASM error instead of
-            // an infinite loop that would hang the host's main thread. (A guest
-            // that spins on its own is a separate concern — see the Worker path.)
+        fn __rill_guest_panic(info: &core::panic::PanicInfo) -> ! {
+            // First report the panic location/message through env.rill_log (a
+            // fixed stack buffer — no allocation, since the panic may BE an
+            // allocation failure). Without this a native guest dies with zero
+            // diagnostics.
+            $crate::rt::panic_log(info);
+            // Then trap, don't spin: a panicking / aborting guest (incl.
+            // allocation failure) surfaces to the host as a catchable WASM error
+            // instead of an infinite loop that would hang the host's main
+            // thread. (A guest that spins on its own is a separate concern —
+            // see the Worker path.)
             core::arch::wasm32::unreachable()
         }
 
         #[no_mangle]
         pub extern "C" fn rill_init() {
             $crate::rt::init($main());
+        }
+
+        #[no_mangle]
+        pub extern "C" fn rill_abi_version() -> u32 {
+            $crate::RILL_ABI_VERSION
         }
 
         #[no_mangle]
@@ -1451,4 +2292,609 @@ macro_rules! rill_guest_main {
             unsafe { $crate::events::dispatch(name_ptr, name_len, payload_ptr, payload_len) };
         }
     };
+}
+
+// ---- unit tests (run on the HOST target: `cargo test -p rill-guest`) ----
+//
+// The crate is `no_std`, but libtest brings std, so pure-logic tests (JSON
+// escaping, gpu budget accounting) run natively. The wasm host imports get
+// stub definitions below so the test binary links without a wasm host; the
+// `rill_host_call` stub RECORDS each call so the conformance tests can assert
+// the exact wire bytes against `contracts/graphics-seams.json`.
+#[cfg(test)]
+extern crate std;
+
+/// Guest-side encoder for the binary op-batch wire protocol
+/// (`contracts/op-batch-wire.json`). WORK IN PROGRESS, gated behind the
+/// `wip-binary-protocol` feature (default OFF); wired into `render()` via the
+/// `op_batch_wire` runtime gate — taken only when the host enabled it through
+/// the optional `rill_wire_caps` export, so the default shipped guest is
+/// unchanged (JSON).
+#[cfg(feature = "wip-binary-protocol")]
+pub mod wire_encode;
+
+/// Guest-side encoder for the binary CANVAS wire protocol
+/// (`contracts/canvas-wire.json`) — a per-frame flat 2D display list, sister to
+/// `wire_encode` (distinct magic `RCNV`). WORK IN PROGRESS, gated behind the
+/// `wip-binary-protocol` feature (default OFF); wired into `canvas::draw` via
+/// the `host:canvas.getInfo` capability handshake — a host that does not
+/// advertise `binaryDraw` still receives the legacy JSON op-list.
+#[cfg(feature = "wip-binary-protocol")]
+pub mod canvas_encode;
+
+/// Shared minimal JSON parser (also `include!`d by build.rs) — test-only here,
+/// for reading the contract back in `conformance`.
+#[cfg(test)]
+mod mini_json;
+
+/// Conformance tests locking this SDK's wire shapes + budgets to
+/// `contracts/graphics-seams.json`.
+#[cfg(test)]
+mod conformance;
+
+/// Tests for the RBS1 byte-value SDK wrappers (`store::put_bytes`/`get_bytes`,
+/// `net::fetch_bytes`) — request/response wiretaps against the recording shim.
+#[cfg(test)]
+#[path = "store_net_wrappers_tests.rs"]
+mod store_net_wrappers_tests;
+
+// A net-live-bytes counting global allocator, wired ONLY for the test build
+// (the real guest's allocator is talc, installed by `rill_guest_main!`). It
+// wraps the system allocator and tracks the live heap so the return-path
+// no-leak test can assert that many oversized host->guest returns free their
+// talc-fallback source buffers (the leak the fix closes) rather than accumulate.
+#[cfg(test)]
+mod test_alloc {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::alloc::{GlobalAlloc, Layout, System};
+
+    /// Net live bytes handed out by the global allocator (alloc − dealloc).
+    pub(crate) static LIVE: AtomicUsize = AtomicUsize::new(0);
+
+    pub(crate) struct Counting;
+
+    // SAFETY: pure pass-through to `System`; only bookkeeping is added.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let p = System.alloc(layout);
+            if !p.is_null() {
+                LIVE.fetch_add(layout.size(), Ordering::Relaxed);
+            }
+            p
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            System.dealloc(ptr, layout);
+            LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            let p = System.alloc_zeroed(layout);
+            if !p.is_null() {
+                LIVE.fetch_add(layout.size(), Ordering::Relaxed);
+            }
+            p
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let p = System.realloc(ptr, layout, new_size);
+            if !p.is_null() {
+                // realloc keeps the allocation live; adjust by the size delta.
+                LIVE.fetch_add(new_size, Ordering::Relaxed);
+                LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+            }
+            p
+        }
+    }
+}
+
+#[cfg(test)]
+#[global_allocator]
+static COUNTING_ALLOC: test_alloc::Counting = test_alloc::Counting;
+
+/// Serialize every test that touches the SDK's runtime statics (`rt::RESULTS` /
+/// `rt::NEXT_CB` / `rt::WIRE_OFF` / `rt::TURN_DEPTH` / `events::HANDLERS`). Those
+/// assume the single-threaded wasm world, but libtest runs tests on threads, so
+/// concurrent `resolve`/`alloc` from two tests would corrupt the shared `Vec`
+/// statics. One crate-wide lock (used by `conformance`, the wire-arena test and
+/// the return-path no-leak test) makes them mutually exclusive.
+#[cfg(test)]
+pub(crate) fn wire_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+mod test_shims {
+    use std::string::String;
+    use std::sync::Mutex;
+    use std::vec::Vec;
+
+    /// One recorded `rill_host_call`: (module, method, body, cb_id).
+    pub(crate) type RecordedCall = (String, String, Vec<u8>, u32);
+
+    /// Every `rill_host_call` issued by a test. Tests that poll host-call
+    /// futures serialize on `conformance::wire_lock` (the SDK's rt statics
+    /// assume a single thread), then drain this.
+    pub(crate) static CALLS: Mutex<Vec<RecordedCall>> = Mutex::new(Vec::new());
+
+    #[no_mangle]
+    extern "C" fn rill_host_call(
+        mod_ptr: *const u8,
+        mod_len: usize,
+        method_ptr: *const u8,
+        method_len: usize,
+        in_ptr: *const u8,
+        in_len: usize,
+        cb_id: u32,
+    ) {
+        // Safety: the SDK always passes valid &str / &[u8] views it owns.
+        let (module, method, input) = unsafe {
+            (
+                String::from_utf8_lossy(core::slice::from_raw_parts(mod_ptr, mod_len)).into_owned(),
+                String::from_utf8_lossy(core::slice::from_raw_parts(method_ptr, method_len))
+                    .into_owned(),
+                core::slice::from_raw_parts(in_ptr, in_len).to_vec(),
+            )
+        };
+        CALLS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((module, method, input, cb_id));
+    }
+    #[no_mangle]
+    extern "C" fn rill_send_batch(_batch_ptr: *const u8, _batch_len: usize) {}
+    #[no_mangle]
+    extern "C" fn rill_log(_msg_ptr: *const u8, _msg_len: usize) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::String;
+
+    fn esc(raw: &str) -> String {
+        let mut out = String::new();
+        super::json_escape(&mut out, raw);
+        out
+    }
+
+    #[test]
+    fn json_escape_plain_passthrough() {
+        assert_eq!(esc("hello"), "\"hello\"");
+        assert_eq!(esc(""), "\"\"");
+    }
+
+    #[test]
+    fn json_escape_quotes_and_backslash() {
+        assert_eq!(esc(r#"a"b\c"#), r#""a\"b\\c""#);
+    }
+
+    #[test]
+    fn json_escape_common_controls_short_form() {
+        assert_eq!(esc("a\nb\rc\td"), r#""a\nb\rc\td""#);
+    }
+
+    #[test]
+    fn json_escape_other_controls_as_u00xx() {
+        assert_eq!(
+            esc("\u{0}\u{1}\u{b}\u{1f}"),
+            "\"\\u0000\\u0001\\u000b\\u001f\""
+        );
+    }
+
+    #[test]
+    fn json_escape_multibyte_utf8_passthrough() {
+        // CJK + emoji + latin-1: multi-byte sequences must pass through intact.
+        let raw = "\u{4e2d}\u{6587} \u{1f389} \u{fc}";
+        let mut expected = String::from("\"");
+        expected.push_str(raw);
+        expected.push('"');
+        assert_eq!(esc(raw), expected);
+    }
+
+    #[test]
+    fn json_escape_no_control_char_survives_raw() {
+        for c in (0u32..0x20).filter_map(char::from_u32) {
+            let mut s = String::new();
+            s.push(c);
+            let escaped = esc(&s);
+            assert!(
+                !escaped[1..escaped.len() - 1].contains(c),
+                "control char {:#x} leaked through unescaped",
+                c as u32
+            );
+        }
+    }
+
+    mod non_finite_guard {
+        use crate::{canvas, gpu};
+
+        #[test]
+        fn draw_list_latches_on_nan_and_skips_the_op() {
+            let mut list = canvas::DrawList::new();
+            list.fill_rect(0.0, 0.0, 10.0, 10.0);
+            assert!(list.is_valid());
+            assert_eq!(list.len(), 1);
+            list.line_to(f64::NAN, 1.0);
+            assert!(!list.is_valid());
+            assert_eq!(list.len(), 1, "non-finite op must not be queued");
+            // Latch is sticky: later valid ops don't un-latch.
+            list.fill_rect(1.0, 1.0, 2.0, 2.0);
+            assert!(!list.is_valid());
+        }
+
+        #[test]
+        fn draw_list_latches_on_infinity() {
+            let mut list = canvas::DrawList::new();
+            list.set_transform(1.0, 0.0, 0.0, f64::INFINITY, 0.0, 0.0);
+            assert!(!list.is_valid());
+            assert!(list.is_empty());
+        }
+
+        #[test]
+        fn command_buffer_latches_on_non_finite() {
+            let mut cb = gpu::CommandBuffer::new();
+            cb.begin_pass(0.0, 0.0, 0.0, 1.0);
+            assert!(cb.is_valid());
+            cb.set_viewport(0.0, 0.0, f32::NAN, 100.0);
+            assert!(!cb.is_valid());
+            assert_eq!(cb.cost().cmds, 1, "non-finite op must not be queued");
+        }
+    }
+
+    mod gpu_budget {
+        use crate::gpu;
+
+        #[test]
+        fn small_buffer_is_within_budget() {
+            let mut cb = gpu::CommandBuffer::new();
+            cb.begin_pass(0.0, 0.0, 0.0, 1.0)
+                .draw(3)
+                .end_pass()
+                .finish();
+            assert!(cb.within_budget());
+            assert_eq!(cb.cost().draw_calls, 1);
+            assert_eq!(cb.cost().primitives, 1);
+        }
+
+        #[test]
+        fn oversized_elements_in_one_draw_violate() {
+            let mut cb = gpu::CommandBuffer::new();
+            // Totals stay under MAX_PRIMITIVES; only the per-draw cap trips.
+            cb.draw(gpu::MAX_ELEMENTS_PER_DRAW + 1);
+            assert!(!cb.within_budget());
+        }
+
+        #[test]
+        fn oversized_instances_in_one_draw_violate() {
+            let mut cb = gpu::CommandBuffer::new();
+            // Totals stay under MAX_INSTANCES_TOTAL; only the per-draw cap trips.
+            cb.draw_instanced(3, gpu::MAX_INSTANCES_PER_DRAW + 1);
+            assert!(!cb.within_budget());
+        }
+
+        #[test]
+        fn per_draw_violation_latches() {
+            let mut cb = gpu::CommandBuffer::new();
+            cb.draw(gpu::MAX_ELEMENTS_PER_DRAW + 1);
+            cb.draw(3); // a later fine draw must not clear the violation
+            assert!(!cb.within_budget());
+        }
+
+        #[test]
+        fn at_cap_draw_is_still_within_budget() {
+            let mut cb = gpu::CommandBuffer::new();
+            cb.draw_instanced(3, gpu::MAX_INSTANCES_PER_DRAW);
+            assert!(cb.within_budget());
+        }
+
+        #[test]
+        fn too_many_draw_calls_exceed_budget() {
+            let mut cb = gpu::CommandBuffer::new();
+            for _ in 0..=gpu::MAX_DRAW_CALLS {
+                cb.draw(3);
+            }
+            assert!(!cb.within_budget());
+        }
+
+        #[test]
+        fn instance_totals_accumulate_across_draws() {
+            let mut cb = gpu::CommandBuffer::new();
+            let per_draw = gpu::MAX_INSTANCES_PER_DRAW as u64; // within per-draw cap
+            let draws = gpu::MAX_INSTANCES_TOTAL / per_draw + 1;
+            for _ in 0..draws {
+                cb.draw_instanced(3, per_draw as u32);
+            }
+            assert!(cb.cost().instances > gpu::MAX_INSTANCES_TOTAL);
+            assert!(!cb.within_budget());
+        }
+
+        #[test]
+        fn fill_rate_pixels_use_viewport_area_times_primitives() {
+            let mut cb = gpu::CommandBuffer::new();
+            cb.set_viewport(0.0, 0.0, 100.0, 100.0);
+            cb.draw_instanced(6, 2); // 2 tris x 2 instances = 4 primitives
+            assert_eq!(cb.cost().pixels, 100 * 100 * 4);
+        }
+    }
+
+    // These tests exercise the two leak-mitigation mechanisms. `wire_arena_*`
+    // reads/writes SHARED statics (WIRE / WIRE_OFF / TURN_DEPTH via rt::*); cargo
+    // test runs #[test]s on separate threads, so every assertion for that static
+    // group is kept inside a SINGLE #[test] function — splitting them would race.
+    // `talc_reuses_freed_memory_under_churn` drives a talc allocator over its OWN
+    // local arena (not the shared WIRE statics), so the two functions touch
+    // disjoint memory and don't race each other; no other test touches either.
+    mod leak_mitigation {
+        use crate::rt;
+
+        #[test]
+        fn wire_arena_recycles_per_turn() {
+            // Shares WIRE_OFF/TURN_DEPTH with every other rt-touching test.
+            let _guard = crate::wire_lock();
+            let (lo, hi) = rt::wire_range();
+
+            // Same turn: consecutive allocs bump upward, all inside the arena.
+            let a = rt::alloc(16) as usize;
+            let b = rt::alloc(16) as usize;
+            assert!(b > a, "consecutive wire allocs must increase");
+            assert!(a >= lo && b < hi, "wire allocs must land in the arena");
+
+            // A closed turn (depth 1 -> 0) recycles the arena to its start.
+            rt::begin_wire_turn();
+            rt::end_wire_turn();
+            let c = rt::alloc(16) as usize;
+            assert_eq!(c, lo, "a closed turn must recycle the arena to its start");
+
+            // Nested turns: the INNER end must NOT recycle (an outer turn may
+            // still be reading its payload); only the OUTERMOST end recycles.
+            rt::begin_wire_turn(); // depth 1
+            let d = rt::alloc(16) as usize;
+            rt::begin_wire_turn(); // depth 2
+            rt::end_wire_turn(); // depth 1 — no recycle
+            let e = rt::alloc(16) as usize;
+            assert!(e > d, "inner turn end must not rewind the arena");
+            rt::end_wire_turn(); // depth 0 — recycle
+            let f = rt::alloc(16) as usize;
+            assert_eq!(f, lo, "outermost turn end must recycle the arena");
+
+            // An oversized request falls back to the global heap (talc), OUTSIDE
+            // the arena range.
+            let big = rt::alloc(rt::WIRE_SIZE + 1) as usize;
+            assert!(
+                big < lo || big >= hi,
+                "oversized alloc must fall back off-arena"
+            );
+        }
+
+        // Supersedes the retired `bump_dealloc_rolls_back_lifo_top`. That test
+        // pinned BumpAlloc's exact LIFO-top offset rollback — a MECHANISM detail
+        // of an allocator that no longer exists, never a host-observable contract
+        // (the host only ever sees valid buffers through the ABI). talc replaces
+        // that only-grows bump with a real free list, so the invariant that
+        // actually matters now — the guest heap is BOUNDED under alloc/free churn,
+        // reclaiming freed blocks regardless of order — is what this asserts. It
+        // drives talc directly (the same allocator wired as the guest
+        // #[global_allocator]) over a small fixed arena on the host target.
+        #[test]
+        fn talc_reuses_freed_memory_under_churn() {
+            use alloc::vec::Vec;
+            use core::alloc::{GlobalAlloc, Layout};
+            use talc::{source::Claim, TalcCell};
+
+            // Deliberately small: far less than the total bytes churned below, so
+            // the test only passes if freed memory is actually reused (a leaking
+            // allocator would exhaust the arena long before the loop ends).
+            const ARENA_SIZE: usize = 64 * 1024;
+            static mut ARENA: [u8; ARENA_SIZE] = [0; ARENA_SIZE];
+            // SAFETY: ARENA is touched only here, only on this single test thread,
+            // and handed exclusively to this talc instance for its lifetime.
+            let talc = TalcCell::new(unsafe { Claim::array(&raw mut ARENA) });
+
+            let layout = Layout::from_size_align(256, 16).unwrap();
+            unsafe {
+                // Churn far more than the arena holds; each iteration frees before
+                // the next allocates, so a bounded allocator serves every request.
+                for _ in 0..2000 {
+                    let p = talc.alloc(layout);
+                    assert!(!p.is_null(), "talc must reuse freed memory, not exhaust");
+                    p.write_bytes(0xAB, layout.size()); // touch: catch a bogus ptr
+                    talc.dealloc(p, layout);
+                }
+
+                // Non-LIFO (FIFO) reclamation: hold several blocks live, then free
+                // the OLDEST first — the interleaved-lifetime case the old bump
+                // allocator LEAKED. A real free list makes the room available again.
+                let mut live = Vec::new();
+                for _ in 0..8 {
+                    let p = talc.alloc(layout);
+                    assert!(!p.is_null());
+                    live.push(p);
+                }
+                for p in live.drain(..) {
+                    talc.dealloc(p, layout); // oldest-first
+                }
+                // Everything freed: a full round of allocations succeeds again.
+                for _ in 0..8 {
+                    let p = talc.alloc(layout);
+                    assert!(!p.is_null(), "FIFO-freed blocks must be reclaimable");
+                    talc.dealloc(p, layout);
+                }
+            }
+        }
+
+        // RETURN-PATH no-leak proof (the fix in `rt::resolve`). A host->guest
+        // return larger than the 64 KiB WIRE arena is written into a talc-fallback
+        // buffer by `rill_alloc`; before the fix that buffer had no matching
+        // dealloc, so every large binary RESPONSE leaked. This drives that exact
+        // path many times — allocate an oversized buffer (off-arena), hand it to
+        // `resolve` (which copies it out then frees the fallback), then drain the
+        // copy. Two independent checks then hold: the fallback tracking table
+        // returns to baseline (bookkeeping), AND the reused fallback addresses stay
+        // clustered rather than marching forward by BIG per iteration (proving the
+        // bytes are actually reclaimed, not merely un-tracked). Both are chosen to
+        // be immune to the shared-heap noise a parallel `cargo test` run injects —
+        // hence NO dependence on the process-global `test_alloc::LIVE` counter,
+        // whose multi-MiB concurrent jitter made an earlier threshold flaky.
+        #[test]
+        fn return_path_frees_oversized_fallback_no_leak() {
+            use crate::rt;
+
+            // Serialize with every other rt-static-touching test (RESULTS/WIRE_OFF).
+            let _guard = crate::wire_lock();
+
+            // Comfortably larger than WIRE_SIZE so every request takes the
+            // off-arena talc fallback (the only path that could leak).
+            const BIG: usize = rt::WIRE_SIZE + 4096;
+            const ITERS: usize = 64; // 64 × ~68 KiB ≈ 4.3 MiB churned per pass
+            const CB: u32 = 0xB17E_5EED;
+
+            // The fallback table is a process-global static, so a prior test may
+            // have left dangling entries. We hold `wire_lock`, so no other
+            // rt-touching test runs concurrently — the table's NET change across
+            // this loop must therefore be zero (every fallback we make is freed by
+            // `resolve`). Prior leftovers are present at both snapshots.
+            let fb_baseline = rt::fallback_count();
+            let mut addrs = [0usize; ITERS];
+            for slot in addrs.iter_mut() {
+                let p = rt::alloc(BIG);
+                assert!(!p.is_null(), "fallback alloc must succeed");
+                // Precondition of the fix: the buffer is OUTSIDE the WIRE arena,
+                // so `resolve` is allowed to free it.
+                assert!(
+                    !rt::wire_contains(p),
+                    "an oversized alloc must fall back off-arena"
+                );
+                *slot = p as usize;
+                // The host wrote BIG bytes here (uninitialized-but-owned memory is
+                // fine to copy); `resolve` copies it out and frees the fallback.
+                unsafe { rt::resolve(CB, 1, p, BIG) };
+                // Drain the copy `resolve` stashed so RESULTS stays empty and the
+                // only thing that could grow the heap is a leaked SOURCE buffer.
+                let taken = rt::take_result(CB);
+                assert!(taken.is_some(), "the copied result must be retrievable");
+                drop(taken);
+            }
+
+            // Check 1 — bookkeeping: the fallback table returned to its baseline,
+            // so every off-arena buffer THIS test made was un-tracked by `resolve`
+            // (a leak would leave up to ITERS entries). Taken as a delta so a prior
+            // test's leftover entries don't matter, and — key for a parallel run —
+            // immune to concurrent global-heap noise.
+            assert_eq!(
+                rt::fallback_count(),
+                fb_baseline,
+                "every oversized fallback must be un-tracked (table back to baseline)"
+            );
+
+            // Check 2 — actual RECLAMATION, not just bookkeeping: because each
+            // buffer is freed before the next same-size request, talc hands the
+            // freed block straight back, so the addresses CLUSTER. A regression
+            // that drops the `dealloc` but keeps the table `remove` would march the
+            // address forward by ~BIG every iteration — a span of ITERS*BIG (~4.3
+            // MiB). The generous 8*BIG ceiling separates reclamation (span ~0, plus
+            // at most a little jitter if a concurrent alloc briefly borrows the
+            // freed slot) from a real leak, without measuring the shared LIVE
+            // counter (which concurrent tests make too noisy to threshold).
+            let min = addrs.iter().copied().min().unwrap();
+            let max = addrs.iter().copied().max().unwrap();
+            assert!(
+                max - min < 8 * BIG,
+                "return path leaked: fallback addresses spanned {} bytes over {ITERS} freed \
+                 returns (reclamation would keep them clustered)",
+                max - min
+            );
+        }
+
+        // The other half of the FALLBACK_ALLOCS contract: an oversized fallback
+        // with NO matching resolve (e.g. an oversized event payload the guest
+        // never returns) must not grow the tracking table without bound. When the
+        // table is full a new alloc evicts the oldest record (`remove(0)`), so the
+        // count plateaus at MAX_FALLBACK_TRACKED — the evicted buffers simply leak,
+        // bounded, rather than the table itself growing unbounded.
+        #[test]
+        fn fallback_table_eviction_bounds_unresolved_leaks() {
+            use crate::rt;
+
+            let _guard = crate::wire_lock();
+
+            const BIG: usize = rt::WIRE_SIZE + 4096;
+
+            // Clean baseline so the assertion is absolute — we hold `wire_lock`, so
+            // no other rt-touching test races the shared static.
+            rt::clear_fallback();
+
+            // Allocate more oversized fallbacks than the table can hold, NEVER
+            // resolving them. Without the eviction branch the table would reach
+            // MAX + 10; with it, it plateaus at MAX.
+            for _ in 0..(rt::MAX_FALLBACK_TRACKED + 10) {
+                let p = rt::alloc(BIG);
+                assert!(!p.is_null(), "fallback alloc must succeed");
+                assert!(
+                    !rt::wire_contains(p),
+                    "an oversized alloc must fall back off-arena"
+                );
+            }
+            assert_eq!(
+                rt::fallback_count(),
+                rt::MAX_FALLBACK_TRACKED,
+                "eviction must cap the tracking table at MAX_FALLBACK_TRACKED"
+            );
+
+            // Tidy up: a left-full table would perturb other rt tests' fallback
+            // deltas (they hold the same lock, so ordering is otherwise serialized).
+            rt::clear_fallback();
+        }
+
+        /// events::dispatch must free an OVERSIZED (off-arena talc fallback)
+        /// event payload after the handlers consumed it — the event twin of
+        /// `return_path_frees_oversized_fallback_no_leak`. Before the fix every
+        /// oversized event payload leaked, so repeated large events grew wasm
+        /// memory linearly.
+        #[test]
+        fn event_dispatch_frees_oversized_fallback_no_leak() {
+            use crate::rt;
+
+            // Serialize with every other rt-static-touching test.
+            let _guard = crate::wire_lock();
+
+            const BIG: usize = rt::WIRE_SIZE + 4096;
+            let fb_baseline = rt::fallback_count();
+
+            // The handler proves the payload survives intact up to dispatch.
+            let seen = std::rc::Rc::new(core::cell::Cell::new(0usize));
+            let seen_in_handler = seen.clone();
+            let handler_id = crate::events::on("bigload", move |payload| {
+                seen_in_handler.set(payload.len());
+            });
+
+            for _ in 0..8 {
+                // The host writes name + payload via rill_alloc before calling
+                // rill_on_event; the payload is oversized so it takes the
+                // off-arena fallback (the only path that could leak).
+                let name = b"bigload";
+                let name_ptr = rt::alloc(name.len());
+                assert!(!name_ptr.is_null(), "name alloc must succeed");
+                unsafe {
+                    core::ptr::copy_nonoverlapping(name.as_ptr(), name_ptr, name.len());
+                }
+                let payload_ptr = rt::alloc(BIG);
+                assert!(!payload_ptr.is_null(), "payload alloc must succeed");
+                assert!(
+                    !rt::wire_contains(payload_ptr),
+                    "an oversized event payload must fall back off-arena"
+                );
+                unsafe {
+                    core::ptr::write_bytes(payload_ptr, 0xAB, BIG);
+                    crate::events::dispatch(name_ptr, name.len(), payload_ptr, BIG);
+                }
+                assert_eq!(seen.get(), BIG, "handler must see the full payload");
+            }
+
+            assert_eq!(
+                rt::fallback_count(),
+                fb_baseline,
+                "every oversized event payload must be freed after dispatch"
+            );
+
+            crate::events::off(handler_id);
+        }
+    }
 }

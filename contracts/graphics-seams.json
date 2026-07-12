@@ -1,0 +1,169 @@
+{
+  "$comment": "SINGLE SOURCE OF TRUTH for the graphics seam wire contracts (host:canvas / host:gpu / host:asset). The Rust guest SDK (crates/rill-guest) generates its budget constants from this file (build.rs) and locks its wire shapes to it via conformance tests (crates/rill-guest/src/conformance.rs). Downstream host validators (e.g. a platform's host-canvas.ts / host-gpu.ts OP_SPECS and budget tables) MUST read or mirror THIS file — never hand-copy from the Rust source. Field names are the exact JSON keys on the wire; op names are the exact 'op' values. Budgets are the per-call/per-submit caps the HOST enforces (the guest SDK self-limits with the same numbers, but the host stays authoritative and fails closed).",
+  "version": 1,
+  "seams": {
+    "host:canvas": {
+      "description": "Host-mediated 2D drawing surface. Two paths onto the same sealed <Canvas>: 'draw' replays a validated Canvas2D display list; 'present' blits an RGBA8 framebuffer read (bounds-checked) from the guest's own linear memory. Styles are CSS color STRINGS only (no gradient/pattern objects, hence no image/URL reference) and there is deliberately NO readback op.",
+      "methods": {
+        "draw": {
+          "request": { "canvasId": "string", "ops": "array" },
+          "response": { "ok": "boolean", "dropped": "number" },
+          "description": "Replay the display list in 'ops' (each entry an op object from this seam's 'ops' table) onto the <Canvas> keyed by canvasId. Unknown/invalid ops are dropped host-side and counted in 'dropped'."
+        },
+        "present": {
+          "request": {
+            "canvasId": "string",
+            "ptr": "number",
+            "width": "number",
+            "height": "number",
+            "format": "string"
+          },
+          "response": { "ok": "boolean", "dropped": "number" },
+          "description": "Blit width*height*4 bytes of straight-alpha row-major RGBA8 (stride = width*4) read from guest linear memory at 'ptr' (bounds-checked host-side). The response resolves only AFTER the host finished reading, so the ack is the guest's backpressure signal. The host additionally byte-budgets present per canvas; over-budget presents fail closed."
+        }
+      },
+      "presentFormats": ["rgba8"],
+      "events": {
+        "canvas.frame": {
+          "payload": { "canvasId": "string", "t": "number", "dt": "number", "frame": "number" },
+          "description": "Host rAF tick delivered to the guest (drives per-frame draw/present loops)."
+        }
+      },
+      "ops": {
+        "$comment": "Canvas2D display-list op whitelist. 'op' carries the name (camelCase ctx method); the remaining keys are the exact wire fields. All numeric fields must be finite (NaN/Infinity are not legal JSON; the guest SDK drops such ops and fails the whole list loud).",
+        "beginPath": {},
+        "closePath": {},
+        "moveTo": { "x": "number", "y": "number" },
+        "lineTo": { "x": "number", "y": "number" },
+        "rect": { "x": "number", "y": "number", "w": "number", "h": "number" },
+        "arc": {
+          "x": "number",
+          "y": "number",
+          "r": "number",
+          "start": "number",
+          "end": "number",
+          "ccw": "boolean"
+        },
+        "fill": {},
+        "stroke": {},
+        "fillRect": { "x": "number", "y": "number", "w": "number", "h": "number" },
+        "strokeRect": { "x": "number", "y": "number", "w": "number", "h": "number" },
+        "clearRect": { "x": "number", "y": "number", "w": "number", "h": "number" },
+        "setFillStyle": { "color": "string" },
+        "setStrokeStyle": { "color": "string" },
+        "setLineWidth": { "w": "number" },
+        "fillText": { "x": "number", "y": "number", "text": "string" },
+        "save": {},
+        "restore": {},
+        "translate": { "x": "number", "y": "number" },
+        "scale": { "x": "number", "y": "number" },
+        "rotate": { "angle": "number" },
+        "setTransform": {
+          "a": "number",
+          "b": "number",
+          "c": "number",
+          "d": "number",
+          "e": "number",
+          "f": "number"
+        }
+      }
+    },
+    "host:gpu": {
+      "description": "Host-mediated GPU surface (stage ③-a: validated command buffer + host-preset pipelines). The guest never touches a real WebGPU/WebGL2 context; it uploads resources for opaque integer handles and submits op lists from the opcode whitelist below. There is deliberately NO COMPILE_SHADER and NO readback of any kind — the seal's isolation is the ABSENCE of those ops. The host validates every op plus the per-submit cost budget and drops an over-budget submit with a reason (shared-hardware TDR containment).",
+      "methods": {
+        "configure": {
+          "request": { "canvasId": "string", "mode": "string" },
+          "response": { "ok": "boolean" },
+          "description": "Bind a <Canvas> to a gpu mode. Fails closed (ok:false) if the canvas is unknown or already bound to a conflicting context family (2d / present / the other gpu backend)."
+        },
+        "createResource": {
+          "requestVariants": {
+            "vertex": { "canvasId": "string", "kind": "string", "ptr": "number", "len": "number" },
+            "index": {
+              "canvasId": "string",
+              "kind": "string",
+              "ptr": "number",
+              "len": "number",
+              "format": "string"
+            },
+            "texture": { "canvasId": "string", "kind": "string", "assetId": "string" }
+          },
+          "response": { "ok": "boolean", "handle": "number" },
+          "description": "Upload a resource, returning an opaque host-table handle. Buffers are slice-copied (bounds-checked, capped by budget.maxBufferBytes) from guest linear memory at ptr/len. Textures come ONLY from an app-package assetId (the host:asset resolver discipline) — never a guest URL."
+        },
+        "submit": {
+          "request": { "canvasId": "string", "ops": "array" },
+          "response": { "ok": "boolean", "dropped": "number", "reason": "string" },
+          "description": "Validate + replay a command buffer against the host-preset pipelines bound to canvasId. 'reason' only accompanies ok:false (unknown/unconfigured canvas, over-budget, device lost). If the op list does not end with SUBMIT the host appends one."
+        }
+      },
+      "modes": ["webgpu", "webgl2"],
+      "indexFormats": ["uint16", "uint32"],
+      "resourceKinds": ["vertex", "index", "texture"],
+      "presets": {
+        "$comment": "Host-preset pipeline ids for SET_PIPELINE. The guest cannot author shaders in ③-a; adding a preset is a HOST change (audited), never a guest capability.",
+        "SOLID_2D": {
+          "id": 0,
+          "description": "Flat-colored triangles from an interleaved [x, y, r, g, b, a] (f32) vertex buffer. No texture, no guest shader."
+        },
+        "TEXTURED_2D": {
+          "id": 1,
+          "description": "Textured quad: samples a host-preset texture bind group whose texture came from an assetId (host:asset). Vertex buffer is [x, y, u, v]."
+        }
+      },
+      "ops": {
+        "$comment": "GPU command-buffer opcode whitelist. 'op' carries the UPPER_SNAKE name; the remaining keys are the exact wire fields. All numeric fields must be finite.",
+        "BEGIN_PASS": { "r": "number", "g": "number", "b": "number", "a": "number" },
+        "END_PASS": {},
+        "SET_PIPELINE": { "pipeline": "number" },
+        "SET_BINDGROUP": { "slot": "number", "group": "number" },
+        "SET_VERTEX": { "slot": "number", "buffer": "number" },
+        "SET_INDEX": { "buffer": "number", "format": "string" },
+        "SET_VIEWPORT": { "x": "number", "y": "number", "w": "number", "h": "number" },
+        "DRAW": { "count": "number", "first": "number" },
+        "DRAW_INDEXED": { "count": "number", "first": "number" },
+        "DRAW_INSTANCED": { "count": "number", "instances": "number", "firstInstance": "number" },
+        "SUBMIT": {}
+      },
+      "budget": {
+        "$comment": "Per-submit cost budget (except maxBufferBytes, which caps one createResource buffer upload). The host recomputes and enforces these; the guest SDK mirrors them so a cooperative guest self-limits before wasting a submit.",
+        "maxCmds": 4096,
+        "maxDrawCalls": 256,
+        "maxPrimitives": 4000000,
+        "maxInstancesPerDraw": 4096,
+        "maxInstancesTotal": 262144,
+        "maxElementsPerDraw": 4000000,
+        "maxPixels": 134217728,
+        "maxBufferBytes": 67108864
+      },
+      "costFormula": {
+        "$comment": "How a submit's running cost is accounted, op by op. 'primitives' and 'instances' and 'pixels' accumulate over the whole submit; maxElementsPerDraw / maxInstancesPerDraw are per-DRAW* caps checked against each draw's own count/instances. Non-instanced draws count as instances=1. viewportArea is the current SET_VIEWPORT w*h in device px (the host falls back to the real canvas dimensions when unset).",
+        "verticesPerPrimitive": 3,
+        "primitives": "floor(count / verticesPerPrimitive) * instances",
+        "instances": "instances",
+        "pixels": "viewportArea * floor(count / verticesPerPrimitive) * instances"
+      },
+      "events": {
+        "gpu.deviceLost": {
+          "payload": { "canvasId": "string", "reason": "string" },
+          "description": "The GPU device/context was lost (driver TDR or context loss, possibly caused by another app on the shared GPU). A robust guest re-configures and re-uploads its resources."
+        }
+      }
+    },
+    "host:asset": {
+      "description": "Resolve an app-package assetId to decoded RGBA in the guest's OWN linear memory (the ④ pixera path). The host owns resolution + decode: assetId is looked up in the app manifest, gated (same-origin package raster only — never a guest URL, never svg), and the decode is dimension-capped BEFORE the full raster (anti-bomb). The guest never fetches or decodes anything.",
+      "methods": {
+        "info": {
+          "request": { "assetId": "string" },
+          "response": { "width": "number", "height": "number" },
+          "description": "Decoded dimensions of the asset, or a failed call for an unknown/invalid/undecodable id (fail-closed)."
+        },
+        "blit": {
+          "request": { "assetId": "string", "dstPtr": "number", "dstCap": "number" },
+          "response": { "ok": "boolean", "written": "number" },
+          "description": "The host writes the asset's straight-alpha RGBA8 into guest memory at dstPtr (bounds-checked; refused if dstCap < width*height*4). 'written' is the byte count actually written."
+        }
+      }
+    }
+  }
+}

@@ -49,6 +49,7 @@ interface QuickJSWASMModule {
   _qjs_inject_json: (namePtr: number, valuePtr: number) => number;
   _qjs_extract_json: (namePtr: number) => number;
   _qjs_set_host_callback: (fnPtr: number) => void;
+  _qjs_set_host_binary_callback: (fnPtr: number) => void;
   _qjs_install_host_functions: () => void;
   _qjs_set_timer_callback: (fnPtr: number) => void;
   _qjs_install_timer_functions: () => void;
@@ -144,6 +145,185 @@ const ENSURE_CB_REGISTRY = `
   if (typeof R.removeCallback !== 'function') { R.removeCallback = function(id){ R.callbacks.delete(id); }; }
   if (!R.__timerCb) { R.__timerCb = {}; }`;
 
+// ---- $b64 binary sidecar for the JSON string bridge (store-net-bytes.DESIGN §B.5) ----
+//
+// The QuickJS shell is a SYNCHRONOUS JSON STRING BRIDGE, not postMessage: guest args are
+// JSON.stringify'd by __sendToHost (wasm_bindings.c js_send_to_host) and host results are
+// JSON.stringify'd here (resolveHostCall). A Uint8Array crossing that bridge would degrade
+// into a `{"0":.., "1":..}` index object (~4-6x bloat) and arrive at the peer as a plain
+// object, NOT a Uint8Array — losing parity with the wasm RBS1 path.
+//
+// Fix, additive: at the shell boundary each Uint8Array is replaced by the reserved sentinel
+// {"$b64":"<base64>"} (~1.33x) before JSON.stringify and revived to a real Uint8Array on the
+// other side, so the host handler and the guest both see identical Uint8Array semantics as
+// the wasm path. Non-binary values are returned by identity (same reference), so their
+// JSON.stringify output is byte-for-byte unchanged.
+const B64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+const B64_LOOKUP: Record<string, number> = (() => {
+  const m: Record<string, number> = {};
+  for (let i = 0; i < B64_ALPHABET.length; i++) m[B64_ALPHABET.charAt(i)] = i;
+  return m;
+})();
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let out = '';
+  const len = bytes.length;
+  for (let i = 0; i < len; i += 3) {
+    const b0 = bytes[i] as number;
+    const has1 = i + 1 < len;
+    const has2 = i + 2 < len;
+    const b1 = has1 ? (bytes[i + 1] as number) : 0;
+    const b2 = has2 ? (bytes[i + 2] as number) : 0;
+    out += B64_ALPHABET.charAt(b0 >> 2);
+    out += B64_ALPHABET.charAt(((b0 & 3) << 4) | (b1 >> 4));
+    out += has1 ? B64_ALPHABET.charAt(((b1 & 15) << 2) | (b2 >> 6)) : '=';
+    out += has2 ? B64_ALPHABET.charAt(b2 & 63) : '=';
+  }
+  return out;
+}
+
+function base64ToBytes(str: string): Uint8Array {
+  const len = str.length;
+  if (len === 0) return new Uint8Array(0);
+  let pad = 0;
+  if (str.charAt(len - 1) === '=') pad++;
+  if (str.charAt(len - 2) === '=') pad++;
+  const outLen = (len >> 2) * 3 - pad;
+  const out = new Uint8Array(outLen);
+  let o = 0;
+  for (let i = 0; i < len; i += 4) {
+    const c0 = B64_LOOKUP[str.charAt(i)] ?? 0;
+    const c1 = B64_LOOKUP[str.charAt(i + 1)] ?? 0;
+    const c2 = B64_LOOKUP[str.charAt(i + 2)] ?? 0;
+    const c3 = B64_LOOKUP[str.charAt(i + 3)] ?? 0;
+    const n = (c0 << 18) | (c1 << 12) | (c2 << 6) | c3;
+    if (o < outLen) out[o++] = (n >> 16) & 0xff;
+    if (o < outLen) out[o++] = (n >> 8) & 0xff;
+    if (o < outLen) out[o++] = n & 0xff;
+  }
+  return out;
+}
+
+/**
+ * Replace every Uint8Array in `value` with a {"$b64":"…"} sentinel, in place-preserving
+ * fashion: containers are only re-allocated when a descendant actually changes, so a value
+ * with no binary is returned by identity and its JSON.stringify output is unchanged.
+ */
+function encodeBinaryValue(value: ReviewedUnknown): ReviewedUnknown {
+  if (value instanceof Uint8Array) {
+    return { $b64: bytesToBase64(value) };
+  }
+  if (Array.isArray(value)) {
+    let copy: ReviewedUnknown[] | null = null;
+    for (let i = 0; i < value.length; i++) {
+      const enc = encodeBinaryValue(value[i]);
+      if (enc !== value[i]) {
+        if (!copy) copy = value.slice();
+        copy[i] = enc;
+      }
+    }
+    return copy ?? value;
+  }
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, ReviewedUnknown>;
+    const keys = Object.keys(obj);
+    let copy: Record<string, ReviewedUnknown> | null = null;
+    for (const k of keys) {
+      const enc = encodeBinaryValue(obj[k]);
+      if (enc !== obj[k]) {
+        if (!copy) {
+          copy = {};
+          for (const kk of keys) copy[kk] = obj[kk];
+        }
+        copy[k] = enc;
+      }
+    }
+    return copy ?? value;
+  }
+  return value;
+}
+
+/**
+ * Revive every {"$b64":"…"} sentinel (an object whose SOLE key is the reserved `$b64`,
+ * mapped to a string) back to a real Uint8Array. Mutates the freshly-parsed tree in place.
+ */
+function reviveBinaryValue(value: ReviewedUnknown): ReviewedUnknown {
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) value[i] = reviveBinaryValue(value[i]);
+    return value;
+  }
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, ReviewedUnknown>;
+    const keys = Object.keys(obj);
+    if (keys.length === 1 && keys[0] === '$b64' && typeof obj.$b64 === 'string') {
+      return base64ToBytes(obj.$b64);
+    }
+    for (const k of keys) obj[k] = reviveBinaryValue(obj[k]);
+    return obj;
+  }
+  return value;
+}
+
+// Guest-side twin of the codec above, injected once into the QuickJS realm. Uint8Array
+// exists in the guest, but btoa/atob/Buffer do not, so base64 is done by hand. Exposed on
+// __rill as __b64enc (guest→host arg marshaling) and __b64rev (host→guest result/event
+// revival); the walkers preserve identity so non-binary payloads stringify unchanged.
+const GUEST_B64_CODEC = `
+  var B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  var B64L = {}; for (var _i = 0; _i < B64.length; _i++) { B64L[B64[_i]] = _i; }
+  function b64enc(u8) {
+    var s = '', L = u8.length;
+    for (var i = 0; i < L; i += 3) {
+      var b0 = u8[i], h1 = i + 1 < L, h2 = i + 2 < L;
+      var b1 = h1 ? u8[i + 1] : 0, b2 = h2 ? u8[i + 2] : 0;
+      s += B64[b0 >> 2];
+      s += B64[((b0 & 3) << 4) | (b1 >> 4)];
+      s += h1 ? B64[((b1 & 15) << 2) | (b2 >> 6)] : '=';
+      s += h2 ? B64[b2 & 63] : '=';
+    }
+    return s;
+  }
+  function b64dec(str) {
+    var L = str.length; if (L === 0) return new Uint8Array(0);
+    var pad = 0; if (str[L - 1] === '=') pad++; if (str[L - 2] === '=') pad++;
+    var outLen = (L >> 2) * 3 - pad, out = new Uint8Array(outLen), o = 0;
+    for (var i = 0; i < L; i += 4) {
+      var c0 = B64L[str[i]] || 0, c1 = B64L[str[i + 1]] || 0, c2 = B64L[str[i + 2]] || 0, c3 = B64L[str[i + 3]] || 0;
+      var n = (c0 << 18) | (c1 << 12) | (c2 << 6) | c3;
+      if (o < outLen) out[o++] = (n >> 16) & 255;
+      if (o < outLen) out[o++] = (n >> 8) & 255;
+      if (o < outLen) out[o++] = n & 255;
+    }
+    return out;
+  }
+  R.__b64enc = function enc(v) {
+    if (v instanceof Uint8Array) { return { $b64: b64enc(v) }; }
+    if (Array.isArray(v)) {
+      var a = null;
+      for (var i = 0; i < v.length; i++) { var e = enc(v[i]); if (e !== v[i]) { if (!a) a = v.slice(); a[i] = e; } }
+      return a || v;
+    }
+    if (v && typeof v === 'object') {
+      var o = null, keys = Object.keys(v);
+      for (var j = 0; j < keys.length; j++) {
+        var k = keys[j], e2 = enc(v[k]);
+        if (e2 !== v[k]) { if (!o) { o = {}; for (var m = 0; m < keys.length; m++) o[keys[m]] = v[keys[m]]; } o[k] = e2; }
+      }
+      return o || v;
+    }
+    return v;
+  };
+  R.__b64rev = function rev(v) {
+    if (Array.isArray(v)) { for (var i = 0; i < v.length; i++) v[i] = rev(v[i]); return v; }
+    if (v && typeof v === 'object') {
+      var keys = Object.keys(v);
+      if (keys.length === 1 && keys[0] === '$b64' && typeof v.$b64 === 'string') { return b64dec(v.$b64); }
+      for (var j = 0; j < keys.length; j++) v[keys[j]] = rev(v[keys[j]]);
+      return v;
+    }
+    return v;
+  };`;
+
 /**
  * Build the guest-side shim for a by-name host function (issue #8 + #10).
  *
@@ -218,8 +398,19 @@ function buildHostFnShim(name: string): string {
   }
 
   // Generic: marker any function arguments so they survive the JSON bridge.
+  // A single ArrayBuffer/view argument takes the dedicated binary channel —
+  // the JSON bridge stringifies an ArrayBuffer to '{}', destroying the bytes
+  // (the binary op-batch failure mode). typeof-gated so an old wasm binary
+  // without __sendBinaryToHost degrades to the JSON path, where the Bridge's
+  // shape validation now fails loudly instead of silently.
   return `globalThis[${nameKey}] = function() {
     var a = Array.prototype.slice.call(arguments);
+    if (a.length === 1 && (a[0] instanceof ArrayBuffer || ArrayBuffer.isView(a[0])) &&
+        typeof __sendBinaryToHost === 'function') {
+      globalThis.__rill_fn_ret = null;
+      __sendBinaryToHost(${eventKey}, a[0]);
+      return globalThis.__rill_fn_ret;
+    }
     var hasFn = false;
     for (var i = 0; i < a.length; i++) { if (typeof a[i] === 'function') { hasFn = true; break; } }
     if (hasFn) {${ENSURE_CB_REGISTRY}
@@ -272,6 +463,7 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
         }
 
         let hostCallbackPtr = 0;
+        let hostBinaryCallbackPtr = 0;
 
         // host:* module bridge handler. Assigned once the eval helpers below are
         // defined; the guest reaches it by posting `__rill_host_*` events through
@@ -283,6 +475,9 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
         // (render: __rill_sendBatch; events: __rill_emitEvent; config: __rill_getConfig;
         // etc.) is registered here and reached via __sendToHost -> onHostFnCall.
         let onHostFnCall: ((name: string, data: string) => void) | null = null;
+        // Binary twin of onHostFnCall: receives the raw byte window a guest
+        // handed to __sendBinaryToHost (already copied out of wasm memory).
+        let onHostBinaryFnCall: ((name: string, bytes: Uint8Array) => void) | null = null;
         // Reason: injected host hooks accept/return arbitrary serializable values.
         const injectedHostFns = new Map<string, (...args: ReviewedUnknown[]) => ReviewedUnknown>();
 
@@ -317,6 +512,22 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
 
         hostCallbackPtr = module.addFunction(hostCallback, 'vii');
         module._qjs_set_host_callback(hostCallbackPtr);
+
+        // Binary channel (__sendBinaryToHost): the guest hands over a
+        // (ptr,len) window into wasm linear memory; slice() copies the bytes
+        // out BEFORE returning (the window is only valid during this call).
+        const hostBinaryCallback = (eventPtr: number, dataPtr: number, len: number) => {
+          const event = module.UTF8ToString(eventPtr);
+          if (this.options.debug) {
+            console.log(`[QuickJSWASM] Host binary callback: ${event} (${len} bytes)`);
+          }
+          if (event.indexOf('__rill_fn:') === 0) {
+            onHostBinaryFnCall?.(event.slice(10), module.HEAPU8.slice(dataPtr, dataPtr + len));
+          }
+        };
+        hostBinaryCallbackPtr = module.addFunction(hostBinaryCallback, 'viii');
+        module._qjs_set_host_binary_callback(hostBinaryCallbackPtr);
+
         module._qjs_install_host_functions();
         module._qjs_install_console();
 
@@ -393,6 +604,22 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
           return a;
         };
 
+        onHostBinaryFnCall = (name: string, bytes: Uint8Array): void => {
+          const fn = injectedHostFns.get(name);
+          if (!fn) return;
+          try {
+            // bytes is an exact-size copy, so .buffer IS the payload: the
+            // injected host fn (e.g. engine sendToHost) sees a real host-realm
+            // ArrayBuffer and its instanceof branch finally matches. One-way:
+            // the guest shim pre-set __rill_fn_ret = null and returns that.
+            fn(bytes.buffer);
+          } catch (err) {
+            if (this.options.debug) {
+              console.error(`[QuickJSWASM] injected host fn "${name}" threw on binary arg:`, err);
+            }
+          }
+        };
+
         onHostFnCall = (name: string, data: string): void => {
           const fn = injectedHostFns.get(name);
           let args: ReviewedUnknown[] = [];
@@ -430,7 +657,9 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
           if (value === undefined) {
             evalVoid(`globalThis.__rill.__resolveHostCall(${id},false)`);
           } else {
-            injectJson('__rill_host_result', JSON.stringify(value));
+            // Encode any Uint8Array in the result as a {"$b64":…} sentinel before it
+            // crosses the JSON bridge; the guest __resolveHostCall revives it (DESIGN §B.5).
+            injectJson('__rill_host_result', JSON.stringify(encodeBinaryValue(value)));
             evalVoid(
               `globalThis.__rill.__resolveHostCall(${id},true,globalThis.__rill_host_result);delete globalThis.__rill_host_result`
             );
@@ -447,7 +676,10 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
         };
 
         const deliverSubscriptionEvent = (subId: string, event: ReviewedUnknown): void => {
-          injectJson('__rill_host_event', JSON.stringify(event === undefined ? null : event));
+          injectJson(
+            '__rill_host_event',
+            JSON.stringify(encodeBinaryValue(event === undefined ? null : event))
+          );
           evalVoid(
             `globalThis.__rill.__deliverHostEvent(${JSON.stringify(subId)},globalThis.__rill_host_event);delete globalThis.__rill_host_event`
           );
@@ -486,8 +718,12 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
               );
               return;
             }
+            // Revive {"$b64":…} sentinels in the guest-sent args back to real
+            // Uint8Array BEFORE the boundary fn (parseInput + impl) runs, so the host
+            // handler sees the same Uint8Array the wasm path delivers (DESIGN §B.5).
+            const revivedArgs = reviveBinaryValue(m.args);
             const chain = Promise.resolve()
-              .then(() => fn(m.args))
+              .then(() => fn(revivedArgs))
               .then((result) => resolveHostCall(id, result))
               .catch((err: ReviewedUnknown) =>
                 rejectHostCall(id, err instanceof Error ? err.message : String(err))
@@ -611,24 +847,24 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
                 var R = globalThis.__rill;
                 if (!R.__hostCalls) {
                   R.__hostCalls = {}; R.__hostCallSeq = 0;
-                  R.__hostSubs = {}; R.__hostSubSeq = 0;
+                  R.__hostSubs = {}; R.__hostSubSeq = 0;${GUEST_B64_CODEC}
                   R.__resolveHostCall = function(id, hasValue, value) {
                     var c = R.__hostCalls[id]; if (!c) return; delete R.__hostCalls[id];
-                    c.resolve(hasValue ? value : undefined);
+                    c.resolve(hasValue ? R.__b64rev(value) : undefined);
                   };
                   R.__rejectHostCall = function(id, message) {
                     var c = R.__hostCalls[id]; if (!c) return; delete R.__hostCalls[id];
                     c.reject(new Error(message));
                   };
                   R.__deliverHostEvent = function(subId, event) {
-                    var h = R.__hostSubs[subId]; if (typeof h === 'function') h(event);
+                    var h = R.__hostSubs[subId]; if (typeof h === 'function') h(R.__b64rev(event));
                   };
                   R.__invokeHostRpc = function(moduleId, exportName, arg) {
                     var id = ++R.__hostCallSeq;
                     var p = new Promise(function(resolve, reject) {
                       R.__hostCalls[id] = { resolve: resolve, reject: reject };
                     });
-                    __sendToHost('__rill_host_invoke', { id: id, moduleId: moduleId, exportName: exportName, args: arg === undefined ? null : arg });
+                    __sendToHost('__rill_host_invoke', { id: id, moduleId: moduleId, exportName: exportName, args: R.__b64enc(arg === undefined ? null : arg) });
                     return p;
                   };
                   R.__invokeHostSubscription = function(moduleId, exportName, handler) {
@@ -695,6 +931,9 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
             // Remove function pointers
             if (hostCallbackPtr) {
               module.removeFunction(hostCallbackPtr);
+            }
+            if (hostBinaryCallbackPtr) {
+              module.removeFunction(hostBinaryCallbackPtr);
             }
 
             // Destroy QuickJS context

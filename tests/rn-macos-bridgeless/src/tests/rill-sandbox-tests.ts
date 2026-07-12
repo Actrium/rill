@@ -128,6 +128,61 @@ export function registerRillSandboxTests(
     },
   });
 
+  registerTest({
+    id: 'sandbox/self-referential-value',
+    name: 'Safety: self-referential extract does not crash the host',
+    tags: ['sandbox', 'safety'],
+    run() {
+      const mod = getModule(target);
+      const runtime = mod.createRuntime({ timeout: 5000 });
+      const ctx = runtime.createContext();
+      // Cross-runtime conversion is guarded per engine (depth cap and/or
+      // ancestor-path cycle detection). Engines differ in the sentinel they
+      // substitute — and may legitimately throw — so the invariant asserted
+      // here is: the host process survives and the context stays usable.
+      try {
+        const v = ctx.eval('var a = {}; a.self = a; a');
+        nativeLog(`[rill-e2e][cycle] eval returned, typeof=${typeof v}`);
+      } catch (e) {
+        nativeLog(`[rill-e2e][cycle] eval threw (acceptable): ${String(e)}`);
+      }
+      expect(ctx.eval('1 + 1')).toBe(2);
+      ctx.dispose();
+      runtime.dispose();
+    },
+  });
+
+  // JSC has no public interrupt API (see docs/reference/sandbox-comparison.md)
+  // — a runaway loop there would hang the suite, so the timeout test only
+  // runs on engines that enforce the budget.
+  if (target === 'hermes' || target === 'quickjs') {
+    registerTest({
+      id: 'sandbox/timeout-interrupt',
+      name: 'Safety: eval timeout aborts a runaway loop',
+      tags: ['sandbox', 'safety'],
+      run() {
+        const mod = getModule(target);
+        const runtime = mod.createRuntime({ timeout: 300 });
+        const ctx = runtime.createContext();
+        let threw = false;
+        const start = Date.now();
+        try {
+          ctx.eval('while (true) {}');
+        } catch (e) {
+          threw = true;
+          nativeLog(
+            `[rill-e2e][timeout] threw after ${Date.now() - start}ms: ${String(e)}`
+          );
+        }
+        expect(threw).toBe(true);
+        // The aborted eval must not poison the context.
+        expect(ctx.eval('1 + 1')).toBe(2);
+        ctx.dispose();
+        runtime.dispose();
+      },
+    });
+  }
+
   // ============================================
   // Callback bidirectional tests (host ↔ guest)
   // ============================================
@@ -1360,6 +1415,49 @@ export function registerRillSandboxTests(
       expect(result).toBe('function');
       expect(hostCallCount).toBe(1);
       expect(lastEvent).toBe('TEST_EVENT');
+
+      ctx.dispose();
+      runtime.dispose();
+    },
+  });
+
+  registerTest({
+    id: 'sandbox/binary-host-to-sandbox',
+    name: 'Sandbox: host capability returning ArrayBuffer/Uint8Array reaches guest as real bytes',
+    tags: ['sandbox', 'binary', 'critical'],
+    run() {
+      const mod = getModule(target);
+      const runtime = mod.createRuntime({ timeout: 5000 });
+      const ctx = runtime.createContext();
+
+      // The host->sandbox binary passthrough. Before the fix, the reverse
+      // converters (jsiToQJS / jsiToJSValue / hostToSandboxImpl) fell through to
+      // the generic object copy, so a host capability returning binary reached
+      // the guest as an empty {} — bytes silently destroyed. Assertions run
+      // INSIDE the sandbox (eval returns a bool) so they exercise the real
+      // host-return -> sandbox-value path for whichever engine `target` is.
+      ctx.inject('getBytesAb', () => {
+        const ab = new ArrayBuffer(3);
+        const w = new Uint8Array(ab);
+        w[0] = 1;
+        w[1] = 2;
+        w[2] = 3;
+        return ab;
+      });
+      ctx.inject('getView', () => new Uint8Array([5, 6, 7, 8]).subarray(1, 3));
+
+      const abOk = ctx.eval(
+        'var v = getBytesAb();' +
+          '(v instanceof ArrayBuffer) && v.byteLength === 3 && ' +
+          'new Uint8Array(v)[0] === 1 && new Uint8Array(v)[2] === 3'
+      );
+      expect(abOk).toBe(true);
+
+      const viewOk = ctx.eval(
+        'var v = getView();' +
+          '(v instanceof Uint8Array) && v.length === 2 && v[0] === 6 && v[1] === 7'
+      );
+      expect(viewOk).toBe(true);
 
       ctx.dispose();
       runtime.dispose();

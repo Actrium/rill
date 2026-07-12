@@ -77,8 +77,7 @@ async fn guest_main() {
     // <canvas> that present() targets. One-shot descriptive-UI batch (here the whole
     // UI is the canvas; a real app nests it under View/Text chrome). Note the local
     // `render` fn below is the SOFTWARE renderer — the UI batch is rill_guest::render.
-    let mut kids = alloc::vec::Vec::new();
-    kids.push(rill_guest::ui::canvas(CANVAS_ID, W, H));
+    let kids = alloc::vec![rill_guest::ui::canvas(CANVAS_ID, W, H)];
     rill_guest::render(rill_guest::ui::view(kids));
 
     // Allocate the framebuffer ONCE and reuse it every frame (BumpAlloc only

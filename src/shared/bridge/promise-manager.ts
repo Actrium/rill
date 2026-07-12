@@ -162,15 +162,17 @@ export class PromiseManager {
 
   /**
    * Clear all pending promises (for cleanup/destroy)
-   * Uses silent rejection to avoid unhandled promise rejection errors during shutdown.
+   * Note: pending promises are RESOLVED with `undefined`, not rejected — awaiting
+   * callers observe a successful `undefined` result rather than an error.
    */
   clear(): void {
     for (const [, pending] of this.pendingPromises) {
       if (pending.timerId) {
         clearTimeout(pending.timerId);
       }
-      // Silent rejection: resolve with undefined to avoid unhandled rejection errors
-      // This is appropriate during destroy/cleanup when results are no longer needed
+      // Resolve with undefined (NOT reject): during destroy/cleanup the results are
+      // no longer needed, and rejecting here would surface unhandled promise
+      // rejection errors in every caller that never installed a catch handler.
       pending.resolve(undefined);
     }
     this.pendingPromises.clear();

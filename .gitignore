@@ -10,6 +10,7 @@ dist/
 native/quickjs/build/
 native/quickjs/build-wasm/
 native/jsc/build/
+native/core/test/build_fuzz/
 
 # Android build artifacts
 android/.gradle/

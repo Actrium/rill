@@ -19,8 +19,13 @@ export interface EngineOptions {
    *   boundary (escapable) — use only for tests, SSR, and trusted first-party guests.
    *   For untrusted code pick an isolated backend (`wasm-quickjs`/`quickjs`/`jsc`/`tenant-manager`).
    * - `jsc`: Uses JavaScriptCore via JSI (Apple platforms only).
+   * - `hermes`: Uses Hermes via JSI (React Native runtimes with the Hermes sandbox binding).
    * - `quickjs`: Uses QuickJS via JSI (cross-platform native).
    * - `wasm-quickjs`: Uses QuickJS via WASM (cross-platform, web-compatible).
+   * - `tenant-manager`: Uses the native `__RillTenantManager` multi-tenant runtime
+   *   (requires the Rill native module; Apple platforms).
+   * Explicit selection never falls back silently: if the requested backend is
+   * unavailable in the current environment, construction throws.
    * If not set, the best available provider for the environment is chosen automatically.
    */
   sandbox?: 'node-vm' | 'jsc' | 'hermes' | 'quickjs' | 'wasm-quickjs' | 'tenant-manager';
@@ -33,7 +38,19 @@ export interface EngineOptions {
   tenant?: TenantConfig;
 
   /**
-   * Execution timeout (milliseconds)
+   * Execution timeout (milliseconds).
+   *
+   * What this enforces depends on the backend — it is NOT a uniform hard CPU limit:
+   * - Async providers (e.g. the off-main-thread worker path): hard limit for
+   *   bundle execution — on expiry the engine emits `fatalError` and
+   *   force-destroys the sandbox; the `rill/host/web` WorkerEngine additionally
+   *   runs a `terminate()`-based watchdog that kills a runaway worker.
+   * - `node-vm`: passed to `vm.Script.runInContext({ timeout })`, which
+   *   hard-interrupts each synchronous eval of guest code; callbacks and timers
+   *   dispatched after eval run outside that window.
+   * - Native JSI backends (`jsc` / `hermes` / `quickjs`) and `wasm-quickjs`:
+   *   no execution interruption today — guest code that never yields is not
+   *   stopped by this option.
    * @default 5000
    */
   timeout?: number;
