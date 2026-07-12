@@ -1950,6 +1950,17 @@ ${assignments.join('\n')}
   }
 
   /**
+   * Route every engine-owned guest-callback entry (timer callbacks) through
+   * `runner`. The worker debug harness installs its TurnGate here so a guest
+   * turn suspended at a breakpoint is never re-entered by a setTimeout /
+   * setInterval callback the engine fires from its own event loop. Pass null
+   * to restore direct invocation (the release path).
+   */
+  setGuestTurnRunner(runner: ((run: () => void) => void) | null): void {
+    this.timerManager.setCallbackRunner(runner);
+  }
+
+  /**
    * Pause the engine - freeze timers and queue incoming events
    * Timer clocks are frozen (not just callbacks blocked)
    */

@@ -13,11 +13,15 @@
  * ============================================================================
  * The routing invariant (web counterpart of native cross-unwind evaluate-on-frame)
  * ============================================================================
- * All guest-eval ENTRY (load / event / invoke) is funnelled through a single
- * {@link TurnGate} while the debugger is enabled, so a turn is never re-entered on
- * top of a stack that is suspended at a breakpoint (with the QuickJS-asyncify debug
- * build a breakpoint unwinds and parks the C stack; a second eval on top of it is
- * undefined behaviour).
+ * All guest-eval ENTRY is funnelled through a single {@link TurnGate} while the
+ * debugger is enabled, so a turn is never re-entered on top of a stack that is
+ * suspended at a breakpoint (with the QuickJS-asyncify debug build a breakpoint
+ * unwinds and parks the C stack; a second eval on top of it is undefined
+ * behaviour). That means BOTH kinds of entry:
+ *   - inbound worker messages (load / event / invoke), gated in handle(); and
+ *   - engine-owned timer callbacks (setTimeout/setInterval fire from the worker
+ *     event loop, not via postMessage), routed through the same gate via
+ *     {@link GuestEngineLike.setGuestTurnRunner} at init.
  *
  * `dbg.evaluateOnCallFrame` and `dbg.getProperties`, however, are NOT new eval turns —
  * they are control-plane sub-operations OF the already-suspended turn (inspect a frame,
@@ -53,6 +57,14 @@ export interface GuestEngineLike {
   pause(): void;
   resume(): void;
   destroy(): void;
+  /**
+   * Optional (the real {@link Engine} has it): route engine-owned guest entry —
+   * timer callbacks the engine fires from its own event loop — through `runner`.
+   * WorkerDispatch installs its TurnGate here at init, closing the re-entry
+   * hole the gate's doc calls out: gating only inbound worker messages would
+   * miss timer-driven guest turns entirely.
+   */
+  setGuestTurnRunner?(runner: ((run: () => void) => void) | null): void;
 }
 
 /** Hooks handed to {@link WorkerDispatchDeps.createEngine} at init time. */
@@ -193,6 +205,11 @@ export class WorkerDispatch {
       );
       engine.on('error', (e) => this.#post({ type: 'engineError', error: this.#err(e) }));
       engine.on('fatalError', (e) => this.#post({ type: 'fatal', error: this.#err(e) }));
+      // Timer callbacks are guest-eval ENTRY too, fired by the engine's own
+      // event loop rather than via a worker message — route them through the
+      // same gate as load/event/invoke so they queue behind a breakpoint
+      // suspend instead of re-entering the suspended runtime.
+      engine.setGuestTurnRunner?.((run) => this.#runGuestTurn(run));
       this.#engine = engine;
       this.#post({ type: 'ready' });
     } catch (e) {

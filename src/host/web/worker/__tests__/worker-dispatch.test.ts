@@ -14,6 +14,7 @@
  */
 
 import { describe, expect, it } from 'bun:test';
+import { TimerManager } from '../../../engine/timer-manager';
 import type { MainToWorkerMessage, WorkerToMainMessage } from '../protocol';
 import { type GuestEngineLike, isControlPlaneDbg, WorkerDispatch } from '../worker-dispatch';
 
@@ -202,5 +203,141 @@ describe('WorkerDispatch — control-plane dbg ops bypass the guest-eval gate', 
     h.send({ type: 'event', turnId: 11, eventName: 'direct', payload: null });
     expect(h.engine.events.map((e) => e.name)).toEqual(['parked', 'direct']);
     expect(h.dispatch.pendingTurns).toBe(0);
+  });
+});
+
+describe('WorkerDispatch — engine timer callbacks take the same gate (real TimerManager)', () => {
+  /**
+   * A MockEngine that owns a REAL {@link TimerManager} wired exactly like the real
+   * Engine: guest setTimeout/setInterval go through the manager's polyfills, and
+   * setGuestTurnRunner hands the manager's callback runner to WorkerDispatch.
+   * This drives the actual integration seam — real TimerManager, real TurnGate,
+   * real WorkerDispatch — with only the wasm eval stubbed out.
+   */
+  class TimerEngine extends MockEngine {
+    timers = new TimerManager({
+      debug: false,
+      logger: { log: () => {}, error: () => {} },
+      engineId: 'timer-test',
+    });
+    #setTimeout = this.timers.createSetTimeoutPolyfill();
+    #setInterval = this.timers.createSetIntervalPolyfill();
+    #clearInterval = this.timers.createClearIntervalPolyfill();
+    fired: string[] = [];
+
+    setGuestTurnRunner(runner: ((run: () => void) => void) | null): void {
+      this.timers.setCallbackRunner(runner);
+    }
+    /** Guest code scheduling a zero-delay timeout (microtask fast path). */
+    guestSetTimeout(tag: string, delay = 0): void {
+      this.#setTimeout(() => {
+        this.fired.push(tag);
+      }, delay);
+    }
+    /** Guest code scheduling an interval; returns a disposer. */
+    guestSetInterval(tag: string, delay: number): () => void {
+      const id = this.#setInterval(() => {
+        this.fired.push(tag);
+      }, delay);
+      return () => this.#clearInterval(id);
+    }
+  }
+
+  function timerSetup(): Harness & { timerEngine: TimerEngine } {
+    const posted: WorkerToMainMessage[] = [];
+    const engine = new TimerEngine();
+    const dispatch = new WorkerDispatch({
+      post: (m) => posted.push(m),
+      createEngine: () => engine as unknown as GuestEngineLike,
+    });
+    const send = (m: MainToWorkerMessage) => dispatch.handle(m);
+    const last = <T extends WorkerToMainMessage['type']>(type: T) => {
+      for (let i = posted.length - 1; i >= 0; i--) {
+        if (posted[i].type === type) return posted[i] as Extract<WorkerToMainMessage, { type: T }>;
+      }
+      return undefined;
+    };
+    const count = (type: WorkerToMainMessage['type']) => posted.filter((m) => m.type === type).length;
+    return { dispatch, posted, engine, send, last, count, timerEngine: engine };
+  }
+
+  /** Wait for real (1ms) native timers to elapse — timers ARE the thing under test here. */
+  function elapse(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  it('with no debug session, timer callbacks run directly (release path untouched)', async () => {
+    const h = timerSetup();
+    init(h);
+    h.timerEngine.guestSetTimeout('t0');
+    await flush();
+    expect(h.timerEngine.fired).toEqual(['t0']);
+    expect(h.dispatch.pendingTurns).toBe(0);
+  });
+
+  it('a timer callback firing during a breakpoint suspend is DEFERRED, not re-entered', async () => {
+    const h = timerSetup();
+    init(h);
+    h.send({ type: 'dbg.enable', requestId: 1 });
+    h.send({ type: 'dbg.pause', requestId: 2 });
+    expect(h.dispatch.isSuspended).toBe(true);
+
+    // Both the zero-delay (microtask) path and the native-setTimeout path fire
+    // while the gate is suspended — neither may enter the guest.
+    h.timerEngine.guestSetTimeout('micro', 0);
+    h.timerEngine.guestSetTimeout('macro', 1);
+    await elapse(5);
+    expect(h.timerEngine.fired).toEqual([]);
+    expect(h.dispatch.pendingTurns).toBe(2);
+
+    // Resume drains them, FIFO, alongside any queued message turns.
+    h.send({ type: 'dbg.resume', requestId: 3 });
+    await flush();
+    expect(h.timerEngine.fired).toEqual(['micro', 'macro']);
+    expect(h.dispatch.pendingTurns).toBe(0);
+  });
+
+  it('interval ticks defer one at a time during a suspend (no burst on resume)', async () => {
+    const h = timerSetup();
+    init(h);
+    h.send({ type: 'dbg.enable', requestId: 1 });
+
+    const stop = h.timerEngine.guestSetInterval('tick', 1);
+    // Let it tick once un-suspended to prove liveness.
+    await elapse(5);
+    const before = h.timerEngine.fired.length;
+    expect(before).toBeGreaterThan(0);
+
+    h.send({ type: 'dbg.pause', requestId: 2 });
+    // While suspended the pending tick parks in the gate; because the WHOLE
+    // tick body (callback + reschedule) is gated, no further ticks queue up
+    // behind it no matter how long the pause lasts.
+    await elapse(10);
+    expect(h.timerEngine.fired.length).toBe(before);
+    expect(h.dispatch.pendingTurns).toBeLessThanOrEqual(1);
+
+    h.send({ type: 'dbg.resume', requestId: 3 });
+    await elapse(5);
+    expect(h.timerEngine.fired.length).toBeGreaterThan(before);
+    stop();
+  });
+
+  it('guest-eval messages and timer callbacks share ONE FIFO order across the gate', async () => {
+    const h = timerSetup();
+    init(h);
+    h.send({ type: 'dbg.enable', requestId: 1 });
+    h.send({ type: 'dbg.pause', requestId: 2 });
+
+    h.send({ type: 'event', turnId: 10, eventName: 'evt-first', payload: null });
+    h.timerEngine.guestSetTimeout('timer-second', 0);
+    await flush();
+    expect(h.timerEngine.fired).toEqual([]);
+    expect(h.timerEngine.events).toEqual([]);
+
+    h.send({ type: 'dbg.resume', requestId: 3 });
+    await flush();
+    // The message turn entered the gate first, the timer callback second.
+    expect(h.timerEngine.events.map((e) => e.name)).toEqual(['evt-first']);
+    expect(h.timerEngine.fired).toEqual(['timer-second']);
   });
 });
