@@ -32,26 +32,34 @@ DomainSet CDPAgentTarget::ownedDomains() const {
 void CDPAgentTarget::onClientConnect(ConnectionId conn, CdpOutboundFn persistentSink) {
   // CdpOutboundFn and cdp::OutboundMessageFunc are both
   // std::function<void(const std::string&)> — pass the sink straight through.
-  auto agent = hcdp::CDPAgent::create(execCtxId_, *debugAPI_, enqueue_,
-                                      std::move(persistentSink), hcdp::State{});
+  std::shared_ptr<hcdp::CDPAgent> agent =
+      hcdp::CDPAgent::create(execCtxId_, *debugAPI_, enqueue_,
+                             std::move(persistentSink), hcdp::State{});
   std::lock_guard<std::mutex> lock(agentsMutex_);
   agents_[conn] = std::move(agent);
 }
 
 void CDPAgentTarget::dispatch(ConnectionId conn, const RawCdpMessage& raw) {
-  hcdp::CDPAgent* agent = nullptr;
+  // Take a strong reference under the lock, call outside it. A concurrent
+  // onClientDisconnect() may erase the map entry while this command is in
+  // flight; our reference keeps the agent alive, so the worst case is a
+  // command handled for an already-detached client (its sink then targets a
+  // connection the server no longer knows — sendToConnection drops it).
+  std::shared_ptr<hcdp::CDPAgent> agent;
   {
     std::lock_guard<std::mutex> lock(agentsMutex_);
     auto it = agents_.find(conn);
-    if (it != agents_.end()) agent = it->second.get();
+    if (it != agents_.end()) agent = it->second;
   }
   // handleCommand is safe from any thread; the response and any events arrive
   // later on the runtime thread and go out through this connection's sink.
   if (agent) agent->handleCommand(raw);
+  // If the client disconnected mid-command, dropping `agent` here runs
+  // ~CDPAgent after the command completed — never mid-use.
 }
 
 void CDPAgentTarget::onClientDisconnect(ConnectionId conn) {
-  std::unique_ptr<hcdp::CDPAgent> dead;
+  std::shared_ptr<hcdp::CDPAgent> dead;
   {
     std::lock_guard<std::mutex> lock(agentsMutex_);
     auto it = agents_.find(conn);
@@ -73,7 +81,11 @@ void CDPAgentTarget::onClientDisconnect(ConnectionId conn) {
           dbg.resumeFromPaused(hdbg::AsyncDebugCommand::Continue);
         }
       });
-  dead.reset();  // ~CDPAgent: tasks it enqueues during destruction still flow via enqueue_
+  // Drop our reference. ~CDPAgent runs here — or, if a dispatch() is mid-
+  // handleCommand on another thread, when that call returns and releases the
+  // last reference. Either way tasks enqueued during destruction still flow
+  // via enqueue_.
+  dead.reset();
 }
 
 }  // namespace rill::devtools

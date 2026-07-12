@@ -53,8 +53,13 @@ private:
   facebook::hermes::debugger::EnqueueRuntimeTaskFunc enqueue_;
 
   std::mutex agentsMutex_;
+  // shared_ptr, not unique_ptr: dispatch() must call handleCommand() OUTSIDE
+  // agentsMutex_ (the CDPServer contract releases its own lock too), while
+  // onClientDisconnect() can concurrently remove the agent. The in-flight
+  // dispatch keeps its own reference, so the agent is destroyed only after the
+  // last user — never mid-handleCommand.
   std::unordered_map<ConnectionId,
-                     std::unique_ptr<facebook::hermes::cdp::CDPAgent>> agents_;
+                     std::shared_ptr<facebook::hermes::cdp::CDPAgent>> agents_;
 };
 
 }  // namespace rill::devtools
