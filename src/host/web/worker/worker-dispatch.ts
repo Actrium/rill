@@ -46,6 +46,7 @@ import { TurnGate } from './turn-gate';
 
 /** The slice of the core {@link Engine} that the worker harness drives. */
 export interface GuestEngineLike {
+  // Reason: guest message payloads are arbitrary serializable values
   on(event: 'message', cb: (m: { event: string; payload: unknown }) => void): void;
   // Reason: engine error events carry an inherently-unknown thrown value
   on(event: 'error' | 'fatalError', cb: (e: unknown) => void): void;
