@@ -54,7 +54,18 @@ struct CDPServerConfig {
 
 ## 目标发现
 
-CDPServer 实现 `/json` HTTP 端点用于目标发现。Chrome DevTools(`chrome://inspect`)轮询此端点以查找可调试目标。
+CDPServer 实现 `/json` HTTP 端点用于目标发现。Chrome DevTools(`chrome://inspect`)轮询此端点以查找可调试目标 —— 且总是请求用户配置的那个 host:port。
+
+### 端口布局(Apple transport)
+
+Network.framework 的 WebSocket 监听器会自动完成协议升级、无法应答普通 HTTP GET,因此 `CDPTransportApple` 把两个表面拆到相邻的两个 loopback 端口:
+
+| 表面 | 端口 |
+|---|---|
+| `/json` 发现(`chrome://inspect` 探测的地址) | 配置端口(默认 9229) |
+| WebSocket(CDP 流量) | 配置端口 + 1(默认 9230) |
+
+客户端无需猜测 ws 端口:服务器下发的每个 `webSocketDebuggerUrl` 都已指向它(`CDPTransport::webSocketPort`)。能在单监听器上同时服务两者的 transport 则全部保持在配置端口上。
 
 ### /json 响应
 
@@ -65,8 +76,8 @@ CDPServer 实现 `/json` HTTP 端点用于目标发现。Chrome DevTools(`chrome
     "type": "node",
     "title": "Rill Guest: MyApp",
     "url": "rill://tenant/42",
-    "webSocketDebuggerUrl": "ws://127.0.0.1:9229/tenant/42",
-    "devtoolsFrontendUrl": "devtools://devtools/bundled/inspector.html?ws=127.0.0.1:9229/tenant/42"
+    "webSocketDebuggerUrl": "ws://127.0.0.1:9230/tenant/42",
+    "devtoolsFrontendUrl": "devtools://devtools/bundled/inspector.html?ws=127.0.0.1:9230/tenant/42"
   }
 ]
 ```
@@ -75,10 +86,10 @@ CDPServer 实现 `/json` HTTP 端点用于目标发现。Chrome DevTools(`chrome
 
 ### 连接
 
-1. 在 Chrome 中打开 `chrome://inspect`
+1. 在 Chrome 中打开 `chrome://inspect`,在"Discover network targets"中添加 `127.0.0.1:9229`(配置端口)
 2. Rill 目标出现在"Remote Target"下
 3. 点击"inspect"打开连接到特定租户的 DevTools
-4. 或者,将 VS Code 的 JavaScript 调试器连接到 `ws://localhost:9229/tenant/<id>`
+4. 或者,将 VS Code 的 JavaScript 调试器连接到 `http://127.0.0.1:9229/json` 返回的 `webSocketDebuggerUrl`(Apple transport 上为 `ws://localhost:9230/tenant/<id>`)
 
 ## 域适配器
 

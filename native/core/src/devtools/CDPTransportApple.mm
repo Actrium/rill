@@ -9,28 +9,27 @@
  * Uses Network.framework C API (nw_listener_t / nw_connection_t / ws_options.h)
  * to implement a WebSocket server for Chrome DevTools Protocol.
  *
- * FOLLOW-UP (portable half already landed in CDPServer): the /json discovery
- * endpoint (CDPServer::handleDiscoveryRequest + CDPTransport::setOnHttpGet) is
- * now served by this transport. Network.framework's nw_ws listener performs the
- * WebSocket upgrade for us and only ever yields WebSocket frames — a client that
- * speaks plain HTTP GET / on the same port never surfaces its request line or
- * path here, so there is nothing to hand to onHttpGet_ from the ws listener.
- * Two ways to wire the discovery probe were considered:
- *   (a) CHOSEN — a second plain-TCP nw_listener (no ws options) on a sibling
- *       port (ws port + 1) that reads the request line, calls
- *       onHttpGet_(method, path), and writes back cdp::buildHttpResponse(...).
- *       Kept 127.0.0.1-only, same as the ws port (see startHttpListener).
- *   (b) REJECTED — a single port that sniffs the first bytes of each accepted
- *       TCP connection. Infeasible with nw_ws: once bytes are peeked off a raw
- *       nw_connection they cannot be re-injected into the ws protocol stack, so
- *       a sniffed connection can no longer be handed to the WebSocket upgrade.
- * Neither is required for stock chrome://inspect: it opens the root
- * webSocketDebuggerUrl and enumerates/attaches guests entirely over the Target
- * domain (setDiscoverTargets / attachToTarget) that CDPServer now implements, so
- * the sessionId multiplex is the working tenant-routing path on this transport.
- * The sibling listener additionally lets chrome://inspect's /json probe (and
- * curl) enumerate tenants directly. webSocketDebuggerUrl is unchanged: the ws
- * surface stays on the config port; discovery answers on port + 1.
+ * PORT LAYOUT (why two listeners, and which port holds which surface):
+ * Network.framework's nw_ws listener performs the WebSocket upgrade for us and
+ * only ever yields WebSocket frames — a client that speaks plain HTTP GET on
+ * the same port never surfaces its request line or path here, so one listener
+ * cannot serve both /json discovery and ws. Same-port byte-sniffing is also
+ * infeasible with nw_ws: once bytes are peeked off a raw nw_connection they
+ * cannot be re-injected into the ws protocol stack. Hence two sibling
+ * listeners, both 127.0.0.1-only:
+ *
+ *   configured port      -> plain-TCP HTTP listener serving the /json* routes
+ *                           (CDPServer::handleDiscoveryRequest via onHttpGet_).
+ *                           chrome://inspect requests /json on exactly the
+ *                           host:port the user configured, so discovery MUST
+ *                           hold this port — with ws here instead, the probe
+ *                           would hit the auto-upgrading ws listener and the
+ *                           target list would never appear.
+ *   configured port + 1  -> the nw_ws WebSocket listener (webSocketPort()).
+ *                           Clients never guess it: every webSocketDebuggerUrl
+ *                           CDPServer hands out (in /json, /json/version, and
+ *                           Target.*) is built from webSocketPort(), so the
+ *                           discovery flow lands on the right socket.
  */
 
 #import "CDPTransportApple.h"
@@ -138,6 +137,15 @@ bool CDPTransportApple::start(const std::string& host, uint16_t port) {
     return false; // Already running
   }
 
+  // The ws surface lives on port + 1 (see the PORT LAYOUT header note); the
+  // configured port itself serves discovery. Reject the one value where the
+  // sibling port cannot exist.
+  if (port == 0xFFFF) {
+    NSLog(@"[CDPTransport] Cannot start on port 65535 (WebSocket needs port + 1)");
+    return false;
+  }
+  const uint16_t wsPort = webSocketPort(port);
+
   nw_parameters_t params = nw_parameters_create_secure_tcp(
       NW_PARAMETERS_DISABLE_PROTOCOL, NW_PARAMETERS_DEFAULT_CONFIGURATION);
   if (params == nullptr) {
@@ -151,7 +159,7 @@ bool CDPTransportApple::start(const std::string& host, uint16_t port) {
   nw_protocol_stack_prepend_application_protocol(stack, wsOptions);
 
   // Create the ws listener bound to loopback only (see createLoopbackListener).
-  nw_listener_t listener = createLoopbackListener(params, host, port);
+  nw_listener_t listener = createLoopbackListener(params, host, wsPort);
   // ARC owns params; let it release automatically.
 
   if (listener == nullptr) {
@@ -169,7 +177,7 @@ bool CDPTransportApple::start(const std::string& host, uint16_t port) {
   nw_listener_set_state_changed_handler(listener, ^(nw_listener_state_t state, nw_error_t error) {
     switch (state) {
       case nw_listener_state_ready:
-        NSLog(@"[CDPTransport] Listening on port %u", port);
+        NSLog(@"[CDPTransport] WebSocket listening on port %u", wsPort);
         break;
       case nw_listener_state_failed:
         NSLog(@"[CDPTransport] Listener failed: %@", error ? (id)error : @"(unknown)");
@@ -190,12 +198,14 @@ bool CDPTransportApple::start(const std::string& host, uint16_t port) {
 
   running_.store(true);
 
-  // Bring up the sibling plain-TCP discovery listener on port + 1. Its failure
-  // is non-fatal: the ws/Target-domain path still routes tenants, so we log and
-  // carry on rather than tearing down a working ws surface.
-  if (!startHttpListener(host, static_cast<uint16_t>(port + 1))) {
-    NSLog(@"[CDPTransport] HTTP discovery listener did not start on port %u (non-fatal)",
-          static_cast<unsigned>(port + 1));
+  // Bring up the sibling plain-TCP discovery listener on the CONFIGURED port —
+  // this is what chrome://inspect probes with GET /json. Its failure is
+  // non-fatal for a direct-ws client (the ws/Target-domain path still routes
+  // tenants), but it does break discovery, so say exactly that.
+  if (!startHttpListener(host, port)) {
+    NSLog(@"[CDPTransport] /json discovery listener did not start on port %u — "
+          @"chrome://inspect will not find targets; direct ws attach on port %u still works",
+          static_cast<unsigned>(port), static_cast<unsigned>(wsPort));
   }
 
   return true;

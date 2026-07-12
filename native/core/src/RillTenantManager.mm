@@ -24,7 +24,15 @@ RillTenantManager::RillTenantManager(
   if (!devTools_->start()) {
     NSLog(@"[RillTenantManager] CDP DevTools server failed to start (dev-only)");
   } else {
-    NSLog(@"[RillTenantManager] CDP DevTools server listening on 127.0.0.1:9229 (dev-only)");
+    // Two sibling ports on this transport (see CDPTransportApple): the
+    // configured port answers chrome://inspect's /json probe, the ws surface
+    // sits one up. Log both so a user knows what to type where.
+    auto& srv = devTools_->server();
+    NSLog(@"[RillTenantManager] CDP DevTools up (dev-only): add 127.0.0.1:%u in "
+          @"chrome://inspect (serves %s); WebSocket on ws://127.0.0.1:%u",
+          static_cast<unsigned>(srv.getPort()),
+          srv.getTargetListUrl().c_str(),
+          static_cast<unsigned>(srv.getWebSocketPort()));
   }
 #endif
 }

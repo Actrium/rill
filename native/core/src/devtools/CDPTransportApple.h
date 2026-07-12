@@ -46,6 +46,16 @@ public:
   void close(ConnectionId connId) override;
 
   /**
+   * The ws surface lives on the sibling port: the configured port itself serves
+   * the /json discovery routes (what chrome://inspect probes), and the
+   * auto-upgrading nw_ws listener — which cannot answer a plain HTTP GET —
+   * moves one up. start() rejects port 65535, so this never wraps.
+   */
+  uint16_t webSocketPort(uint16_t configuredPort) const override {
+    return static_cast<uint16_t>(configuredPort + 1);
+  }
+
+  /**
    * Get number of active connections
    */
   size_t getConnectionCount() const;
@@ -71,9 +81,10 @@ private:
   // ============================================
 
   /**
-   * Start the plain-TCP HTTP listener that answers the /json discovery routes.
-   * Bound loopback-only, same as the ws listener. Non-fatal on failure: the
-   * caller (start) logs and continues, since the ws/Target path still works.
+   * Start the plain-TCP HTTP listener that answers the /json discovery routes
+   * on the CONFIGURED port. Bound loopback-only, same as the ws listener.
+   * Non-fatal on failure: the caller (start) logs that discovery is broken and
+   * continues, since a direct-ws client can still attach on webSocketPort().
    */
   bool startHttpListener(const std::string& host, uint16_t port);
 
@@ -116,8 +127,9 @@ private:
   std::unordered_map<ConnectionId, void*> connections_;
 
   // Sibling plain-TCP HTTP listener that serves the /json discovery routes on
-  // port+1 (see CDPTransportApple.mm FOLLOW-UP header for why a second listener
-  // rather than same-port byte-sniffing). Stored as void* like listener_.
+  // the CONFIGURED port, while the ws listener holds port+1 (see the PORT
+  // LAYOUT note in CDPTransportApple.mm for why a second listener rather than
+  // same-port byte-sniffing). Stored as void* like listener_.
   void* httpListener_ = nullptr;
   uint16_t httpPort_ = 0;
 
