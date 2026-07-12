@@ -17,7 +17,10 @@ cd "$(dirname "$0")"
 
 TARGET=wasm32-unknown-unknown
 FIXTURES=../src/host/wasm-guest/__tests__/fixtures
-GUESTS="kv-guest ui-guest seq-guest event-guest heap-exhaust-guest canvas-guest canvas-present-guest canvas-gpu-guest canvas-escape-guest asset-guest"
+# Single source of truth for both the debug (DWARF) and release fixture builds
+# below. canvas-binary-guest / ui-binary-guest are intentionally NOT here — they
+# need a separate cargo invocation (see the wip-binary-protocol note further down).
+GUESTS="kv-guest ui-guest seq-guest event-guest heap-churn-guest canvas-guest canvas-present-guest canvas-gpu-guest canvas-escape-guest asset-guest"
 
 # Optional debug build: DWARF-carrying guests for source-level debugging inside
 # V8's wasm debugger (Chrome DevTools "C/C++ DevTools Support (DWARF)"). Output
@@ -42,7 +45,8 @@ fi
 # Dedicated target dir for the reproducible fixtures build (see header note).
 export CARGO_TARGET_DIR=target/fixtures
 
-RUSTFLAGS="--remap-path-prefix=$(pwd)=." cargo build -p kv-guest -p ui-guest -p seq-guest -p event-guest -p heap-churn-guest -p canvas-guest -p canvas-present-guest -p canvas-gpu-guest -p canvas-escape-guest -p asset-guest --target "$TARGET" --release
+# shellcheck disable=SC2086
+RUSTFLAGS="--remap-path-prefix=$(pwd)=." cargo build $(printf -- '-p %s ' $GUESTS) --target "$TARGET" --release
 
 # canvas-binary-guest / ui-binary-guest are built in a SEPARATE cargo
 # invocation on purpose: they turn ON rill-guest's `wip-binary-protocol`
