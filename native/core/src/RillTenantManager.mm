@@ -777,14 +777,19 @@ TenantId RillTenantManager::createTenant(facebook::jsi::Runtime& rt,
   if (devTools_) {
     devTools_->onTenantCreated(
         id, tc.appId.empty() ? ("rill guest " + std::to_string(id)) : tc.appId);
+#if !defined(NDEBUG)
     // Register an engine-specific CDP target when the sandbox is debug-capable
     // (today: Hermes). One CDP execution context per tenant (dev-only MVP).
+    // Dev-only like its providers: TenantHandle::cdpDebuggable and the Hermes
+    // CDPAgentTarget are compiled out under NDEBUG, so a release build with the
+    // WIP flag still gets discovery/tenant listing but no breakpoint target.
     if (auto* dbg = tenants_.at(id)->cdpDebuggable()) {
       if (auto target =
               dbg->createCdpDebugTarget(callInvoker_, static_cast<int32_t>(id))) {
         devTools_->registerDebugTarget(id, std::move(target));
       }
     }
+#endif
   }
 #endif
 
