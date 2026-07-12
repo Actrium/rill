@@ -217,6 +217,22 @@ export function decodeEnvelope(buf: Uint8Array): DecodedEnvelope {
 // Sentinel walking (self-describing hoist / revive)
 // ============================================
 
+/**
+ * True when `v` carries the internal slot the intrinsic `valueOf` of a
+ * Number/String/Boolean wrapper demands: the intrinsic throws a TypeError on
+ * any receiver without the matching [[NumberData]]/[[StringData]]/
+ * [[BooleanData]] slot, and reads the slot (no user code) when present.
+ */
+// Reason: probes an arbitrary caller object for a wrapper internal slot; the intrinsic's receiver/return are untyped by nature.
+function hasBrand(v: object, intrinsicValueOf: (this: unknown) => unknown): boolean {
+  try {
+    intrinsicValueOf.call(v);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** The result of hoisting: a JSON-serializable control value + its segments. */
 export interface Hoisted {
   // Reason: the control plane is arbitrary JSON-serializable data, walked structurally.
@@ -242,7 +258,52 @@ export function hoistSentinels(value: unknown): Hoisted {
   let sawReservedKey = false;
   // Reason: walks arbitrary caller data structurally; Uint8Array leaves hoist to
   // segments, other values pass through unchanged.
-  const walk = (v: unknown): unknown => {
+  const walk = (v: unknown, key: string): unknown => {
+    // Apply JSON.stringify's toJSON hook FIRST (mirrors the spec's
+    // SerializeJSONProperty step 2). The structural copy below only carries own
+    // enumerable DATA props, so a Date/URL/custom object — whose JSON form lives
+    // entirely in toJSON — would otherwise collapse to an empty `{}` and lose its
+    // value. Call toJSON once with the SAME key JSON.stringify would pass (the
+    // property name for an object member, the index string for an array element,
+    // '' at the root), then serialize the returned value (its own props are
+    // walked below and may themselves have toJSON). The probe includes functions:
+    // per spec a callable value is still an Object, so a function carrying toJSON
+    // serializes through it. Uint8Array has no toJSON, so byte leaves skip this
+    // and still hoist just below; a toJSON that yields bytes is likewise hoisted.
+    // Reason: probing an arbitrary caller value for JSON.stringify's toJSON hook.
+    const toJSONHook =
+      v !== null && (typeof v === 'object' || typeof v === 'function')
+        ? (v as { toJSON?: unknown }).toJSON
+        : undefined;
+    if (typeof toJSONHook === 'function') {
+      // Reason: caller-provided toJSON returns arbitrary JSON-shaped data.
+      v = (toJSONHook as (k: string) => unknown).call(v, key);
+    }
+    // Unwrap Number/String/Boolean wrapper objects (spec steps 4-6): the
+    // structural copy below would otherwise turn `new Number(5)` into `{}`
+    // where JSON.stringify emits `5`. Brand-check by internal slot — the
+    // intrinsic valueOf throws on anything without the matching [[*Data]]
+    // slot — NOT instanceof, which false-positives on
+    // Object.create(Number.prototype) (and would then throw even on a
+    // byte-free result the plain-JSON path must pass through untouched) and
+    // misses cross-realm / null-prototype wrappers. Conversions per spec:
+    // ToNumber for Number, ToString for String, the [[BooleanData]] slot
+    // itself for Boolean (never user code). The typeof guard is required:
+    // the intrinsic valueOf also accepts same-type PRIMITIVES without
+    // throwing, and those must pass through unchanged.
+    if (v !== null && typeof v === 'object') {
+      if (hasBrand(v, Number.prototype.valueOf)) {
+        v = Number(v);
+      } else if (hasBrand(v, String.prototype.valueOf)) {
+        v = String(v);
+      } else if (hasBrand(v, Boolean.prototype.valueOf)) {
+        v = Boolean.prototype.valueOf.call(v);
+      } else if (hasBrand(v, BigInt.prototype.valueOf)) {
+        // The bigint primitive rides through to the final stringify, which
+        // throws — or consults a user BigInt.prototype.toJSON — per spec.
+        v = BigInt.prototype.valueOf.call(v);
+      }
+    }
     if (v instanceof Uint8Array) {
       if (segments.length >= LIMITS.maxSegments) {
         throw new StoreNetEnvelopeError('too-many-segments', `> ${LIMITS.maxSegments}`);
@@ -258,7 +319,12 @@ export function hoistSentinels(value: unknown): Hoisted {
       return { [SENTINEL_KEY]: n };
     }
     if (Array.isArray(v)) {
-      return v.map(walk);
+      // A still-callable element (a function with no effective toJSON) becomes
+      // null, as JSON.stringify does for unserializable array elements.
+      return v.map((el, i) => {
+        const walked = walk(el, String(i));
+        return typeof walked === 'function' ? null : walked;
+      });
     }
     if (v !== null && typeof v === 'object') {
       // Our own sentinels are the returned `{[SENTINEL_KEY]:n}` objects above;
@@ -268,13 +334,34 @@ export function hoistSentinels(value: unknown): Hoisted {
       }
       const out: Record<string, unknown> = {};
       for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
-        out[k] = walk(val);
+        const walked = walk(val, k);
+        // A still-callable member (a function with no effective toJSON) is
+        // dropped, as JSON.stringify does. This must happen HERE, not be left
+        // to the final stringify of the control value: a callable member named
+        // `toJSON` (e.g. inside a toJSON RESULT, which the spec serializes
+        // structurally without re-consulting hooks) would otherwise be
+        // re-invoked as a hook by that final stringify.
+        if (typeof walked === 'function') {
+          continue;
+        }
+        // defineProperty, NOT plain assignment — the outbound twin of the
+        // reviveSentinels hardening: a result carrying an own '__proto__' key
+        // (e.g. data round-tripped through JSON.parse) would otherwise SET
+        // the rebuilt object's prototype, silently DROPPING the field from
+        // the encoded control JSON. defineProperty always creates an own
+        // data property, so every key survives encoding.
+        Object.defineProperty(out, k, {
+          value: walked,
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
       }
       return out;
     }
     return v;
   };
-  const control = walk(value);
+  const control = walk(value, '');
   if (segments.length > 0 && sawReservedKey) {
     throw new StoreNetEnvelopeError(
       'bad-sentinel',
@@ -311,7 +398,18 @@ export function reviveSentinels(value: unknown, segments: Uint8Array[]): unknown
       }
       const out: Record<string, unknown> = {};
       for (const [k, val] of Object.entries(obj)) {
-        out[k] = walk(val);
+        // defineProperty, NOT plain assignment: the source keys are
+        // guest-controlled (JSON.parse makes '__proto__' an own property), and
+        // `out['__proto__'] = x` would SET the rebuilt object's prototype —
+        // letting a hostile envelope inject inherited fields into the args
+        // handed to host capability impls. defineProperty always creates an
+        // own data property, for every key.
+        Object.defineProperty(out, k, {
+          value: walk(val),
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
       }
       return out;
     }

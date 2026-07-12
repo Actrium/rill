@@ -336,17 +336,31 @@ function parserPluginsForPath(
  * `this`/`arguments`/`new.target`, so the conversion is semantically safe
  * across all engines (QuickJS/JSC/WASM/Hermes).
  *
+ * Always transforms block scoping (let/const → var with closure wrappers where
+ * a loop binding is captured): Hermes' per-iteration binding for for...of/let
+ * is broken (facebook/hermes#575, #1599) — every closure created in the loop
+ * captures the FINAL iteration's value. The build produces one bundle for all
+ * engines, so the transform is unconditional; it only introduces wrappers
+ * where a loop binding is actually captured.
+ *
  * A failed per-file transform is only a warning here — the post-build Hermes
- * compat guard fails the build if an async arrow reaches the final bundle.
- * In dev mode the source-location injection plugin is added on top.
+ * compat guard fails the build if an async arrow or a block-scoped loop head
+ * reaches the final bundle. In dev mode the source-location injection plugin
+ * is added on top.
  */
 async function createBabelPlugin(options: { dev: boolean }): Promise<BunPlugin> {
   const babel = await import('@babel/core');
-  // Pass the plugin as a module object, not a string: Babel resolves string
+  // Pass the plugins as module objects, not strings: Babel resolves string
   // plugin names against the build cwd, which silently fails when `rill build`
   // runs outside a tree where the package is hoisted.
   const arrowFunctionsTransform = (await import('@babel/plugin-transform-arrow-functions')).default;
-  const transformPlugins: import('@babel/core').PluginItem[] = [arrowFunctionsTransform];
+  const blockScopingTransform = (await import('@babel/plugin-transform-block-scoping')).default;
+  // Order matters: arrow-functions first, so arrow bodies become function
+  // expressions block-scoping then treats as capture sites.
+  const transformPlugins: import('@babel/core').PluginItem[] = [
+    arrowFunctionsTransform,
+    blockScopingTransform,
+  ];
   if (options.dev) {
     transformPlugins.push((await import('./babel-plugin-function-source-location')).default);
   }
@@ -414,6 +428,50 @@ function findAsyncArrows(programJson: string): { count: number; firstOffset: num
       count++;
       const start = typeof record.start === 'number' ? record.start : -1;
       if (firstOffset === -1 || (start !== -1 && start < firstOffset)) firstOffset = start;
+    }
+    for (const value of Object.values(record)) {
+      if (value !== null && typeof value === 'object') stack.push(value);
+    }
+  }
+  return { count, firstOffset };
+}
+
+/**
+ * Scan an oxc-parser program (JSON string) for block-scoped (let/const) loop
+ * heads. After the Babel block-scoping pass none should survive; any that does
+ * would hit Hermes' broken per-iteration closure capture (facebook/hermes#575,
+ * #1599). Post-transform, the correct invariant is simply zero surviving
+ * let/const loop heads — no capture analysis needed.
+ */
+function findBlockScopedLoopHeads(programJson: string): { count: number; firstOffset: number } {
+  let count = 0;
+  let firstOffset = -1;
+  // Reason: walking raw oxc AST JSON; nodes are heterogeneous and only
+  // type/kind/start fields are inspected after narrowing
+  const stack: unknown[] = [JSON.parse(programJson)];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (node === null || typeof node !== 'object') continue;
+    if (Array.isArray(node)) {
+      for (const child of node) stack.push(child);
+      continue;
+    }
+    const record = node as Record<string, unknown>;
+    const type = record.type;
+    if (type === 'ForOfStatement' || type === 'ForInStatement' || type === 'ForStatement') {
+      const head = (type === 'ForStatement' ? record.init : record.left) as
+        | Record<string, unknown>
+        | null
+        | undefined;
+      if (
+        head &&
+        head.type === 'VariableDeclaration' &&
+        (head.kind === 'let' || head.kind === 'const')
+      ) {
+        count++;
+        const start = typeof record.start === 'number' ? record.start : -1;
+        if (firstOffset === -1 || (start !== -1 && start < firstOffset)) firstOffset = start;
+      }
     }
     for (const value of Object.values(record)) {
       if (value !== null && typeof value === 'object') stack.push(value);
@@ -889,7 +947,20 @@ ${footerCode}
           'ensure the offending source is covered by the Babel arrow transform.'
       );
     }
-    console.log('   Hermes compat guard: PASS (no async arrows)');
+    // Hermes compat guard: block-scoped loop heads hit Hermes' broken
+    // per-iteration closure capture (facebook/hermes#575, #1599). The
+    // pre-bundle block-scoping transform eliminates them; this catches
+    // anything that slipped through.
+    const loopHeads = findBlockScopedLoopHeads(result.program);
+    if (loopHeads.count > 0) {
+      throw new Error(
+        `Hermes compat guard: ${loopHeads.count} let/const loop head(s) reached the final bundle ` +
+          `(first at offset ${loopHeads.firstOffset}). Closures in such loops capture the wrong ` +
+          'iteration value on Hermes hosts; ensure the offending source is covered by the Babel ' +
+          'block-scoping transform.'
+      );
+    }
+    console.log('   Hermes compat guard: PASS (no async arrows, no block-scoped loop heads)');
   } catch (validationErr) {
     console.error('\n❌ Bundle validation failed:');
     if (validationErr instanceof Error) {

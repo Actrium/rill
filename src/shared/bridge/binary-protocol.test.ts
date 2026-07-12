@@ -651,3 +651,53 @@ describe('FUNCTION anti-drift (legacy codec ⇄ schema)', () => {
     expect(toHex(bytes)).toBe(golden);
   });
 });
+
+// ============================================
+// Fail-closed: FUNCTION reserved flag bits
+// ============================================
+
+describe('BinaryProtocol FUNCTION reserved flag bits (fail-closed)', () => {
+  it('rejects a batch whose FUNCTION flags byte has a reserved bit set', () => {
+    const protocol = new BinaryProtocol({ encoding: 'binary' });
+    // A single CREATE whose only prop is a metadata-free function: the wire
+    // then ends [..., ValueType.FUNCTION, fnId u16, flags u8], so the flags
+    // byte is the LAST byte of the buffer (0x00 for no metadata).
+    const batch = createTestBatch([
+      createCreateOp(1, 'View', { onPress: { __type: 'function', __fnId: 'fn-1' } }),
+    ]);
+    const encoded = protocol.encodeBatch(batch) as ArrayBuffer;
+    const bytes = new Uint8Array(encoded.slice(0));
+    expect(bytes[bytes.length - 1]).toBe(0x00); // sanity: metadata-free flags
+
+    // Sanity: the untampered buffer round-trips.
+    expect(protocol.decodeBatch(bytes.buffer.slice(0))).toEqual(batch);
+
+    // bits 3..7 are reserved and MUST be 0; a set bit implies unknown
+    // trailing fields the decoder cannot length — reject, never desync.
+    bytes[bytes.length - 1] = 0x08;
+    expect(() => protocol.decodeBatch(bytes.buffer)).toThrow(/reserved flag bit/);
+  });
+});
+
+// ============================================
+// Fail-closed: full consumption (no trailing bytes)
+// ============================================
+
+describe('BinaryProtocol full-consumption (fail-closed trailing bytes)', () => {
+  it('rejects a binary batch that leaves trailing bytes unconsumed', () => {
+    const protocol = new BinaryProtocol({ encoding: 'binary' });
+    const batch = createTestBatch([createCreateOp(1, 'View', { a: 1 })]);
+    const encoded = protocol.encodeBatch(batch) as ArrayBuffer;
+
+    // Sanity: the exact buffer round-trips.
+    expect(protocol.decodeBatch(encoded.slice(0))).toEqual(batch);
+
+    // A fully-parsed batch must leave the buffer exactly spent; one extra byte
+    // is a corrupt/oversized frame or a desynced stream. The authoritative
+    // streaming decoder rejects it too, so the legacy decoder must not diverge.
+    const padded = new Uint8Array(encoded.byteLength + 1);
+    padded.set(new Uint8Array(encoded), 0);
+    padded[padded.length - 1] = 0xff;
+    expect(() => protocol.decodeBatch(padded.buffer)).toThrow(/Trailing bytes/);
+  });
+});

@@ -1,6 +1,8 @@
 #include "HermesSandboxJSI.h"
 #if __has_include(<hermes/hermes.h>)
 #include <hermes/hermes.h>
+#include <cmath>
+#include <cstdint>
 #else
 #error "Rill Hermes sandbox requires Hermes headers. Enable Hermes in the host (hermes_enabled: true / USE_HERMES=1) or build with RILL_SANDBOX_ENGINE=jsc|quickjs."
 #endif
@@ -123,6 +125,16 @@ static bool isCircular(jsi::Runtime &rt, const std::vector<jsi::Object> &path,
   return false;
 }
 
+namespace {
+// Forward declarations: the definitions live in the anonymous namespace further
+// down (next to sandboxToHostImpl, which also uses them), but hostToSandboxImpl
+// below needs them for the host->sandbox binary passthrough.
+jsi::Value makeArrayBufferIn(jsi::Runtime &dstRt, const uint8_t *data,
+                             size_t size);
+jsi::Value copyArrayBufferViewAcross(jsi::Runtime &srcRt, jsi::Runtime &dstRt,
+                                     const jsi::Object &obj);
+} // namespace
+
 // Deep copy a JSI value from one runtime to another
 // This is necessary because JSI values are tied to their runtime
 jsi::Value HermesSandboxContext::hostToSandbox(jsi::Runtime &hostRt,
@@ -164,6 +176,23 @@ jsi::Value HermesSandboxContext::hostToSandboxImpl(jsi::Runtime &hostRt,
     // depth/cycle checks needed)
     if (obj.isFunction(hostRt)) {
       return wrapHostFunctionForSandbox(hostRt, sandboxRt, obj.asFunction(hostRt));
+    }
+
+    // Binary passthrough (host -> sandbox) — the symmetric twin of
+    // sandboxToHostImpl's binary branch. A host capability that returns an
+    // ArrayBuffer / typed-array (e.g. a getBytes provider) must reach the guest
+    // as real bytes; the generic property copy below sees zero own enumerable
+    // props on an ArrayBuffer and would emit an empty object, silently
+    // destroying the bytes. Bytes are COPIED into the sandbox realm.
+    if (obj.isArrayBuffer(hostRt)) {
+      jsi::ArrayBuffer src = obj.getArrayBuffer(hostRt);
+      return makeArrayBufferIn(sandboxRt, src.data(hostRt), src.size(hostRt));
+    }
+    {
+      jsi::Value sandboxBinary = copyArrayBufferViewAcross(hostRt, sandboxRt, obj);
+      if (!sandboxBinary.isUndefined()) {
+        return sandboxBinary;
+      }
     }
 
     if (isCircular(hostRt, path, obj)) {
@@ -218,6 +247,127 @@ jsi::Value HermesSandboxContext::sandboxToHost(jsi::Runtime &sandboxRt,
   return sandboxToHostImpl(sandboxRt, hostRt, value, 0, path);
 }
 
+namespace {
+
+// Byte-owning jsi::MutableBuffer used to rebuild an ArrayBuffer in a
+// DESTINATION realm from bytes copied out of a SOURCE realm. A copy is
+// mandatory: the source value's backing store dies with its runtime's GC, and
+// the two realms must never alias each other's memory.
+class VectorBuffer : public jsi::MutableBuffer {
+public:
+  VectorBuffer(const uint8_t *data, size_t size) : bytes_(data, data + size) {}
+  size_t size() const override { return bytes_.size(); }
+  uint8_t *data() override { return bytes_.data(); }
+
+private:
+  std::vector<uint8_t> bytes_;
+};
+
+// Copy `size` bytes into a fresh ArrayBuffer owned by `dstRt`. Throws (loudly)
+// if the destination runtime does not implement createArrayBuffer — never a
+// silent empty object.
+jsi::Value makeArrayBufferIn(jsi::Runtime &dstRt, const uint8_t *data,
+                             size_t size) {
+  return jsi::ArrayBuffer(dstRt, std::make_shared<VectorBuffer>(data, size));
+}
+
+// The ArrayBufferView constructor names eligible for same-kind
+// reconstruction host-side. Also the detection allowlist: a plain object
+// that merely LOOKS view-shaped ({buffer, byteOffset, byteLength}) but has a
+// different constructor stays on the generic property-copy path.
+bool isViewCtorName(const std::string &name) {
+  static const char *kNames[] = {
+      "Int8Array",         "Uint8Array",  "Uint8ClampedArray", "Int16Array",
+      "Uint16Array",       "Int32Array",  "Uint32Array",       "Float32Array",
+      "Float64Array",      "BigInt64Array", "BigUint64Array",  "DataView",
+  };
+  for (const char *candidate : kNames) {
+    if (name == candidate) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Returns the `dstRt`-realm equivalent of a `srcRt` ArrayBufferView (typed
+// array or DataView), or undefined when `obj` is not one. The view's byte
+// WINDOW is copied into a dst ArrayBuffer, then best-effort re-wrapped in the
+// same-named dst constructor (raw ArrayBuffer when unavailable). Direction-
+// agnostic: drives BOTH sandbox->host and host->sandbox.
+jsi::Value copyArrayBufferViewAcross(jsi::Runtime &srcRt, jsi::Runtime &dstRt,
+                                     const jsi::Object &obj) {
+  jsi::Value ctorVal = obj.getProperty(srcRt, "constructor");
+  if (!ctorVal.isObject()) {
+    return jsi::Value::undefined();
+  }
+  jsi::Value nameVal = ctorVal.getObject(srcRt).getProperty(srcRt, "name");
+  if (!nameVal.isString()) {
+    return jsi::Value::undefined();
+  }
+  std::string ctorName = nameVal.getString(srcRt).utf8(srcRt);
+  if (!isViewCtorName(ctorName)) {
+    return jsi::Value::undefined();
+  }
+
+  jsi::Value bufferVal = obj.getProperty(srcRt, "buffer");
+  jsi::Value offsetVal = obj.getProperty(srcRt, "byteOffset");
+  jsi::Value lengthVal = obj.getProperty(srcRt, "byteLength");
+  if (!bufferVal.isObject() || !offsetVal.isNumber() ||
+      !lengthVal.isNumber()) {
+    return jsi::Value::undefined();
+  }
+  jsi::Object bufferObj = bufferVal.getObject(srcRt);
+  if (!bufferObj.isArrayBuffer(srcRt)) {
+    return jsi::Value::undefined();
+  }
+
+  // Validate as doubles BEFORE narrowing to size_t. A merely view-SHAPED plain
+  // object (constructor.name in the allowlist, an ArrayBuffer `buffer`) can
+  // carry byteOffset/byteLength of NaN, Infinity, negative, or non-integer;
+  // casting those to size_t first is UB / implementation-defined, so a
+  // post-cast range check cannot catch them. Bound against the REAL backing
+  // size in the double domain: backingSize is a true allocation (<< 2^53, so
+  // exactly representable as double), which closes the 2^64-rounding hole of
+  // static_cast<double>(SIZE_MAX) — where byteOffset == 2**64 slips past and
+  // then casts out of range — and makes the narrowing below lossless.
+  jsi::ArrayBuffer backing = bufferObj.getArrayBuffer(srcRt);
+  const size_t backingSize = backing.size(srcRt);
+  const double backingSizeD = static_cast<double>(backingSize);
+  const double offsetD = offsetVal.getNumber();
+  const double lengthD = lengthVal.getNumber();
+  if (!std::isfinite(offsetD) || !std::isfinite(lengthD) || offsetD < 0 ||
+      lengthD < 0 || offsetD != std::floor(offsetD) ||
+      lengthD != std::floor(lengthD) || offsetD > backingSizeD ||
+      lengthD > backingSizeD - offsetD) {
+    return jsi::Value::undefined();
+  }
+
+  const auto offset = static_cast<size_t>(offsetD);
+  const auto length = static_cast<size_t>(lengthD);
+
+  jsi::Value dstBuffer =
+      makeArrayBufferIn(dstRt, backing.data(srcRt) + offset, length);
+
+  // Same-kind reconstruction, best-effort: a dst realm without the
+  // constructor (or a throwing one) still gets the raw bytes.
+  jsi::Object dstGlobal = dstRt.global();
+  if (dstGlobal.hasProperty(dstRt, ctorName.c_str())) {
+    jsi::Value dstCtor = dstGlobal.getProperty(dstRt, ctorName.c_str());
+    if (dstCtor.isObject() && dstCtor.getObject(dstRt).isFunction(dstRt)) {
+      try {
+        return dstCtor.getObject(dstRt)
+            .getFunction(dstRt)
+            .callAsConstructor(dstRt, dstBuffer);
+      } catch (...) {
+        // fall through to the raw ArrayBuffer
+      }
+    }
+  }
+  return dstBuffer;
+}
+
+} // namespace
+
 jsi::Value HermesSandboxContext::sandboxToHostImpl(jsi::Runtime &sandboxRt,
                                                     jsi::Runtime &hostRt,
                                                     const jsi::Value &value,
@@ -247,6 +397,27 @@ jsi::Value HermesSandboxContext::sandboxToHostImpl(jsi::Runtime &sandboxRt,
 
     if (obj.isFunction(sandboxRt)) {
       return wrapSandboxFunctionForHost(sandboxRt, hostRt, obj.asFunction(sandboxRt));
+    }
+
+    // Binary passthrough — MUST come before the generic property copy. An
+    // ArrayBuffer has no own enumerable props, so the generic branch would
+    // emit an empty host object and silently destroy the bytes (the binary
+    // op-batch failure mode). Bytes are COPIED into the host realm; the two
+    // realms never alias each other's memory.
+    if (obj.isArrayBuffer(sandboxRt)) {
+      jsi::ArrayBuffer src = obj.getArrayBuffer(sandboxRt);
+      return makeArrayBufferIn(hostRt, src.data(sandboxRt), src.size(sandboxRt));
+    }
+    {
+      // Typed-array view (Uint8Array & friends): JSI has no view API, so
+      // probe the ArrayBufferView shape (an ArrayBuffer-valued `buffer` plus
+      // numeric byteOffset/byteLength). Rebuild the view's byte WINDOW as a
+      // host ArrayBuffer, then best-effort re-wrap it in the same-named host
+      // view constructor.
+      jsi::Value hostBinary = copyArrayBufferViewAcross(sandboxRt, hostRt, obj);
+      if (!hostBinary.isUndefined()) {
+        return hostBinary;
+      }
     }
 
     // This direction crosses the trust boundary: the sandbox (tenant) is

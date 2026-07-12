@@ -111,6 +111,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ui-binary-guest"
+version = "0.0.0"
+dependencies = [
+ "rill-guest",
+]
+
+[[package]]
 name = "ui-guest"
 version = "0.0.0"
 dependencies = [

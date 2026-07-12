@@ -1,0 +1,17 @@
+[package]
+name = "ui-binary-guest"
+version.workspace = true
+edition.workspace = true
+description = "Test-fixture native rill guest that renders UI over the WIP binary op-batch wire when the host enables it via rill_wire_caps (else JSON)."
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Enable the WIP binary op-batch wire in the SDK. This crate is built by
+# build.sh in its OWN cargo invocation (separate feature resolve, alongside
+# canvas-binary-guest) so this feature never unifies into the default JSON
+# fixtures.
+rill-guest = { path = "../rill-guest", features = ["wip-binary-protocol"] }

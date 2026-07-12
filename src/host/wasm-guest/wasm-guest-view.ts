@@ -45,6 +45,12 @@ export interface WasmGuestEngine extends EngineViewEngine {
   readonly writeGuestMemory: (ptr: number, bytes: Uint8Array) => void;
   /** Guest-declared ABI version; null when the guest predates the export. */
   readonly guestAbiVersion: number | null;
+  /**
+   * Raw guest wasm exports for diagnostics (e.g. kv-guest's `last_ok`);
+   * undefined before `loadBundle` resolves. Diagnostics-only — calling
+   * state-mutating exports (rill_alloc, ...) through this can corrupt the guest.
+   */
+  readonly exports: WebAssembly.Exports | undefined;
   /** Named host->guest event channel (rill_on_event). */
   // Reason: an event payload is any JSON-serializable value, forwarded as-is.
   sendEvent(name: string, payload?: unknown): void;
@@ -99,6 +105,16 @@ export class WasmGuestView implements WasmGuestEngine {
   /** Guest-declared ABI version; null before `loadBundle` or when the guest predates the export. */
   get guestAbiVersion(): number | null {
     return this.host.guestAbiVersion;
+  }
+
+  /**
+   * Raw guest exports passthrough (diagnostics only — e.g. kv-guest's
+   * `last_ok`). Undefined before `loadBundle` resolves, mirroring
+   * guestAbiVersion's null-before-load contract; WasmGuestHost.exports itself
+   * throws pre-instantiation, so the loaded-guard keeps this undefined-safe.
+   */
+  get exports(): WebAssembly.Exports | undefined {
+    return this.loaded ? this.host.exports : undefined;
   }
 
   constructor(options: WasmGuestViewOptions) {

@@ -1079,8 +1079,26 @@ jsi::Array JSCRuntime::createArray(size_t length) {
 
 jsi::ArrayBuffer
 JSCRuntime::createArrayBuffer(std::shared_ptr<jsi::MutableBuffer> buffer) {
-  (void)buffer;
-  throw std::logic_error("Not implemented");
+  if (!buffer) {
+    throw jsi::JSError(*this, "Cannot create ArrayBuffer from null buffer");
+  }
+  // No-copy over the MutableBuffer's storage: a heap cell keeps the
+  // shared_ptr alive until JSC garbage-collects the ArrayBuffer and calls the
+  // deallocator (same lifetime pattern as QuickJSRuntime::createArrayBuffer).
+  auto *cell = new std::shared_ptr<jsi::MutableBuffer>(std::move(buffer));
+  auto deallocator = [](void *bytes, void *deallocatorContext) {
+    (void)bytes;
+    delete static_cast<std::shared_ptr<jsi::MutableBuffer> *>(
+        deallocatorContext);
+  };
+  JSValueRef exc = nullptr;
+  JSObjectRef obj = JSObjectMakeArrayBufferWithBytesNoCopy(
+      ctx_, (*cell)->data(), (*cell)->size(), deallocator, cell, &exc);
+  if (!obj || exc) {
+    delete cell;
+    checkException(obj, exc);
+  }
+  return createObject(obj).getArrayBuffer(*this);
 }
 
 size_t JSCRuntime::size(const jsi::Array &arr) {

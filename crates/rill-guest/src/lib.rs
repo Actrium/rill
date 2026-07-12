@@ -110,16 +110,17 @@ pub mod rt {
     static mut TURN_DEPTH: u32 = 0;
 
     // Outstanding talc-FALLBACK allocations `(ptr, size)` that `alloc` handed out
-    // for oversized (> WIRE_SIZE) host-written buffers. `resolve` frees a return's
-    // SOURCE buffer by looking it up here — so it frees ONLY buffers the guest
-    // itself allocated, exactly once. This is the load-bearing safety invariant:
-    // `resolve` is a raw ABI entry whose `ptr` is guest-allocated in the real host
-    // (the host always writes via `rill_alloc` first), but a test harness or a
-    // misbehaving host could pass a foreign pointer; matching against this table
-    // means such a pointer is NEVER wild-freed (a bare "off-arena => free" rule
-    // would double-free it). Arena buffers are recycled per turn and never appear
-    // here. Bounded by MAX_FALLBACK_TRACKED so a fallback with no matching resolve
-    // (e.g. an oversized event payload) cannot grow it without limit.
+    // for oversized (> WIRE_SIZE) host-written buffers. Each host->guest entry
+    // frees its SOURCE buffers by looking them up here after copying/consuming
+    // (`resolve` for returns, `events::dispatch` for events) — so it frees ONLY
+    // buffers the guest itself allocated, exactly once. This is the load-bearing
+    // safety invariant: these are raw ABI entries whose `ptr` is guest-allocated
+    // in the real host (the host always writes via `rill_alloc` first), but a
+    // test harness or a misbehaving host could pass a foreign pointer; matching
+    // against this table means such a pointer is NEVER wild-freed (a bare
+    // "off-arena => free" rule would double-free it). Arena buffers are recycled
+    // per turn and never appear here. Bounded by MAX_FALLBACK_TRACKED so a
+    // fallback whose entry never consumes it cannot grow the table without limit.
     static mut FALLBACK_ALLOCS: Vec<(usize, usize)> = Vec::new();
     pub(crate) const MAX_FALLBACK_TRACKED: usize = 64;
 
@@ -182,8 +183,8 @@ pub mod rt {
     /// # Safety
     /// If `ptr` is tracked, it must still be live (not already freed) — upheld
     /// because a fallback ptr is recorded once by `alloc` and removed on the first
-    /// matching `resolve`.
-    unsafe fn free_fallback_source(ptr: *const u8) {
+    /// matching entry consumer (`resolve`, or `events::dispatch` for events).
+    pub(crate) unsafe fn free_fallback_source(ptr: *const u8) {
         if wire_contains(ptr) {
             return; // arena buffer: recycled per turn, never freed here
         }
@@ -208,10 +209,9 @@ pub mod rt {
     ///
     /// Host-written wire buffers come from the per-turn WIRE arena (recycled at
     /// each outermost turn boundary); an oversized request falls back to the
-    /// global heap (talc) and is recorded in FALLBACK_ALLOCS so the return path
-    /// (`resolve`) can free it after copying it out. A fallback with no matching
-    /// resolve (e.g. an oversized event payload) still relies on the per-turn
-    /// recycle for its arena-side reads and leaks the buffer bounded per turn.
+    /// global heap (talc) and is recorded in FALLBACK_ALLOCS so the consuming
+    /// entry can free it after copying it out — `resolve` for returns,
+    /// `events::dispatch` for event name/payload.
     pub fn alloc(size: usize) -> *mut u8 {
         unsafe {
             let need = size.max(1);
@@ -1787,8 +1787,10 @@ pub mod gpu {
 }
 
 /// Declarative UI: build a small element tree and `render` it. The guest sends a
-/// render batch (CREATE / TEXT / APPEND ops) the host `receiver` materializes —
-/// the same rendering path JS guests use, only the batch is authored in Rust.
+/// render batch (CREATE / APPEND ops; text nodes are CREATE type "__TEXT__"
+/// with props.text, matching the JS reconciler) the host `receiver`
+/// materializes — the same rendering path JS guests use, only the batch is
+/// authored in Rust.
 pub mod ui {
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -1841,12 +1843,194 @@ pub mod ui {
     }
 }
 
-/// Materialize `root` on the host: walk the tree into an operation batch
-/// (`{version,batchId,operations:[…]}`, UTF-8 JSON) and hand it to the host's
-/// render channel. One-way; no host round-trip.
+// ---- WIP binary op-batch wire: runtime gate + emit fork ----
+//
+// Guest half of the op-batch binary route (`contracts/op-batch-wire.json`).
+// Two-level gate, mirroring the canvas binary wire: the `wip-binary-protocol`
+// cargo feature compiles the encoder in, and the HOST pushes the runtime half
+// via the optional `rill_wire_caps` export (bit0 = binary op-batch), called
+// between instantiation and `rill_init` so the flag is set before the first
+// render — `render()` is synchronous, so a canvas-style async `getInfo` probe
+// cannot work here. A host that never calls it (old host, gate off) leaves the
+// default `false` and the guest emits JSON: no flag-day in either direction.
+#[cfg(feature = "wip-binary-protocol")]
+mod op_batch_wire {
+    use crate::wire_encode::{Batch, Encoder, Op, Value};
+    use alloc::vec::Vec;
+
+    // Single-task guest, no threads — same unsafe-static pattern as the canvas
+    // handshake cache (`BINARY_SUPPORTED`).
+    static mut ENABLED: bool = false;
+    // Session-persistent encoder => stable cross-batch intern indices. An
+    // encoder that returned `Err` must be DISCARDED (its intern table may hold
+    // entries from the aborted batch), hence the Option: it is `take`n for the
+    // encode and only put back on success.
+    static mut ENCODER: Option<Encoder> = None;
+    // Monotonic batch id stamped into the binary header.
+    static mut BATCH_ID: u32 = 0;
+    // Latch: log the compiled-in-but-not-enabled diagnostic once, not per render.
+    static mut GATE_OFF_LOGGED: bool = false;
+
+    pub(crate) fn set_caps(flags: u32) {
+        unsafe { ENABLED = (flags & 0x1) != 0 };
+    }
+
+    pub(crate) fn enabled() -> bool {
+        unsafe { ENABLED }
+    }
+
+    /// The diagnostic that makes an unwired gate loud instead of silent: the
+    /// feature is compiled in but the host never pushed `rill_wire_caps`.
+    pub(crate) fn log_gate_off_once() {
+        unsafe {
+            if !GATE_OFF_LOGGED {
+                GATE_OFF_LOGGED = true;
+                crate::log(
+                    "[info] wip-binary-protocol compiled in but host did not enable binary op-batch (rill_wire_caps); using JSON",
+                );
+            }
+        }
+    }
+
+    fn next_batch_id() -> u32 {
+        unsafe {
+            BATCH_ID = BATCH_ID.wrapping_add(1);
+            BATCH_ID
+        }
+    }
+
+    /// Binary render emit. Returns `true` when the batch went out on the wire;
+    /// `false` means encode failed closed (warn logged, encoder discarded) and
+    /// the caller must fall through to JSON so the render is never dropped.
+    pub(crate) fn render_binary(root: &crate::ui::Node) -> bool {
+        let mut ops: Vec<Op<'_>> = Vec::new();
+        let mut next_id: u32 = 0;
+        let root_id = emit_node(root, &mut ops, &mut next_id);
+        // Attach the root to the receiver root (parentId 0).
+        ops.push(Op::Append {
+            id: 0,
+            parent_id: 0,
+            child_id: root_id,
+        });
+        let batch = Batch {
+            batch_id: next_batch_id(),
+            ops,
+        };
+
+        let mut encoder = unsafe { ENCODER.take() }.unwrap_or_default();
+        match encoder.encode_batch(&batch) {
+            Ok(bytes) => {
+                // Only a clean encoder goes back for reuse (stable interns).
+                unsafe { ENCODER = Some(encoder) };
+                unsafe { crate::rill_send_batch(bytes.as_ptr(), bytes.len()) };
+                true
+            }
+            Err(_) => {
+                crate::log(
+                    "[warn] op-batch binary encode failed; falling back to JSON for this batch",
+                );
+                false
+            }
+        }
+    }
+
+    /// The wire contract's NUMBER RULE (caller's responsibility): an integer in
+    /// i32 range is `Int32`, anything else finite is `Float64`.
+    fn num(v: u32) -> Value<'static> {
+        if v <= i32::MAX as u32 {
+            Value::Int32(v as i32)
+        } else {
+            Value::Float64(v as f64)
+        }
+    }
+
+    /// Typed twin of the JSON `emit_node` walk. MUST stay op-for-op identical
+    /// to it — same ids, same order, same prop shapes — so both routes
+    /// materialize the same tree on the host.
+    fn emit_node<'a>(node: &'a crate::ui::Node, ops: &mut Vec<Op<'a>>, next_id: &mut u32) -> u32 {
+        *next_id += 1;
+        let id = *next_id;
+        match node {
+            crate::ui::Node::View(children) => {
+                ops.push(Op::Create {
+                    id,
+                    ty: "View",
+                    props: Vec::new(),
+                });
+                for child in children {
+                    let child_id = emit_node(child, ops, next_id);
+                    ops.push(Op::Append {
+                        id: 0,
+                        parent_id: id,
+                        child_id,
+                    });
+                }
+            }
+            crate::ui::Node::Text(content) => {
+                ops.push(Op::Create {
+                    id,
+                    ty: "__TEXT__",
+                    props: alloc::vec![("text", Value::Str(content))],
+                });
+            }
+            crate::ui::Node::Canvas {
+                canvas_id,
+                width,
+                height,
+                mode,
+            } => {
+                ops.push(Op::Create {
+                    id,
+                    ty: "Canvas",
+                    props: alloc::vec![
+                        ("canvasId", Value::Str(canvas_id)),
+                        ("mode", Value::Str(mode)),
+                        (
+                            "style",
+                            Value::Object(alloc::vec![
+                                ("width", num(*width)),
+                                ("height", num(*height)),
+                            ])
+                        ),
+                    ],
+                });
+            }
+        }
+        id
+    }
+}
+
+/// Host→guest capability push for the WIP binary op-batch wire: bit0 of
+/// `flags` enables binary render batches. Optional in both directions — an old
+/// host never calls it (guest stays JSON), an old guest lacks the export (host
+/// skips the call). The host must call it BEFORE `rill_init` so the very first
+/// render already goes out on the negotiated wire.
+#[cfg(feature = "wip-binary-protocol")]
+#[no_mangle]
+pub extern "C" fn rill_wire_caps(flags: u32) {
+    op_batch_wire::set_caps(flags);
+}
+
+/// Materialize `root` on the host: walk the tree into an operation batch and
+/// hand it to the host's render channel (one-way; no host round-trip). Default
+/// wire is UTF-8 JSON (`{version,batchId,operations:[…]}`); with the
+/// `wip-binary-protocol` feature compiled in AND the host having enabled it
+/// via `rill_wire_caps`, the batch goes out on the binary op-batch wire
+/// instead (falling back to JSON if the encode fails closed).
 pub fn render(root: ui::Node) {
     use alloc::format;
     use alloc::string::String;
+
+    #[cfg(feature = "wip-binary-protocol")]
+    {
+        if op_batch_wire::enabled() {
+            if op_batch_wire::render_binary(&root) {
+                return;
+            }
+        } else {
+            op_batch_wire::log_gate_off_once();
+        }
+    }
 
     let mut ops = String::new();
     let mut next_id: u32 = 0;
@@ -1883,15 +2067,18 @@ fn emit_node(ops: &mut alloc::string::String, node: &ui::Node, next_id: &mut u32
             }
         }
         ui::Node::Text(content) => {
-            push_op(
-                ops,
-                format!("{{\"op\":\"CREATE\",\"id\":{id},\"type\":\"Text\",\"props\":{{}}}}"),
-            );
+            // Text nodes must be CREATE type "__TEXT__" with props.text — the
+            // only shape the host receiver's renderNode() routes through the
+            // Text-as-children branch, and what the JS reconciler emits
+            // (createTextInstance). A "Text"-typed node falls into the generic
+            // component branch and renders no children.
             let mut escaped = alloc::string::String::new();
             json_escape(&mut escaped, content);
             push_op(
                 ops,
-                format!("{{\"op\":\"TEXT\",\"id\":{id},\"text\":{escaped}}}"),
+                format!(
+                    "{{\"op\":\"CREATE\",\"id\":{id},\"type\":\"__TEXT__\",\"props\":{{\"text\":{escaped}}}}}"
+                ),
             );
         }
         ui::Node::Canvas {
@@ -2024,6 +2211,14 @@ pub mod events {
         for handler in &matched {
             handler(payload);
         }
+        // The payload is fully consumed here (handlers get a &[u8] that must
+        // not escape the call), so an OVERSIZED (> WIRE_SIZE) buffer that took
+        // the talc fallback in `alloc` has no other owner — free it now, same
+        // as `resolve` does for returns. Without this every oversized event
+        // payload leaked, so repeated large events grew wasm memory linearly.
+        // Arena buffers and foreign pointers are untouched (table-matched).
+        crate::rt::free_fallback_source(name_ptr);
+        crate::rt::free_fallback_source(payload_ptr);
         crate::rt::end_wire_turn();
     }
 }
@@ -2111,17 +2306,19 @@ extern crate std;
 
 /// Guest-side encoder for the binary op-batch wire protocol
 /// (`contracts/op-batch-wire.json`). WORK IN PROGRESS, gated behind the
-/// `wip-binary-protocol` feature (default OFF) and NOT wired into the live
-/// op-batch emit path — new code only, so the shipped guest is unchanged.
+/// `wip-binary-protocol` feature (default OFF); wired into `render()` via the
+/// `op_batch_wire` runtime gate — taken only when the host enabled it through
+/// the optional `rill_wire_caps` export, so the default shipped guest is
+/// unchanged (JSON).
 #[cfg(feature = "wip-binary-protocol")]
 pub mod wire_encode;
 
 /// Guest-side encoder for the binary CANVAS wire protocol
 /// (`contracts/canvas-wire.json`) — a per-frame flat 2D display list, sister to
 /// `wire_encode` (distinct magic `RCNV`). WORK IN PROGRESS, gated behind the
-/// `wip-binary-protocol` feature (default OFF) and NOT wired into the live
-/// `canvas::draw` emit path (which still ships JSON) — new code only, so the
-/// shipped guest is unchanged.
+/// `wip-binary-protocol` feature (default OFF); wired into `canvas::draw` via
+/// the `host:canvas.getInfo` capability handshake — a host that does not
+/// advertise `binaryDraw` still receives the legacy JSON op-list.
 #[cfg(feature = "wip-binary-protocol")]
 pub mod canvas_encode;
 
@@ -2644,6 +2841,60 @@ mod tests {
             // Tidy up: a left-full table would perturb other rt tests' fallback
             // deltas (they hold the same lock, so ordering is otherwise serialized).
             rt::clear_fallback();
+        }
+
+        /// events::dispatch must free an OVERSIZED (off-arena talc fallback)
+        /// event payload after the handlers consumed it — the event twin of
+        /// `return_path_frees_oversized_fallback_no_leak`. Before the fix every
+        /// oversized event payload leaked, so repeated large events grew wasm
+        /// memory linearly.
+        #[test]
+        fn event_dispatch_frees_oversized_fallback_no_leak() {
+            use crate::rt;
+
+            // Serialize with every other rt-static-touching test.
+            let _guard = crate::wire_lock();
+
+            const BIG: usize = rt::WIRE_SIZE + 4096;
+            let fb_baseline = rt::fallback_count();
+
+            // The handler proves the payload survives intact up to dispatch.
+            let seen = std::rc::Rc::new(core::cell::Cell::new(0usize));
+            let seen_in_handler = seen.clone();
+            let handler_id = crate::events::on("bigload", move |payload| {
+                seen_in_handler.set(payload.len());
+            });
+
+            for _ in 0..8 {
+                // The host writes name + payload via rill_alloc before calling
+                // rill_on_event; the payload is oversized so it takes the
+                // off-arena fallback (the only path that could leak).
+                let name = b"bigload";
+                let name_ptr = rt::alloc(name.len());
+                assert!(!name_ptr.is_null(), "name alloc must succeed");
+                unsafe {
+                    core::ptr::copy_nonoverlapping(name.as_ptr(), name_ptr, name.len());
+                }
+                let payload_ptr = rt::alloc(BIG);
+                assert!(!payload_ptr.is_null(), "payload alloc must succeed");
+                assert!(
+                    !rt::wire_contains(payload_ptr),
+                    "an oversized event payload must fall back off-arena"
+                );
+                unsafe {
+                    core::ptr::write_bytes(payload_ptr, 0xAB, BIG);
+                    crate::events::dispatch(name_ptr, name.len(), payload_ptr, BIG);
+                }
+                assert_eq!(seen.get(), BIG, "handler must see the full payload");
+            }
+
+            assert_eq!(
+                rt::fallback_count(),
+                fb_baseline,
+                "every oversized event payload must be freed after dispatch"
+            );
+
+            crate::events::off(handler_id);
         }
     }
 }

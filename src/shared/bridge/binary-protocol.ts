@@ -177,6 +177,17 @@ class BinaryDecoder {
       operations.push(this.readOperation(flags));
     }
 
+    // Full-consumption check: every declared op has been read, so the buffer
+    // must be exactly spent. Trailing bytes mean either a corrupt/oversized
+    // frame or a desynced stream we silently mis-parsed — reject fail-closed,
+    // matching the authoritative streaming decoder (wire-decoder.ts) which also
+    // refuses a batch that does not end on a frame boundary. Reachable because
+    // Engine.injectRuntimeAPI routes ArrayBuffer batches through
+    // Bridge.sendBinaryBatch() into this decoder.
+    if (this.pos !== this.uint8.length) {
+      throw new Error(`Trailing bytes after batch: consumed ${this.pos} of ${this.uint8.length}`);
+    }
+
     return {
       version,
       batchId,
@@ -361,6 +372,14 @@ class BinaryDecoder {
           __fnId: this.internTable[fnIdIdx] ?? '',
         };
         const fnFlags = this.readU8();
+        // bits 3..7 are reserved and MUST be written 0 (contracts/
+        // op-batch-wire.json values.FUNCTION flags note). A set reserved bit
+        // implies unknown trailing fields we cannot length, so reject
+        // fail-closed rather than desync the stream — matching
+        // wire-decoder.ts and the C++ WireDecoder.
+        if ((fnFlags & 0xf8) !== 0) {
+          throw new Error(`FUNCTION reserved flag bit set: 0x${fnFlags.toString(16)}`);
+        }
         if ((fnFlags & 0x01) !== 0) fn.__name = this.internTable[this.readU16()] ?? '';
         if ((fnFlags & 0x02) !== 0) fn.__sourceFile = this.internTable[this.readU16()] ?? '';
         if ((fnFlags & 0x04) !== 0) fn.__sourceLine = this.readU32();

@@ -412,3 +412,276 @@ describe('store-net-envelope — golden cross-language lock', () => {
     });
   }
 });
+
+describe('reviveSentinels prototype-pollution hardening', () => {
+  // JSON.parse makes '__proto__' an OWN property; the pre-fix rebuild used
+  // plain assignment, which SET the rebuilt object's prototype instead —
+  // letting a hostile guest envelope inject inherited fields into the args
+  // handed to host capability impls.
+  it('a guest __proto__ key becomes an own data property, never the prototype', () => {
+    const hostile = JSON.parse('{"__proto__":{"polluted":true},"x":{"$b":0}}');
+    const seg = new Uint8Array([1, 2, 3]);
+
+    const revived = reviveSentinels(hostile, [seg]) as Record<string, unknown>;
+
+    // The prototype is untouched (no inherited 'polluted' field)...
+    expect(Object.getPrototypeOf(revived)).toBe(Object.prototype);
+    expect((revived as { polluted?: unknown }).polluted).toBeUndefined();
+    // ...Object.prototype itself is not polluted either...
+    expect(({}as { polluted?: unknown }).polluted).toBeUndefined();
+    // ...and the key survives as a plain OWN property with its walked value.
+    expect(Object.hasOwn(revived, '__proto__')).toBe(true);
+    expect(Object.getOwnPropertyDescriptor(revived, '__proto__')?.value).toEqual({
+      polluted: true,
+    });
+    // The sentinel next to it still revives normally.
+    expect(revived.x).toEqual(seg);
+  });
+});
+
+describe('hoistSentinels prototype-pollution hardening (outbound twin)', () => {
+  // The encode direction had the same plain-assignment hazard: a byte-carrying
+  // result whose object holds an OWN '__proto__' key (e.g. data round-tripped
+  // through JSON.parse) would set the rebuilt object's prototype instead,
+  // silently dropping the field from the encoded control JSON.
+  it("a result's own __proto__ key survives encoding as a field, not a prototype", () => {
+    const result = JSON.parse('{"__proto__":{"kept":1},"pad":true}') as Record<string, unknown>;
+    // Reason: attaching bytes to the parsed object; test-local shape.
+    (result as { blob?: Uint8Array }).blob = new Uint8Array([9, 9]);
+
+    const { control, segments } = hoistSentinels(result);
+
+    expect(segments).toHaveLength(1);
+    const ctrl = control as Record<string, unknown>;
+    // The key is an own data property of the walked control value...
+    expect(Object.hasOwn(ctrl, '__proto__')).toBe(true);
+    expect(Object.getPrototypeOf(ctrl)).toBe(Object.prototype);
+    // ...and it survives JSON serialization (the wire bytes), where the
+    // pre-fix prototype-set made it vanish entirely.
+    const encoded = JSON.parse(JSON.stringify(control)) as Record<string, unknown>;
+    expect(Object.getOwnPropertyDescriptor(encoded, '__proto__')?.value).toEqual({ kept: 1 });
+    expect(encoded.pad).toBe(true);
+  });
+
+  it('round-trip: an own __proto__ field survives hoist -> revive intact', () => {
+    const original = JSON.parse('{"__proto__":{"kept":1}}') as Record<string, unknown>;
+    // Reason: attaching bytes to the parsed object; test-local shape.
+    (original as { blob?: Uint8Array }).blob = new Uint8Array([7]);
+
+    const { control, segments } = hoistSentinels(original);
+    const revived = reviveSentinels(
+      JSON.parse(JSON.stringify(control)),
+      segments
+    ) as Record<string, unknown>;
+
+    expect(Object.getPrototypeOf(revived)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(revived, '__proto__')?.value).toEqual({ kept: 1 });
+    expect(revived.blob).toEqual(new Uint8Array([7]));
+  });
+});
+
+describe('hoistSentinels toJSON semantics (byte-carrying results)', () => {
+  // A byte-carrying result takes the RBS1 path, where the control plane is walked
+  // structurally instead of via JSON.stringify. Without honoring toJSON, an object
+  // whose JSON form lives entirely in toJSON (Date, URL, custom) has no own data
+  // props and collapses to `{}` — losing its value. A Uint8Array sibling is what
+  // forces the RBS1 path, so it must be present to reproduce the regression.
+  it('encodes a sibling Date as its ISO string, not an empty object', () => {
+    const iso = '2024-01-01T00:00:00.000Z';
+    const result = { when: new Date(iso), blob: new Uint8Array([1, 2, 3]) };
+
+    const { control, segments } = hoistSentinels(result);
+
+    expect(segments).toHaveLength(1);
+    const ctrl = control as Record<string, unknown>;
+    expect(ctrl.when).toBe(iso);
+    expect(ctrl.blob).toEqual({ $b: 0 });
+    // The control plane must serialize to exactly the same JSON the non-binary
+    // (plain JSON.stringify) path would have produced for the non-byte fields.
+    expect(JSON.parse(JSON.stringify(ctrl))).toEqual({ when: iso, blob: { $b: 0 } });
+  });
+
+  it('honors a custom toJSON on a nested object', () => {
+    const result = {
+      meta: { toJSON: () => ({ tag: 'kept' }) },
+      blob: new Uint8Array([9]),
+    };
+
+    const { control } = hoistSentinels(result);
+
+    const ctrl = control as Record<string, unknown>;
+    expect(ctrl.meta).toEqual({ tag: 'kept' });
+  });
+
+  it('passes the real property key / array index to toJSON, matching JSON.stringify', () => {
+    // A key-sensitive toJSON must see the same key JSON.stringify would pass:
+    // the property name for an object member, the index string for an array
+    // element, '' only at the root. A byte sibling forces the RBS1 walk path.
+    const result = {
+      a: { toJSON: (k: string) => k },
+      arr: [{ toJSON: (k: string) => k }],
+      blob: new Uint8Array([1]),
+    };
+
+    const { control } = hoistSentinels(result);
+
+    const ctrl = control as Record<string, unknown>;
+    // Exactly what JSON.stringify produces for the non-byte fields.
+    expect(ctrl.a).toBe('a');
+    expect(ctrl.arr).toEqual(['0']);
+    expect(JSON.parse(JSON.stringify({ a: ctrl.a, arr: ctrl.arr }))).toEqual({
+      a: 'a',
+      arr: ['0'],
+    });
+  });
+
+  it('passes the root key "" to a top-level toJSON', () => {
+    // toJSON on the ROOT fires with key '' (JSON.stringify wraps the value as
+    // { '': value }). Its return value carries the byte leaf, so the whole
+    // thing still takes the RBS1 path.
+    const result = {
+      toJSON: (k: string) => ({ echoedKey: k, blob: new Uint8Array([1]) }),
+    };
+
+    const { control, segments } = hoistSentinels(result);
+
+    expect(segments).toHaveLength(1);
+    const ctrl = control as Record<string, unknown>;
+    expect(ctrl.echoedKey).toBe('');
+    expect(ctrl.blob).toEqual({ $b: 0 });
+  });
+
+  it('consumes toJSON exactly once: a callable toJSON inside a toJSON result is dropped, not re-invoked', () => {
+    // Per spec, a toJSON RESULT is serialized structurally without consulting
+    // hooks again; a callable `toJSON` member of it is an unserializable
+    // function and is dropped. The control value must be inert: if the walk
+    // left the function in place, the final JSON.stringify of the control
+    // would re-fire it as a hook and emit 'inner' where JSON.stringify of the
+    // original emits {}.
+    let innerCalls = 0;
+    const result = {
+      a: {
+        toJSON: () => ({
+          toJSON: () => {
+            innerCalls += 1;
+            return 'inner';
+          },
+        }),
+      },
+      blob: new Uint8Array([1]),
+    };
+
+    const { control } = hoistSentinels(result);
+
+    const ctrl = control as Record<string, unknown>;
+    expect(JSON.stringify(ctrl.a)).toBe('{}');
+    expect(innerCalls).toBe(0);
+  });
+
+  it('serializes a function through its own toJSON, and drops/nulls plain functions', () => {
+    // A callable value is still an Object: JSON.stringify consults its toJSON.
+    // Without one, a function member is dropped and a function array element
+    // becomes null.
+    const fnWithToJSON = () => {};
+    fnWithToJSON.toJSON = (k: string) => `fn:${k}`;
+    const result = {
+      f: fnWithToJSON,
+      plain: () => {},
+      arr: [() => {}],
+      blob: new Uint8Array([1]),
+    };
+
+    const { control } = hoistSentinels(result);
+
+    const ctrl = control as Record<string, unknown>;
+    expect(ctrl.f).toBe('fn:f');
+    expect(Object.hasOwn(ctrl, 'plain')).toBe(false);
+    expect(ctrl.arr).toEqual([null]);
+    // Oracle: identical to JSON.stringify of the original, non-byte fields.
+    expect(JSON.parse(JSON.stringify({ f: ctrl.f, plain: undefined, arr: ctrl.arr }))).toEqual(
+      JSON.parse(JSON.stringify({ f: result.f, plain: result.plain, arr: result.arr }))
+    );
+  });
+
+  it('unwraps Number/String/Boolean wrapper objects like JSON.stringify', () => {
+    const result = {
+      n: new Number(5),
+      s: new String('ab'),
+      b: new Boolean(true),
+      blob: new Uint8Array([1]),
+    };
+
+    const { control } = hoistSentinels(result);
+
+    const ctrl = control as Record<string, unknown>;
+    expect(ctrl.n).toBe(5);
+    expect(ctrl.s).toBe('ab');
+    expect(ctrl.b).toBe(true);
+    expect(JSON.stringify({ n: ctrl.n, s: ctrl.s, b: ctrl.b })).toBe(
+      JSON.stringify({ n: result.n, s: result.s, b: result.b })
+    );
+  });
+
+  it('detects wrappers by internal slot, not prototype chain, and converts per spec', () => {
+    // Object.create(Number.prototype) LOOKS like a wrapper to instanceof but
+    // has no [[NumberData]] slot: JSON.stringify serializes it structurally
+    // ({}), and it must not make the walk throw.
+    const impostor = Object.create(Number.prototype) as object;
+    // JSON.stringify's conversions consult specific operations: ToString for a
+    // String wrapper (an own toString wins), the [[BooleanData]] slot for a
+    // Boolean wrapper (own methods NEVER consulted), ToNumber for a Number
+    // wrapper (a non-numeric own valueOf yields NaN, serialized as null). A
+    // null-prototype Boolean wrapper still carries its slot.
+    const loudString = new String('ab');
+    (loudString as { toString: () => string }).toString = () => 'ZZ';
+    const lyingBoolean = new Boolean(true);
+    (lyingBoolean as { valueOf: () => boolean }).valueOf = () => false;
+    const bareBoolean = Object.setPrototypeOf(new Boolean(true), null) as boolean;
+    const result = {
+      impostor,
+      loudString,
+      lyingBoolean,
+      bareBoolean,
+      blob: new Uint8Array([1]),
+    };
+
+    const { control } = hoistSentinels(result);
+
+    const ctrl = control as Record<string, unknown>;
+    expect(ctrl.impostor).toEqual({});
+    expect(ctrl.loudString).toBe('ZZ');
+    expect(ctrl.lyingBoolean).toBe(true);
+    expect(ctrl.bareBoolean).toBe(true);
+    // Oracle: byte-for-byte what JSON.stringify produces for these fields.
+    expect(
+      JSON.stringify({
+        impostor: ctrl.impostor,
+        loudString: ctrl.loudString,
+        lyingBoolean: ctrl.lyingBoolean,
+        bareBoolean: ctrl.bareBoolean,
+      })
+    ).toBe(
+      JSON.stringify({
+        impostor,
+        loudString,
+        lyingBoolean,
+        bareBoolean,
+      })
+    );
+  });
+
+  it('unwraps a BigInt wrapper so the control stringify throws like JSON.stringify', () => {
+    // JSON.stringify(Object(1n)) unwraps [[BigIntData]] and then throws
+    // (bigint, no toJSON). The walk must not paper over that as `{}`: it
+    // unwraps to the bigint primitive, and stringifying the control throws
+    // exactly like the oracle.
+    const result = { x: Object(1n), blob: new Uint8Array([1]) };
+
+    const { control } = hoistSentinels(result);
+
+    const ctrl = control as Record<string, unknown>;
+    expect(typeof ctrl.x).toBe('bigint');
+    expect(() => JSON.stringify(ctrl)).toThrow(TypeError);
+    expect(() => JSON.stringify(result)).toThrow(TypeError);
+  });
+});

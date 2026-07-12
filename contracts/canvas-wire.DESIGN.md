@@ -98,6 +98,25 @@ host:canvas.getInfo()  ->  { binaryDraw: boolean, wireVersion: number }
    below). The frame semantics are identical, so a guest that fell back to JSON
    renders the same picture.
 
+**Host contract — the capability fields are host-global; the id-less probe MUST be answered.**
+
+`getInfo` carries two distinct roles: **(a)** a *host-global* capability probe —
+the guest sends `getInfo({})` with an **empty payload, exactly once at startup,
+before it has bound any canvas** (`host_supports_binary` in
+`crates/rill-guest/src/lib.rs`) — and **(b)** *per-canvas* metadata (width /
+height / dpr) for a named `canvasId`. The capability fields `binaryDraw` and
+`wireVersion` belong to role (a): they are a fact about the **host**, not about
+any one canvas. A host therefore **MUST** answer them affirmatively on the id-less
+probe `getInfo({})`, and **MUST NOT** gate them on the existence of a specific
+canvas. A host that returns `null` for an absent/empty `canvasId` — because it
+ties the reply to a resolved canvas handle — makes the startup probe come back
+empty, so the guest caches "binary unsupported" and **falls back to JSON forever,
+silently**, even though the host can decode binary. Per-canvas metadata for a
+*named-but-unknown* `canvasId` may still be `null` (so "does this canvas exist"
+stays answerable); that is separate from the global capability answer, which is
+always present. Golden-vector tests cannot catch a violation — they feed pre-baked
+bytes and bypass the handshake — so this is stated as an explicit contract.
+
 **Why `getInfo` and not a host-info bit or `hostModules` string?**
 
 - It is **purely additive on an existing seam** — no new export, no ABI change,

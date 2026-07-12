@@ -19,10 +19,22 @@ export interface BoundarySchema<Input, Output> {
  * name is checked against the actual Input/Output type where feasible: a field
  * typed `string`/`number`/etc. is rejected, an unknown field name is rejected.
  * Falls back to `never` when `T` is not an object (e.g. `void`/`unknown`).
+ *
+ * A field that can be ABSENT (optional, or typed `| undefined` / `| null`) must
+ * be declared with a trailing `?` marker (`'body?'`): the runtime backstop then
+ * tolerates absence but still requires a `Uint8Array` when the field is
+ * present. A required field is declared without the marker, so its absence
+ * stays a boundary violation.
  */
 export type BinaryFieldNames<T> = T extends object
   ? {
-      [K in keyof T]-?: Uint8Array extends T[K] ? (K extends string ? K : never) : never;
+      [K in keyof T]-?: K extends string
+        ? Uint8Array extends NonNullable<T[K]>
+          ? Extract<T[K], undefined | null> extends never
+            ? K
+            : `${K}?`
+          : never
+        : never;
     }[keyof T]
   : never;
 
@@ -513,7 +525,10 @@ function validateBinaryFields(value: unknown, label: string): void {
     }
 
     for (const name of list) {
-      if (typeof name !== 'string' || name.length === 0) {
+      // A trailing '?' is the optional-field marker; the name before it must
+      // still be non-empty (a bare '?' names no field).
+      const fieldName = typeof name === 'string' && name.endsWith('?') ? name.slice(0, -1) : name;
+      if (typeof fieldName !== 'string' || fieldName.length === 0) {
         throw new Error(
           `[rill/contract] Descriptor "${label}" binary.${direction} must contain non-empty field-name strings.`
         );
@@ -612,6 +627,11 @@ function wrapRpcDispatch(
  * `value` is an actual `Uint8Array`. Returns the value unchanged on success so it
  * can be run through {@link runBoundary}. Throws a short message the boundary
  * wrapper decorates with the capability + phase context.
+ *
+ * A `null`/absent whole result is passed through unchecked: it carries no fields
+ * to validate, so a nullable output that declares `binary` (e.g. a store's
+ * `getBytes(key) -> { value: Uint8Array; ... } | null` returning `null` for a
+ * missing key) is a legitimate result, not a boundary violation.
  */
 // Reason: a fail-closed backstop over an untyped boundary value; returns it unchanged for runBoundary.
 function assertBinaryFields(
@@ -620,10 +640,25 @@ function assertBinaryFields(
   phase: HostModuleBoundaryPhase
   // Reason: returns the value unchanged so runBoundary can thread it through the boundary.
 ): unknown {
+  // No whole result -> no binary fields to assert. Without this, the field walk
+  // below would reject a nullable output's legitimate `null` (or an absent input).
+  if (value == null) {
+    return value;
+  }
   for (const field of fields) {
-    const fieldValue = (value as Record<string, unknown> | null | undefined)?.[field];
+    // Trailing '?' marks an OPTIONAL binary field (e.g. an optional request
+    // body): absence is legitimate, but a present value must still be a real
+    // Uint8Array. Unmarked fields keep failing closed on absence.
+    const optional = field.endsWith('?');
+    const name = optional ? field.slice(0, -1) : field;
+    const fieldValue = (value as Record<string, unknown> | null | undefined)?.[name];
+    if (optional && fieldValue == null) {
+      continue;
+    }
     if (!(fieldValue instanceof Uint8Array)) {
-      throw new Error(`binary ${phase} field "${field}" must be a Uint8Array`);
+      throw new Error(
+        `binary ${phase} field "${name}" must be a Uint8Array${optional ? ' when present' : ''}`
+      );
     }
   }
   return value;

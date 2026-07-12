@@ -467,3 +467,69 @@ describe('Factory functions', () => {
     expect(binary.byteLength).toBeGreaterThan(HEADER_SIZE);
   });
 });
+
+// ============================================
+// Bare-sandbox Compatibility Tests
+// ============================================
+
+// Native guest sandboxes (iOS JSC, Android Hermes, QuickJS native/wasm)
+// provide core ECMAScript only — no `performance`, no `TextEncoder`. The
+// encoder must keep working there, and its fallback UTF-8 output must be
+// byte-identical to TextEncoder's (the host wire decoder uses a fatal
+// TextDecoder that fails closed on any deviation).
+describe('BinaryEncoder in a bare sandbox (no performance / TextEncoder)', () => {
+  // Strings covering 1-byte ASCII, 2-byte (é), 3-byte (中文), 4-byte astral
+  // (emoji surrogate pair), and a lone surrogate (must become U+FFFD).
+  const trickyStrings = ['plain', 'café', '中文文本', 'emoji \u{1f680}!', 'lone \ud800 surrogate'];
+
+  function trickyBatch(): SerializedOperationBatch {
+    return createTestBatch(
+      trickyStrings.map(
+        (text, i): SerializedOperation => ({ op: 'CREATE', id: i + 1, type: '__TEXT__', props: { text } })
+      )
+    );
+  }
+
+  function withGlobalsRemoved<T>(names: string[], fn: () => T): T {
+    const g = globalThis as Record<string, unknown>;
+    const saved = names.map((name) => [name, g[name]] as const);
+    try {
+      for (const name of names) {
+        g[name] = undefined;
+      }
+      return fn();
+    } finally {
+      for (const [name, value] of saved) {
+        g[name] = value;
+      }
+    }
+  }
+
+  it('encodes without performance', () => {
+    const binary = withGlobalsRemoved(['performance'], () => {
+      const encoder = new BinaryEncoder();
+      return encoder.encodeBatch(trickyBatch());
+    });
+    expect(readU32LE(binary, 0)).toBe(RILL_MAGIC);
+  });
+
+  it('encodes without TextEncoder, byte-identical to the TextEncoder path', () => {
+    const withTextEncoder = new BinaryEncoder().encodeBatch(trickyBatch());
+    const withoutTextEncoder = withGlobalsRemoved(['TextEncoder'], () =>
+      new BinaryEncoder().encodeBatch(trickyBatch())
+    );
+    expect(new Uint8Array(withoutTextEncoder)).toEqual(new Uint8Array(withTextEncoder));
+  });
+
+  it('encodes with both globals absent (the JSC/Hermes reality) and stats stay sane', () => {
+    const reference = new BinaryEncoder().encodeBatch(trickyBatch());
+    const { binary, stats } = withGlobalsRemoved(['performance', 'TextEncoder'], () => {
+      const encoder = new BinaryEncoder();
+      const encoded = encoder.encodeBatch(trickyBatch());
+      return { binary: encoded, stats: encoder.getStats() };
+    });
+    expect(new Uint8Array(binary)).toEqual(new Uint8Array(reference));
+    expect(stats.encodingMs).toBeGreaterThanOrEqual(0);
+    expect(stats.operationCount).toBe(trickyStrings.length);
+  });
+});
