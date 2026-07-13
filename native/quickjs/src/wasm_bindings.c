@@ -20,6 +20,45 @@
 static JSRuntime *g_runtime = NULL;
 static JSContext *g_context = NULL;
 
+// Execution deadline (absolute, in emscripten_get_now() milliseconds).
+// 0 means no limit. Armed by the host via qjs_set_deadline() before every
+// entry into guest code; checked by the interrupt handler the engine polls
+// from its interpreter loop, so a guest `while(true){}` can be aborted.
+static double g_deadline_ms = 0;
+// Set by the interrupt handler when it fires; consumed (reset) by the entry
+// point that observes the resulting exception, so the host can tell a
+// deadline interrupt apart from an ordinary guest error.
+static int g_interrupted = 0;
+
+// Fixed error payload for deadline interrupts. The exception QuickJS throws
+// on interrupt is uncatchable and formatting it via JS_ToCString could
+// itself be interrupted (the deadline is still expired), so the interrupt
+// path returns this constant instead of stringifying the exception. The
+// host-side provider matches on this exact message.
+#define QJS_INTERRUPTED_ERROR_JSON \
+    "{\"error\":\"interrupted: execution deadline exceeded\"}"
+
+static double qjs_now_ms(void) {
+#ifdef __EMSCRIPTEN__
+    return emscripten_get_now();
+#else
+    return 0; // Non-Emscripten builds never arm a deadline.
+#endif
+}
+
+// JSInterruptHandler: return non-zero to abort execution (QuickJS then
+// throws an uncatchable InternalError). Keeps returning non-zero while the
+// deadline stays expired, so nested/outer interpreter frames unwind too.
+static int qjs_interrupt_handler(JSRuntime *rt, void *opaque) {
+    (void)rt;
+    (void)opaque;
+    if (g_deadline_ms > 0 && qjs_now_ms() > g_deadline_ms) {
+        g_interrupted = 1;
+        return 1;
+    }
+    return 0;
+}
+
 // Callback function pointer type (set from JS)
 typedef void (*HostCallbackFn)(const char *event, const char *data);
 static HostCallbackFn g_host_callback = NULL;
@@ -53,6 +92,10 @@ EXPORT int qjs_init(void) {
     // Set max stack size (1MB)
     JS_SetMaxStackSize(g_runtime, 1024 * 1024);
 
+    // Interrupt runaway guest code (e.g. `while(true){}`) once the
+    // host-armed deadline expires.
+    JS_SetInterruptHandler(g_runtime, qjs_interrupt_handler, NULL);
+
     g_context = JS_NewContext(g_runtime);
     if (!g_context) {
         JS_FreeRuntime(g_runtime);
@@ -61,6 +104,23 @@ EXPORT int qjs_init(void) {
     }
 
     return 0;
+}
+
+/**
+ * Arm (or clear) the guest execution deadline.
+ *
+ * ms_from_now > 0: guest code entered after this call is interrupted once
+ * `ms_from_now` milliseconds elapse. <= 0: clears the limit. The host sets
+ * this before every entry into guest code and clears it after the outermost
+ * entry returns.
+ */
+EXPORT void qjs_set_deadline(double ms_from_now) {
+    if (ms_from_now > 0) {
+        g_deadline_ms = qjs_now_ms() + ms_from_now;
+    } else {
+        g_deadline_ms = 0;
+    }
+    g_interrupted = 0;
 }
 
 EXPORT void qjs_destroy(void) {
@@ -73,6 +133,8 @@ EXPORT void qjs_destroy(void) {
         g_runtime = NULL;
     }
     g_host_callback = NULL;
+    g_deadline_ms = 0;
+    g_interrupted = 0;
 }
 
 // ============================================
@@ -91,6 +153,19 @@ EXPORT char *qjs_eval(const char *code) {
     JSValue result = JS_Eval(g_context, code, strlen(code), "<eval>",
                              JS_EVAL_TYPE_GLOBAL);
 
+    // Deadline interrupt: checked via the flag, NOT the exception state —
+    // promise machinery (reaction jobs, executors) catches exceptions at the
+    // C level and would convert the interrupt into a mere rejection. Also
+    // don't stringify anything: any JS re-entry could be interrupted again
+    // while the deadline is still expired. Return the fixed marker instead.
+    if (g_interrupted) {
+        g_interrupted = 0;
+        JS_FreeValue(g_context, result);
+        JSValue exception = JS_GetException(g_context);
+        JS_FreeValue(g_context, exception);
+        return strdup(QJS_INTERRUPTED_ERROR_JSON);
+    }
+
     if (JS_IsException(result)) {
         JSValue exception = JS_GetException(g_context);
         const char *msg = JS_ToCString(g_context, exception);
@@ -107,6 +182,14 @@ EXPORT char *qjs_eval(const char *code) {
 
     if (JS_IsException(json_str)) {
         JS_FreeValue(g_context, json_str);
+        // Clear the pending exception so it can't poison the next entry;
+        // stringification itself may have hit the deadline (toJSON/getter).
+        JSValue exception = JS_GetException(g_context);
+        JS_FreeValue(g_context, exception);
+        if (g_interrupted) {
+            g_interrupted = 0;
+            return strdup(QJS_INTERRUPTED_ERROR_JSON);
+        }
         return strdup("{\"value\":\"[unstringifiable]\"}");
     }
 
@@ -120,7 +203,7 @@ EXPORT char *qjs_eval(const char *code) {
 
 /**
  * Evaluate code without returning result (for module/setup code)
- * Returns 0 on success, -1 on error
+ * Returns 0 on success, -1 on error, -2 on deadline interrupt
  */
 EXPORT int qjs_eval_void(const char *code) {
     if (!g_context) {
@@ -129,6 +212,16 @@ EXPORT int qjs_eval_void(const char *code) {
 
     JSValue result = JS_Eval(g_context, code, strlen(code), "<eval>",
                              JS_EVAL_TYPE_GLOBAL);
+
+    // Flag check first: promise machinery can swallow the interrupt
+    // exception C-side, leaving a non-exception result (see qjs_eval).
+    if (g_interrupted) {
+        g_interrupted = 0;
+        JS_FreeValue(g_context, result);
+        JSValue exception = JS_GetException(g_context);
+        JS_FreeValue(g_context, exception);
+        return -2;
+    }
 
     if (JS_IsException(result)) {
         JSValue exception = JS_GetException(g_context);
@@ -393,6 +486,13 @@ EXPORT void qjs_fire_timer(int timer_id) {
 
         if (JS_IsFunction(g_context, callback)) {
             JSValue result = JS_Call(g_context, callback, JS_UNDEFINED, 0, NULL);
+            if (JS_IsException(result)) {
+                // Clear the pending exception (deadline interrupt included)
+                // so subsequent evaluations start clean.
+                JSValue exception = JS_GetException(g_context);
+                JS_FreeValue(g_context, exception);
+                g_interrupted = 0;
+            }
             JS_FreeValue(g_context, result);
 
             // Remove timer after firing (setTimeout is one-shot)
@@ -482,20 +582,36 @@ EXPORT void qjs_install_console(void) {
 
 /**
  * Execute pending jobs (microtasks/promises)
- * Returns number of jobs executed, -1 on error
+ * Returns number of jobs executed, -2 on deadline interrupt
  */
 EXPORT int qjs_execute_pending_jobs(void) {
     if (!g_context) return -1;
 
     int count = 0;
+    int ret;
     JSContext *ctx;
 
-    while (JS_ExecutePendingJob(g_runtime, &ctx) > 0) {
+    while ((ret = JS_ExecutePendingJob(g_runtime, &ctx)) > 0) {
         count++;
         if (count > 10000) {
             // Safety limit to prevent infinite loops
             break;
         }
+    }
+
+    if (ret < 0) {
+        // A job threw: JS_ExecutePendingJob leaves the exception pending in
+        // its context — clear it so it can't poison the next evaluation.
+        JSValue exception = JS_GetException(ctx ? ctx : g_context);
+        JS_FreeValue(g_context, exception);
+    }
+
+    // Flag check independent of ret: a deadline interrupt inside a promise
+    // reaction job is caught C-side and reported as job success (the
+    // exception becomes a rejection), so only the flag is reliable.
+    if (g_interrupted) {
+        g_interrupted = 0;
+        return -2;
     }
 
     return count;

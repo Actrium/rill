@@ -29,6 +29,8 @@ interface QuickJSWASMModule {
   // QuickJS C API bindings
   _qjs_init: () => number;
   _qjs_destroy: () => void;
+  /** Arm the guest execution deadline (ms from now); <= 0 clears it. */
+  _qjs_set_deadline: (msFromNow: number) => void;
   _qjs_eval: (codePtr: number) => number;
   _qjs_eval_void: (codePtr: number) => number;
   _qjs_inject_json: (namePtr: number, valuePtr: number) => number;

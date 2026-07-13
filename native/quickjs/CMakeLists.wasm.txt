@@ -105,6 +105,7 @@ if(BUILD_WASM)
         "_free"
         "_qjs_init"
         "_qjs_destroy"
+        "_qjs_set_deadline"
         "_qjs_eval"
         "_qjs_eval_void"
         "_qjs_inject_json"
