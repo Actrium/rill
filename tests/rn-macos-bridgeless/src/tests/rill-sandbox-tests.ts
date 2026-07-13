@@ -181,6 +181,71 @@ export function registerRillSandboxTests(
         runtime.dispose();
       },
     });
+
+    registerTest({
+      id: 'sandbox/timeout-callback-interrupt',
+      name: 'Safety: timeout aborts a runaway sandbox function invoked from host',
+      tags: ['sandbox', 'safety'],
+      run() {
+        // Host -> sandbox calls execute tenant JS outside eval(); they must
+        // arm the same budget (QuickJS DeadlineGuard / Hermes TimeLimitScope
+        // on the call path), or a runaway callback hangs the host thread.
+        const mod = getModule(target);
+        const runtime = mod.createRuntime({ timeout: 300 });
+        const ctx = runtime.createContext();
+        ctx.eval('function spin() { while (true) {} }');
+        const spin = ctx.extract('spin') as () => unknown;
+        expect(typeof spin).toBe('function');
+        let threw = false;
+        const start = Date.now();
+        try {
+          spin();
+        } catch (e) {
+          threw = true;
+          nativeLog(
+            `[rill-e2e][timeout-callback] threw after ${Date.now() - start}ms: ${String(e)}`
+          );
+        }
+        expect(threw).toBe(true);
+        expect(ctx.eval('1 + 1')).toBe(2);
+        ctx.dispose();
+        runtime.dispose();
+      },
+    });
+
+    registerTest({
+      id: 'sandbox/timeout-try-catch',
+      name: 'Safety: guest try/catch cannot stretch the eval budget',
+      tags: ['sandbox', 'safety'],
+      run() {
+        // On both engines the interrupt must escape a guest try/catch and
+        // fail the eval (QuickJS throws an uncatchable error; Hermes's
+        // timeout error propagates past guest handlers too — verified on
+        // device). A catchable interrupt would let a malicious guest swallow
+        // it and keep the thread.
+        const mod = getModule(target);
+        const runtime = mod.createRuntime({ timeout: 300 });
+        const ctx = runtime.createContext();
+        const start = Date.now();
+        let threw = false;
+        try {
+          ctx.eval(
+            'var caught = ""; try { while (true) {} } catch (e) { caught = "caught: " + e; } caught'
+          );
+        } catch (e) {
+          threw = true;
+          nativeLog(
+            `[rill-e2e][timeout-try-catch] eval threw after ${Date.now() - start}ms: ${String(e)}`
+          );
+        }
+        expect(threw).toBe(true);
+        // The one armed budget bounds the whole eval regardless of shape.
+        expect(Date.now() - start < 5000).toBe(true);
+        expect(ctx.eval('1 + 1')).toBe(2);
+        ctx.dispose();
+        runtime.dispose();
+      },
+    });
   }
 
   // ============================================
