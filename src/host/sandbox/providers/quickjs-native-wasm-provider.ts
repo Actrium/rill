@@ -455,6 +455,228 @@ const GUEST_BINARY_CODEC = `
     };
   })();`;
 
+// ---- Cross-boundary error fidelity ----
+//
+// A guest throw crosses the bridge as {"error":"<message>"} plus an OPTIONAL
+// "errorDetail" sibling ({name, stack?, props?}) produced by the guest-side
+// encoder below. The bare {"error":...} shape keeps its exact current meaning;
+// in particular the deadline-interrupt marker (INTERRUPTED_ERROR_JSON) stays
+// byte-identical and is the ONLY payload in the system without an errorDetail
+// sibling. That invariant is ENFORCED in C (wasm_bindings.c), not just by
+// construction: globalThis.__rill is a plain writable global a guest can
+// replace wholesale, so encode_guest_error discards a marker-identical
+// __errenc return (falling back to the message-only path, whose errorDetail
+// is mandatory), and qjs_eval rewrites a completion value whose JSON is
+// marker-identical to carry errorDetail too. Only a real g_interrupted
+// deadline — a channel the guest cannot influence — produces the bare marker.
+//
+// Direction asymmetry (security): guest->host errors are revived with full
+// fidelity (name, guest stack, own JSON-safe props) and the host stack is
+// appended after a boundary marker; host->guest rejections carry name +
+// message + own JSON-safe props but NEVER the host stack (information
+// disclosure to an untrusted guest).
+
+// Separates guest frames (above) from rill-runtime host frames (below) in a
+// revived error's stack. Follows the quickjs-emscripten unwrapResult pattern.
+export const HOST_STACK_BOUNDARY = '    --- host stack (rill runtime; frames above are guest) ---';
+
+// Host-side DoS caps mirroring the guest encoder.
+const MAX_ERROR_PROPS = 64;
+const MAX_STACK_CHARS = 16384;
+
+/** Optional rich sibling of the wire "error" message (see GUEST_ERROR_CODEC). */
+interface GuestErrorDetail {
+  name?: ReviewedUnknown;
+  stack?: ReviewedUnknown;
+  props?: ReviewedUnknown;
+}
+
+/** Guest-error payload (guest -> host) revived to a host Error with full fidelity. */
+function reviveGuestError(parsed: {
+  error?: ReviewedUnknown;
+  errorDetail?: GuestErrorDetail;
+}): Error {
+  const message = String(parsed.error);
+  const err = new Error(message); // message via ctor
+  const hostStack = err.stack ?? ''; // capture BEFORE overwrite
+  const d = parsed.errorDetail;
+  if (d && typeof d === 'object') {
+    if (typeof d.name === 'string') err.name = d.name; // explicit field
+    if (d.props && typeof d.props === 'object') {
+      const props = d.props as Record<string, ReviewedUnknown>;
+      let n = 0;
+      for (const k of Object.keys(props)) {
+        if (n >= MAX_ERROR_PROPS) break;
+        if (k === 'name' || k === 'message' || k === 'stack') continue;
+        // Prototype-pollution defense: guest-controlled key names are applied
+        // ONLY via defineProperty (never plain assignment).
+        Object.defineProperty(err, k, {
+          value: props[k],
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
+        n++;
+      }
+    }
+    if (typeof d.stack === 'string') {
+      const guest = d.stack.endsWith('\n') ? d.stack : `${d.stack}\n`;
+      let combined = `${err.name}: ${err.message}\n${guest}${HOST_STACK_BOUNDARY}\n${hostStack}`;
+      if (combined.length > MAX_STACK_CHARS) {
+        combined = `${combined.slice(0, MAX_STACK_CHARS)}\n...[truncated]`;
+      }
+      err.stack = combined;
+    }
+  }
+  return err;
+}
+
+/**
+ * Host error (host -> guest rejection) serialized to a plain payload. NO stack —
+ * the host stack never crosses to the untrusted guest. Accepts a string too
+ * (e.g. the not-registered rejection message).
+ *
+ * MUST NOT throw: it runs synchronously inside rejectHostCall; if it threw, the
+ * guest RPC promise would hang forever. A host Error with a throwing
+ * own-enumerable accessor, or a throwing message getter, would otherwise trip
+ * this — the whole body is wrapped so it always yields a well-formed payload.
+ *
+ * SECURITY NOTE: own enumerable JSON-safe props ARE forwarded to the untrusted
+ * guest by design. Host-module authors must be aware that custom Error props
+ * (e.g. Node fs errors' path/syscall, DB errors' query text) cross the trust
+ * boundary. The host STACK is never sent; props are. To withhold props, throw
+ * a plain Error whose message omits sensitive context.
+ */
+// Reason: a thrown/rejected host value can be any type before it is normalized.
+function serializeHostError(err: unknown): {
+  message: string;
+  name: string;
+  props?: Record<string, unknown>;
+} {
+  try {
+    if (err instanceof Error) {
+      const props: Record<string, unknown> = {};
+      let n = 0;
+      for (const k of Object.keys(err)) {
+        // own enumerable only
+        if (n >= MAX_ERROR_PROPS) break;
+        if (k === 'name' || k === 'message' || k === 'stack') continue;
+        // Reason: an own error property can hold any JSON-serializable value.
+        let v: unknown;
+        // Per-key isolation: a throwing accessor skips only that key.
+        try {
+          v = (err as unknown as Record<string, unknown>)[k];
+        } catch {
+          continue;
+        }
+        if (typeof v === 'undefined' || typeof v === 'function') continue;
+        // Drop binary explicitly: JSON.stringify(view/ArrayBuffer) is lossy,
+        // not throwing. No $bin staging on error paths.
+        if (v instanceof ArrayBuffer || ArrayBuffer.isView(v)) continue;
+        try {
+          JSON.stringify(v);
+        } catch {
+          continue; // JSON-plain only
+        }
+        props[k] = v;
+        n++;
+      }
+      const message = typeof err.message === 'string' ? err.message : String(err.message);
+      const out: { message: string; name: string; props?: Record<string, unknown> } = {
+        message,
+        name: err.name || 'Error',
+      };
+      if (Object.keys(props).length) out.props = props;
+      return out;
+    }
+    return { message: typeof err === 'string' ? err : String(err), name: 'Error' };
+  } catch {
+    // Last-resort: guarantee a well-formed payload so the guest promise settles.
+    return { message: '[rill] host error', name: 'Error' };
+  }
+}
+
+// Guest-side error encoder, installed by the provider prelude right after the
+// binary codec (before ANY guest code runs). The C side (encode_guest_error in
+// wasm_bindings.c) looks up globalThis.__rill.__errenc and calls it with the
+// thrown value; on any failure it falls back to a C-escaped message-only
+// payload. Both this encoder's catch fallback and the C fallback still emit
+// the errorDetail sibling — mandatory. This alone is NOT the marker-forgery
+// defense (a guest can replace globalThis.__rill and its __errenc wholesale);
+// the C caller additionally rejects any __errenc return byte-identical to the
+// bare interrupt marker.
+const GUEST_ERROR_CODEC = `
+  (function () {
+    var R = globalThis.__rill || (globalThis.__rill = {});
+    if (R.__errenc) return;
+    var SKIP = { name: 1, message: 1, stack: 1 };
+    var MAX_PROPS = 64;          // DoS cap: max own props copied
+    var MAX_STR   = 8192;        // DoS cap: truncate message/stack/string prop length
+    function clip(s) {
+      return (typeof s === 'string' && s.length > MAX_STR)
+        ? s.slice(0, MAX_STR) + '...[truncated]' : s;
+    }
+    // Turn a thrown value into the wire JSON {"error":msg,"errorDetail":{...}}.
+    // JSON.stringify guarantees escaping, so the C caller never has to escape
+    // a message itself. Never invoked on the interrupt path (C guards on the
+    // g_interrupted flag before calling this).
+    function encode(e) {
+      var msg, name, stack, props;
+      if (e instanceof Error) {
+        msg  = typeof e.message === 'string' ? e.message : String(e.message);
+        name = typeof e.name === 'string' ? e.name : 'Error';
+        // .stack read may invoke a hostile getter; isolate it so a throw here
+        // degrades to "no stack" instead of nuking name+message+props.
+        try { if (typeof e.stack === 'string') stack = e.stack; } catch (_s) { stack = undefined; }
+        props = {};
+        var keys = Object.keys(e); // own enumerable only
+        var count = 0;
+        for (var i = 0; i < keys.length; i++) {
+          if (count >= MAX_PROPS) break;
+          var k = keys[i];
+          if (SKIP[k]) continue;
+          var v;
+          // Per-key isolation: a throwing own-enumerable accessor must skip
+          // only that key, never abort the whole props+stack set.
+          try { v = e[k]; } catch (_g) { continue; }
+          if (typeof v === 'undefined' || typeof v === 'function') continue;
+          // Skip binary: JSON.stringify(ArrayBuffer/view) does NOT throw but
+          // yields a lossy {} / index-map. Error props are JSON-plain only,
+          // never $bin-staged.
+          if (v instanceof ArrayBuffer || ArrayBuffer.isView(v)) continue;
+          try { JSON.stringify(v); } catch (_j) { continue; } // JSON-safe only
+          props[k] = (typeof v === 'string') ? clip(v) : v;
+          count++;
+        }
+      } else if (e && typeof e === 'object') {
+        name = 'Error';
+        try { msg = JSON.stringify(e); } catch (_) { msg = String(e); }
+      } else {
+        name = 'Error';
+        msg = String(e);
+      }
+      var detail = { name: name };
+      if (typeof stack === 'string') detail.stack = clip(stack);
+      if (props && Object.keys(props).length) detail.props = props;
+      return JSON.stringify({ error: clip(msg), errorDetail: detail });
+    }
+    function errenc(e) {
+      try {
+        return encode(e);
+      } catch (_) {
+        var m;
+        try { m = String(e && e.message ? e.message : e); } catch (__) { m = 'unknown'; }
+        // errorDetail is MANDATORY even here (marker-forgery defense).
+        return JSON.stringify({ error: clip(m), errorDetail: { name: 'Error' } });
+      }
+    }
+    // Pin the encoder so the guest cannot delete/reassign it to force the
+    // message-only C fallback path.
+    Object.defineProperty(R, '__errenc', {
+      value: errenc, writable: false, enumerable: false, configurable: false,
+    });
+  })();`;
+
 /**
  * Build the guest-side shim for a by-name host function (issue #8 + #10).
  *
@@ -749,6 +971,9 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
         // later shim (host fns, host modules, inject/extract) can rely on
         // __rill.__binenc/__binrev being present.
         evalVoid(GUEST_BINARY_CODEC);
+        // Error encoder next (same first-writer-wins window): qjs_eval's
+        // exception branch calls __rill.__errenc for rich error payloads.
+        evalVoid(GUEST_ERROR_CODEC);
 
         // ---- host:* module bridge (issue #5) ----
         // The WASM realm can't hold host function references, so host:* capabilities
@@ -915,8 +1140,12 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
           drainJobs();
         };
 
-        const rejectHostCall = (id: number, message: string): void => {
-          injectJson('__rill_host_error', JSON.stringify(message));
+        // Host -> guest rejection: name + message + own JSON-safe props cross;
+        // the host stack NEVER does. serializeHostError cannot throw, so the
+        // guest promise always settles.
+        // Reason: a rejected host-call reason can be any thrown value.
+        const rejectHostCall = (id: number, err: unknown): void => {
+          injectJson('__rill_host_error', JSON.stringify(serializeHostError(err)));
           evalVoid(
             `globalThis.__rill.__rejectHostCall(${id},globalThis.__rill_host_error);delete globalThis.__rill_host_error`
           );
@@ -990,9 +1219,7 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
               const chain = Promise.resolve()
                 .then(() => fn(revivedArgs))
                 .then((result) => resolveHostCall(id, result))
-                .catch((err: ReviewedUnknown) =>
-                  rejectHostCall(id, err instanceof Error ? err.message : String(err))
-                );
+                .catch((err: ReviewedUnknown) => rejectHostCall(id, err));
               trackHostCall(chain);
               return;
             }
@@ -1118,13 +1345,32 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
             const result = module.UTF8ToString(resultPtr);
             freeString(resultPtr);
             evalVoid('delete globalThis.__rill_extract;');
-            const parsed = this.parseResult(result);
-            const stagedIds: number[] = [];
-            collectBinIds(parsed, stagedIds);
+
+            // Parse raw first WITHOUT throwing, register any staged $bin ids, then
+            // run the error classification INSIDE the try so freeStagedIds always
+            // runs. This closes the leak where a guest value shaped
+            // {error:..., buf:<binary>} would make the error-throw fire before the
+            // staged id was freed (breaking the qjs_binary_count()===0 invariant).
+            let raw: ReviewedUnknown;
             try {
-              return reviveBinaryValue(module, parsed);
+              raw = JSON.parse(result);
+            } catch {
+              raw = undefined;
+            }
+            const stagedIds: number[] = [];
+            collectBinIds(raw, stagedIds);
+            try {
+              // Same error classification parseResult uses, now that ids are
+              // tracked: throw on errorDetail OR a non-empty string `error`.
+              if (raw && typeof raw === 'object') {
+                const r = raw as { error?: ReviewedUnknown; errorDetail?: GuestErrorDetail };
+                if ('errorDetail' in r || (typeof r.error === 'string' && r.error.length > 0)) {
+                  throw reviveGuestError(r);
+                }
+              }
+              return reviveBinaryValue(module, raw);
             } finally {
-              freeStagedIds(module, stagedIds);
+              freeStagedIds(module, stagedIds); // always frees, even on the thrown-error path
             }
           },
 
@@ -1160,9 +1406,22 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
                     var c = R.__hostCalls[id]; if (!c) return; delete R.__hostCalls[id];
                     c.resolve(hasValue ? R.__binrev(value) : undefined);
                   };
-                  R.__rejectHostCall = function(id, message) {
+                  R.__rejectHostCall = function(id, payload) {
                     var c = R.__hostCalls[id]; if (!c) return; delete R.__hostCalls[id];
-                    c.reject(new Error(message));
+                    // Rebuild a real Error from the host payload: name + message +
+                    // own JSON-safe props. The host stack is intentionally absent;
+                    // host-controlled prop names apply only via defineProperty.
+                    var e = new Error(payload && payload.message ? payload.message : String(payload));
+                    if (payload && typeof payload.name === 'string') e.name = payload.name;
+                    if (payload && payload.props) {
+                      var ks = Object.keys(payload.props);
+                      for (var i = 0; i < ks.length; i++) {
+                        var k = ks[i];
+                        if (k === 'name' || k === 'message' || k === 'stack') continue;
+                        Object.defineProperty(e, k, { value: payload.props[k], writable: true, enumerable: true, configurable: true });
+                      }
+                    }
+                    c.reject(e); // keeps the guest's own stack; host stack intentionally absent
                   };
                   R.__deliverHostEvent = function(subId, event) {
                     var h = R.__hostSubs[subId]; if (typeof h === 'function') h(R.__binrev(event));
@@ -1313,17 +1572,26 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
 
     // Check for error response
     if (json.startsWith('{') && json.includes('"error"')) {
+      let parsed: ReviewedUnknown;
       try {
-        const parsed = JSON.parse(json);
-        if (parsed.error) {
-          throw new Error(parsed.error);
-        }
-      } catch (e) {
-        if (e instanceof Error && e.message !== 'Unexpected token') {
-          throw e;
-        }
-        // Not an error object, continue parsing
+        parsed = JSON.parse(json);
+      } catch {
+        parsed = undefined;
       }
+      if (parsed && typeof parsed === 'object') {
+        const p = parsed as { error?: ReviewedUnknown; errorDetail?: GuestErrorDetail };
+        // Throw iff this is definitively an error payload:
+        //  - errorDetail present -> encoder-produced (rich OR empty-message error), OR
+        //  - error is a NON-EMPTY string -> bare {"error":"<msg>"} (interrupt marker,
+        //    C fallback, or any other caller's error).
+        // A guest completion value shaped {error:""} with NO errorDetail is NOT an
+        // error: it is returned as-is (completion-value semantics unchanged).
+        if ('errorDetail' in p || (typeof p.error === 'string' && p.error.length > 0)) {
+          throw reviveGuestError(p);
+        }
+        return parsed; // object that merely contains "error" (e.g. {error:""} value)
+      }
+      if (parsed !== undefined) return parsed;
     }
 
     try {

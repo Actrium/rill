@@ -265,6 +265,134 @@ EXPORT void qjs_destroy(void) {
 }
 
 // ============================================
+// Guest error encoding
+// ============================================
+
+// JSON-escape `s` into a freshly malloc'd string body (no surrounding
+// quotes): `"` and `\` get a backslash, control chars < 0x20 become \u00XX.
+// Returns NULL on OOM.
+static char *json_escape_dup(const char *s) {
+    static const char hex[] = "0123456789abcdef";
+    size_t n = 0;
+    const unsigned char *p;
+    for (p = (const unsigned char *)s; *p; p++) {
+        unsigned char c = *p;
+        if (c == '"' || c == '\\') n += 2;
+        else if (c < 0x20) n += 6;
+        else n += 1;
+    }
+    char *out = malloc(n + 1);
+    if (!out) return NULL;
+    char *q = out;
+    for (p = (const unsigned char *)s; *p; p++) {
+        unsigned char c = *p;
+        if (c == '"' || c == '\\') {
+            *q++ = '\\';
+            *q++ = (char)c;
+        } else if (c < 0x20) {
+            *q++ = '\\';
+            *q++ = 'u';
+            *q++ = '0';
+            *q++ = '0';
+            *q++ = hex[(c >> 4) & 0xF];
+            *q++ = hex[c & 0xF];
+        } else {
+            *q++ = (char)c;
+        }
+    }
+    *q = '\0';
+    return out;
+}
+
+// Best-effort rich encoder for a guest exception. Returns a freshly malloc'd,
+// wire-valid JSON string; caller owns it. Tries globalThis.__rill.__errenc
+// (installed by the provider prelude); on ANY failure drains the pending
+// exception and falls back to a C-escaped
+// {"error":"<msg>","errorDetail":{"name":"Error"}}.
+//
+// Marker-forgery defense: the host provider classifies a deadline interrupt
+// by exact string match on QJS_INTERRUPTED_ERROR_JSON, so no output of this
+// function may ever be byte-identical to it. globalThis.__rill is a plain
+// writable global — a guest can replace it wholesale and install its own
+// __errenc — so the invariant is ENFORCED HERE, not merely by construction:
+// an __errenc return equal to the bare marker is discarded and the fallback
+// (whose errorDetail sibling is mandatory) is used instead. MUST NOT be
+// called while g_interrupted is set: any JS re-entry here could be
+// re-interrupted.
+//
+// Exception discipline: every JS re-entry in here (JS_Call, the fallback
+// JS_ToCString which may invoke a hostile toString) can leave a pending
+// exception. This function guarantees no pending exception remains on return.
+static char *encode_guest_error(JSContext *ctx, JSValueConst exception) {
+    char *out = NULL;
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue rill = JS_GetPropertyStr(ctx, global, "__rill");
+    JSValue enc =
+        (JS_IsException(rill) || JS_IsUndefined(rill) || JS_IsNull(rill))
+            ? JS_UNDEFINED
+            : JS_GetPropertyStr(ctx, rill, "__errenc");
+
+    if (JS_IsFunction(ctx, enc)) {
+        JSValue arg = JS_DupValue(ctx, exception);
+        JSValue r = JS_Call(ctx, enc, JS_UNDEFINED, 1, &arg);
+        JS_FreeValue(ctx, arg);
+        if (!JS_IsException(r) && JS_IsString(r)) {
+            const char *s = JS_ToCString(ctx, r);
+            if (s) {
+                // Reject a forged bare interrupt marker (see header comment);
+                // out stays NULL and the fallback below re-encodes the real
+                // exception with the mandatory errorDetail sibling.
+                if (strcmp(s, QJS_INTERRUPTED_ERROR_JSON) != 0) {
+                    out = strdup(s);
+                }
+                JS_FreeCString(ctx, s);
+            }
+            // If JS_ToCString on a plain string somehow failed, it left a
+            // pending exception; the fallback region below drains it.
+        } else if (JS_IsException(r)) {
+            // Drain so the encoder failure cannot poison the next entry.
+            JSValue pend = JS_GetException(ctx);
+            JS_FreeValue(ctx, pend);
+        }
+        JS_FreeValue(ctx, r);
+    }
+    JS_FreeValue(ctx, enc);
+    JS_FreeValue(ctx, rill);
+    JS_FreeValue(ctx, global);
+
+    if (!out) {
+        // Fallback: message-only, C-escaped, WITH the mandatory errorDetail
+        // sibling. Never lose the original message; never emit a bare
+        // {"error":...} that could collide with the interrupt marker.
+        static const char pre[] = "{\"error\":\"";
+        static const char post[] = "\",\"errorDetail\":{\"name\":\"Error\"}}";
+        const char *msg = JS_ToCString(ctx, exception); // may run guest toString
+        char *esc = json_escape_dup(msg ? msg : "unknown");
+        if (msg) JS_FreeCString(ctx, msg);
+        if (esc) {
+            out = malloc(sizeof(pre) - 1 + strlen(esc) + sizeof(post) - 1 + 1);
+            if (out) {
+                strcpy(out, pre);
+                strcat(out, esc);
+                strcat(out, post);
+            }
+            free(esc);
+        }
+        if (!out) {
+            out = strdup(
+                "{\"error\":\"unknown\",\"errorDetail\":{\"name\":\"Error\"}}");
+        }
+        // Unconditional drain: a hostile toString on the thrown value makes
+        // JS_ToCString return NULL and leave a pending exception.
+        // JS_GetException returns JS_NULL when none is pending, so this is
+        // harmless in the common case and guarantees a clean context.
+        JSValue pend = JS_GetException(ctx);
+        JS_FreeValue(ctx, pend);
+    }
+    return out;
+}
+
+// ============================================
 // Code Evaluation
 // ============================================
 
@@ -295,11 +423,23 @@ EXPORT char *qjs_eval(const char *code) {
 
     if (JS_IsException(result)) {
         JSValue exception = JS_GetException(g_context);
-        const char *msg = JS_ToCString(g_context, exception);
-        char *error_json = malloc(strlen(msg) + 32);
-        sprintf(error_json, "{\"error\":\"%s\"}", msg ? msg : "unknown");
-        if (msg) JS_FreeCString(g_context, msg);
+        char *error_json = encode_guest_error(g_context, exception);
         JS_FreeValue(g_context, exception);
+        // If the encoder itself tripped the deadline (a hostile getter looped
+        // until the interrupt handler fired), discard the rich payload and
+        // return the fixed marker — preserves the host's exact-match contract
+        // and clears the flag for the next entry.
+        if (g_interrupted) {
+            g_interrupted = 0;
+            // encode_guest_error guarantees a clean context, but a re-armed
+            // interrupt may have left a fresh pending exception AFTER that
+            // drain; clear it so the next host entry starts clean (mirrors
+            // the flag-first interrupt early-return above).
+            JSValue pend = JS_GetException(g_context);
+            JS_FreeValue(g_context, pend);
+            free(error_json);
+            return strdup(QJS_INTERRUPTED_ERROR_JSON);
+        }
         return error_json;
     }
 
@@ -324,6 +464,20 @@ EXPORT char *qjs_eval(const char *code) {
     char *output = str ? strdup(str) : strdup("null");
     if (str) JS_FreeCString(g_context, str);
     JS_FreeValue(g_context, json_str);
+
+    // Marker-forgery defense, success path: JSON.stringify of the completion
+    // value ({error:"interrupted: execution deadline exceeded"}) yields bytes
+    // identical to the interrupt marker. g_interrupted is 0 here, so this is
+    // a genuine guest value, not a deadline — append the mandatory
+    // errorDetail sibling so the host classifies it like any other
+    // {error:"<non-empty>"} completion value (which already surfaces as a
+    // normal error host-side) instead of a spoofed timeout.
+    if (output && strcmp(output, QJS_INTERRUPTED_ERROR_JSON) == 0) {
+        free(output);
+        output = strdup(
+            "{\"error\":\"interrupted: execution deadline exceeded\","
+            "\"errorDetail\":{\"name\":\"Error\"}}");
+    }
 
     return output;
 }
