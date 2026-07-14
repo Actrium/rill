@@ -46,6 +46,18 @@ CDPResponse DebuggerAdapter::handleEnable(TenantId tenantId, int requestId) {
       }
     }
   }
+
+  // Replay Debugger.paused to a client that enables while the guest is already
+  // parked at a pause. Debugger.paused is a one-shot event fired when the guest
+  // first stopped, so a client that attaches afterwards (e.g. a DevTools GUI
+  // opened after a script parked the guest) would otherwise see an empty Call
+  // Stack and no paused banner even though the guest is stopped. The pause
+  // scope is still live, so the frames (and their objectIds) resolve. Reason
+  // and hit breakpoints are not retained across the enable, so replay as
+  // "other" with no hits — enough for the GUI to render the paused state.
+  if (state.enabled && engineDebugger_->isPaused(tenantId)) {
+    onPaused(tenantId, PauseReason::Other, engineDebugger_->getCallFrames(tenantId), {});
+  }
   
   CDPResponse response;
   response.id = requestId;

@@ -145,6 +145,17 @@ int main() {
   check(sink.waitFor("\"subtype\":\"error\"", "eval throw"),
         "evaluateOnCallFrame nope() -> error object");
 
+  // Late client attaches while the guest is already paused: Debugger.paused is
+  // one-shot and fired before this client existed, so handleEnable must replay
+  // it (otherwise a DevTools GUI opened after a park shows an empty Call Stack
+  // and no paused banner). A second client enabling here must receive a
+  // Debugger.paused carrying the live frame.
+  Sink lateSink;
+  target.onClientConnect(2, [&lateSink](const RawCdpMessage& m) { lateSink.push(m); });
+  target.dispatch(2, R"({"id":1,"method":"Debugger.enable"})");
+  check(lateSink.waitFor("\"Debugger.paused\"", "replayed paused for late client"),
+        "handleEnable replays Debugger.paused to a client that attaches while paused");
+
   target.dispatch(1, R"({"id":3,"method":"Debugger.resume"})");
   bool finished =
       evalFut.wait_for(std::chrono::seconds(5)) == std::future_status::ready;

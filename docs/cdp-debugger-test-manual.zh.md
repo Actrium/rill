@@ -105,6 +105,16 @@ bash native/quickjs/test/build-run-cdp.sh
 > JSValue,须在运行时线程释放——`QuickJSDebugCore` 在暂停退出点(持锁、抑制钩子)
 > 回调引擎清空注册表,故 id 绝不跨 resume 存活(已验:ASan 相对基线仅多出测试
 > 桩的 shared_ptr 环分配,无 JSValue 泄漏)。
+>
+> 跨引擎差异(非缺陷):「objectId 绝不跨 resume 存活」是 **QuickJS 专属**语义——
+> QuickJS 一律把 objectId 绑定到暂停作用域并在暂停退出点释放(实现取舍,换 ASan
+> 干净)。Hermes 侧 rill 全量转发给上游 facebook `CDPAgent`(`native/hermes/src/
+> devtools/CDPAgentTarget.cpp`),objectId 生命周期由 CDPAgent 管理;按 CDP 规范,
+> `Runtime` object handle 的生命周期绑定到 releaseObject/releaseObjectGroup/上下文
+> 销毁而非 pause,故 Hermes 下 resume 后旧 `Runtime.evaluate` objectId 仍可解析,
+> 符合规范。因此「resume 后旧 objectId 是否失效」两引擎答案不同:QuickJS 失效、
+> Hermes 存活——属引擎实现差异,rill 不在 Hermes 适配层强行对齐(要对齐须 patch
+> 上游 CDPAgent,超出适配层职责)。
 
 ---
 
