@@ -170,8 +170,17 @@ describe('cdp-relay reverse tunnel', () => {
     expect(Array.isArray(body) && body.some((t: any) => t.id === 'guest-3')).toBe(false);
 
     // A fresh devtools connect to the vanished target is refused (upgrade 404).
+    // How the refusal surfaces depends on the WebSocket runtime: Bun's native
+    // WebSocket (what `bun test` maps 'ws' to) fires 'error'; Node's real ws
+    // fires 'unexpected-response' for a non-101 upgrade and only synthesizes
+    // 'error' when nothing listens for it. Accept whichever comes first so the
+    // assertion holds on both runtimes and can't be silently defeated by an
+    // added 'unexpected-response' listener.
     const late = connect(`ws://127.0.0.1:${relay.port}/devtools/guest-3`);
-    const err = await new Promise<Error>((resolve) => late.once('error', resolve));
-    expect(err).toBeTruthy();
+    const refused = await new Promise<string>((resolve) => {
+      late.once('error', () => resolve('error'));
+      late.once('unexpected-response', () => resolve('unexpected-response'));
+    });
+    expect(refused).toBeTruthy();
   });
 });
