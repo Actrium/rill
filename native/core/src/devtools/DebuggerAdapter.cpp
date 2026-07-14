@@ -55,6 +55,17 @@ CDPResponse DebuggerAdapter::handleEnable(TenantId tenantId, int requestId) {
   // scope is still live, so the frames (and their objectIds) resolve. Reason
   // and hit breakpoints are not retained across the enable, so replay as
   // "other" with no hits — enough for the GUI to render the paused state.
+  //
+  // Known bounded limitation: onPaused() fans out through the target's
+  // broadcast sink, so if two debug clients share one tenant target, a client
+  // that was already attached (and already saw the original paused) receives a
+  // duplicate paused with no intervening resumed. This only surfaces with 2+
+  // concurrent clients on a single tenant — a topology the adapter does not
+  // otherwise fully support anyway (enabled state is per-tenant, so a second
+  // client gets no scriptParsed replay either). Standard frontends re-render
+  // the same paused state idempotently. If multi-client-per-tenant ever becomes
+  // supported, move this replay to the target layer and send it only to the
+  // enabling connection's sink instead of broadcasting.
   if (state.enabled && engineDebugger_->isPaused(tenantId)) {
     onPaused(tenantId, PauseReason::Other, engineDebugger_->getCallFrames(tenantId), {});
   }

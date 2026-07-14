@@ -115,6 +115,14 @@ bash native/quickjs/test/build-run-cdp.sh
 > 符合规范。因此「resume 后旧 objectId 是否失效」两引擎答案不同:QuickJS 失效、
 > Hermes 存活——属引擎实现差异,rill 不在 Hermes 适配层强行对齐(要对齐须 patch
 > 上游 CDPAgent,超出适配层职责)。
+>
+> 暂停态 `Debugger.enable` 回放的已知有界局限:`handleEnable` 在引擎已暂停时补发一次
+> `Debugger.paused`,让后开的 DevTools GUI 不至于空调用栈。该补发经 target 的 broadcast
+> 汇扇出——若同一 tenant 挂 2+ 个并发调试 client,已在场、早收过原始 paused 的旧 client 会
+> 再收一次 paused(中间无 resumed)。触发前提罕见(常态一 tenant 一 client),影响仅冗余
+> 事件、标准前端幂等重渲染;且该多-client 拓扑本就未被完整支持(enabled 状态按 tenant 记,
+> 第二个 client 连 scriptParsed 回放也拿不到)。日后若正式支持多-client,应把回放下沉到
+> target 层、只发给 enable 那条连接的 sink,而非 broadcast。
 
 ---
 
