@@ -18,7 +18,8 @@ for c in quickjs libregexp libunicode cutils; do
 done
 for cpp in "$QSRC/QuickJSDebugCore.cpp" "$QSRC/QuickJSEngineDebugger.cpp" \
            "$CORE/devtools/DebuggerAdapter.cpp" "$CORE/devtools/AdapterDebugTarget.cpp" \
-           "$CORE/devtools/CDPServer.cpp" "$HERE/cdp_stdio_host.cpp"; do
+           "$CORE/devtools/CDPServer.cpp" "$CORE/devtools/cdp_wire.cpp" \
+           "$HERE/cdp_stdio_host.cpp"; do
   $CXX $CXXFLAGS -c "$cpp" -o "$WORK/$(basename "$cpp").o"
 done
 $CXX "$WORK"/*.o -lpthread -lm -ldl -o "$OUT"
