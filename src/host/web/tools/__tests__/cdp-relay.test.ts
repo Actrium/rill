@@ -170,17 +170,20 @@ describe('cdp-relay reverse tunnel', () => {
     expect(Array.isArray(body) && body.some((t: any) => t.id === 'guest-3')).toBe(false);
 
     // A fresh devtools connect to the vanished target is refused (upgrade 404).
-    // How the refusal surfaces depends on the WebSocket runtime: Bun's native
-    // WebSocket (what `bun test` maps 'ws' to) fires 'error'; Node's real ws
-    // fires 'unexpected-response' for a non-101 upgrade and only synthesizes
-    // 'error' when nothing listens for it. Accept whichever comes first so the
-    // assertion holds on both runtimes and can't be silently defeated by an
-    // added 'unexpected-response' listener.
+    // How a refused (non-101) upgrade surfaces varies by WebSocket runtime AND
+    // by version: Node's ws fires 'error' (or 'unexpected-response' if a listener
+    // exists); bun >=1.3 fires 'error' (plus 'close'); bun <=1.2 fires ONLY
+    // 'close' (code 1006) and does not implement 'unexpected-response'. The one
+    // invariant across all of them is that a refused upgrade never 'open's.
+    // Resolve on the first terminal event — any runtime emits at least one — and
+    // assert it was not an open, so the test is runtime/version agnostic.
     const late = connect(`ws://127.0.0.1:${relay.port}/devtools/guest-3`);
-    const refused = await new Promise<string>((resolve) => {
+    const outcome = await new Promise<string>((resolve) => {
+      late.once('open', () => resolve('open'));
       late.once('error', () => resolve('error'));
       late.once('unexpected-response', () => resolve('unexpected-response'));
+      late.once('close', () => resolve('close'));
     });
-    expect(refused).toBeTruthy();
+    expect(outcome).not.toBe('open');
   });
 });
