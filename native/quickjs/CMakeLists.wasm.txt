@@ -85,6 +85,18 @@ if(BUILD_WASM)
     math(EXPR MAX_BYTES "${WASM_MAX_MEMORY} * 1048576")
     math(EXPR STACK_BYTES "${WASM_STACK_SIZE} * 1024")
 
+    # Hand the exact wasm ceilings to the C bindings so the QuickJS soft limits
+    # (JS_SetMemoryLimit / JS_SetMaxStackSize) are derived from the real build
+    # config instead of a second, drift-prone magic number. wasm_bindings.c's
+    # qjs_init() applies a headroom fraction to these byte values so a graceful
+    # JS error fires before the hard wasm trap. If these ever diverge from the
+    # -sMAXIMUM_MEMORY / -sSTACK_SIZE link options below, the soft limits go
+    # dead again — keep them sourced from the same MAX_BYTES / STACK_BYTES.
+    target_compile_definitions(quickjs_sandbox_wasm PRIVATE
+        RILL_WASM_MAX_MEMORY_BYTES=${MAX_BYTES}
+        RILL_WASM_STACK_BYTES=${STACK_BYTES}
+    )
+
     # ⭐ Emscripten-specific settings
     target_link_options(quickjs_sandbox_wasm PRIVATE
         -sALLOW_MEMORY_GROWTH=1
