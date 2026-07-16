@@ -123,14 +123,22 @@ int main() {
     readyCv.wait(lk, [&] { return scriptReady; });
   }
 
-  // Reader: each stdin line is a CDP message. This target owns only the Debugger
-  // domain; ack any other domain (Runtime/Profiler/Log/...) with an empty result
-  // so a full front-end handshake proceeds, and treat runIfWaitingForDebugger as
-  // the trigger to (re-)run the guest so freshly-set breakpoints can be hit.
+  // Reader: each stdin line is a CDP message. The target owns the Debugger domain
+  // AND fronts Runtime.getProperties for this single engine — AdapterDebugTarget's
+  // Runtime branch resolves scope/object expansion against the paused frame — so
+  // forward BOTH to it. Without forwarding Runtime.getProperties a real DevTools
+  // frontend shows an EMPTY Scope panel: it expands each scope object via
+  // Runtime.getProperties, which would otherwise be swallowed by the empty ack
+  // below. Any other domain (Runtime.enable/evaluate, Profiler, Log, ...) is acked
+  // with an empty result so the front-end handshake still proceeds, and
+  // runIfWaitingForDebugger is the trigger to (re-)run the guest so freshly-set
+  // breakpoints can be hit. (Console via Runtime.evaluate needs an execution
+  // context and a Runtime.evaluate handler — a separate, larger gap.)
   std::string line;
   while (std::getline(std::cin, line)) {
     if (line.empty()) continue;
-    if (line.find("\"Debugger.") != std::string::npos) {
+    if (line.find("\"Debugger.") != std::string::npos ||
+        line.find("\"Runtime.getProperties\"") != std::string::npos) {
       target->dispatch(conn, line);
     } else {
       long id = extractId(line);
