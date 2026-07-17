@@ -206,6 +206,7 @@ export function registerRillSandboxTests(
             `[rill-e2e][timeout-callback] threw after ${Date.now() - start}ms: ${String(e)}`
           );
         }
+        expect(Date.now() - start < 5000).toBe(true);
         expect(threw).toBe(true);
         expect(ctx.eval('1 + 1')).toBe(2);
         ctx.dispose();
