@@ -44,6 +44,8 @@ interface QuickJSWASMModule {
   // QuickJS C API bindings
   _qjs_init: () => number;
   _qjs_destroy: () => void;
+  /** Arm the guest execution deadline (ms from now); <= 0 clears it. */
+  _qjs_set_deadline: (msFromNow: number) => void;
   _qjs_eval: (codePtr: number) => number;
   _qjs_eval_void: (codePtr: number) => number;
   _qjs_inject_json: (namePtr: number, valuePtr: number) => number;
@@ -109,7 +111,12 @@ export interface QuickJSNativeWASMProviderOptions {
   wasmFactory?: QuickJSWASMFactory;
 
   /**
-   * Execution timeout (milliseconds)
+   * Execution timeout in milliseconds — the budget for a SINGLE synchronous
+   * entry into guest code (eval, callback dispatch, microtask drain), not the
+   * app lifetime. Runaway guest code (e.g. `while(true){}`) is interrupted
+   * once the budget is exceeded.
+   *
+   * @default 5000
    */
   timeout?: number;
 
@@ -668,18 +675,75 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
         // a second, unfreezable clock. (The C functions remain in the binary, unused.)
 
         // Use cwrap for string operations since HEAPU8 is not exported
-        const evalCode = module.cwrap('qjs_eval', 'number', ['string']) as (code: string) => number;
-        const evalVoid = module.cwrap('qjs_eval_void', 'number', ['string']) as (
+        const rawEvalCode = module.cwrap('qjs_eval', 'number', ['string']) as (
+          code: string
+        ) => number;
+        const rawEvalVoid = module.cwrap('qjs_eval_void', 'number', ['string']) as (
           code: string
         ) => number;
         const injectJson = module.cwrap('qjs_inject_json', 'number', ['string', 'string']) as (
           name: string,
           json: string
         ) => number;
-        const extractJson = module.cwrap('qjs_extract_json', 'number', ['string']) as (
+        const rawExtractJson = module.cwrap('qjs_extract_json', 'number', ['string']) as (
           name: string
         ) => number;
         const freeString = module._qjs_free_string.bind(module);
+
+        // ---- guest execution deadline (options.timeout) ----
+        // Every entry into guest code arms the C-side deadline; the QuickJS
+        // interrupt handler aborts the interpreter once it expires, so a guest
+        // `while(true){}` cannot hang the host thread forever. Depth-tracked
+        // because a guest __sendToHost call re-enters here synchronously
+        // (host fn -> nested evalVoid): each (re-)entry re-arms a fresh
+        // budget, and only the OUTERMOST exit disarms it. The budget is per
+        // synchronous guest entry, not per app lifetime.
+        const timeoutMs = this.options.timeout;
+        let guestDepth = 0;
+        const enterGuest = <T>(fn: () => T): T => {
+          guestDepth++;
+          module._qjs_set_deadline(timeoutMs);
+          try {
+            return fn();
+          } finally {
+            guestDepth--;
+            if (guestDepth === 0) module._qjs_set_deadline(0);
+          }
+        };
+
+        // qjs_eval_void / qjs_execute_pending_jobs return this when the
+        // deadline interrupt fired (see wasm_bindings.c).
+        const QJS_INTERRUPTED = -2;
+        // Exact error payload qjs_eval returns for a deadline interrupt.
+        const INTERRUPTED_ERROR_JSON = '{"error":"interrupted: execution deadline exceeded"}';
+
+        const makeTimeoutError = (): Error =>
+          new Error(
+            `[QuickJSWASM] Guest execution interrupted: exceeded timeout of ${timeoutMs}ms`
+          );
+        // The guest was forcibly interrupted mid-execution — always surfaced,
+        // not gated on debug: state may be partially applied.
+        const reportTimeout = (where: string): void => {
+          console.error(
+            `[QuickJSWASM] ${where}: guest execution exceeded ${timeoutMs}ms and was interrupted`
+          );
+        };
+
+        const evalCode = (code: string): number => enterGuest(() => rawEvalCode(code));
+        const extractJson = (name: string): number => enterGuest(() => rawExtractJson(name));
+        // Throws on timeout — but only when this is the OUTERMOST guest entry.
+        // A nested entry (host callback running inside an outer eval) must not
+        // throw across the live wasm frames of the outer eval; instead the
+        // still-expired deadline interrupts the outer frame, which reports.
+        const evalVoid = (code: string): number => {
+          const nested = guestDepth > 0;
+          const ret = enterGuest(() => rawEvalVoid(code));
+          if (ret === QJS_INTERRUPTED) {
+            reportTimeout('evalVoid');
+            if (!nested) throw makeTimeoutError();
+          }
+          return ret;
+        };
 
         // Install the guest-side binary codec before ANY guest code runs, so every
         // later shim (host fns, host modules, inject/extract) can rely on
@@ -697,7 +761,12 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
         const hostSubscriptions = new Map<string, () => void>();
 
         const drainJobs = (): void => {
-          module._qjs_execute_pending_jobs();
+          const nested = guestDepth > 0;
+          const ret = enterGuest(() => module._qjs_execute_pending_jobs());
+          if (ret === QJS_INTERRUPTED) {
+            reportTimeout('pending jobs');
+            if (!nested) throw makeTimeoutError();
+          }
         };
 
         // Synchronously invoke a by-name injected host function (issue #8). The guest
@@ -978,8 +1047,13 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
             const result = module.UTF8ToString(resultPtr);
             freeString(resultPtr);
 
+            if (result === INTERRUPTED_ERROR_JSON) {
+              reportTimeout('eval');
+              throw makeTimeoutError();
+            }
+
             // Process any microtasks
-            module._qjs_execute_pending_jobs();
+            drainJobs();
 
             return this.parseResult(result);
           },
@@ -989,8 +1063,13 @@ export class QuickJSNativeWASMProvider implements JSEngineProvider {
             const result = module.UTF8ToString(resultPtr);
             freeString(resultPtr);
 
+            if (result === INTERRUPTED_ERROR_JSON) {
+              reportTimeout('evalAsync');
+              throw makeTimeoutError();
+            }
+
             // Process microtasks
-            module._qjs_execute_pending_jobs();
+            drainJobs();
 
             return this.parseResult(result);
           },
