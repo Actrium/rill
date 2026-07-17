@@ -34,6 +34,129 @@ typedef void (*HostBinaryCallbackFn)(const char *event, const uint8_t *data,
 static HostBinaryCallbackFn g_host_binary_callback = NULL;
 
 // ============================================
+// Binary staging table (first-class ArrayBuffer marshalling)
+// ============================================
+//
+// The JSON string bridge cannot carry bytes (JSON.stringify(ArrayBuffer) is
+// "{}"), so a buffer crossing the bridge is parked here and referenced from
+// the JSON payload as {"$bin":id}. Ids are monotonic, starting at 1 (0 means
+// staging failed), and every staged block is consumed EXACTLY ONCE by the
+// receiving side:
+//   guest -> host: the guest calls __rill_stageBinary(bufferOrView) -> id;
+//     the host reads qjs_binary_ptr/qjs_binary_len, copies the window out of
+//     linear memory, and MUST call qjs_binary_free(id).
+//   host -> guest: the host copies bytes into linear memory (_malloc) and
+//     calls qjs_binary_stage(ptr,len) (the table takes ownership of ptr);
+//     the guest calls __rill_takeBinary(id), which adopts the block into a
+//     JS ArrayBuffer (no extra copy) and removes the entry.
+// qjs_destroy() clears leftovers so an aborted payload cannot outlive the
+// context; qjs_binary_count() exists for zero-leak assertions in tests.
+
+typedef struct BinaryEntry {
+    uint32_t id;
+    uint8_t *data; // malloc'd; owned by the table until consumed
+    size_t len;
+    struct BinaryEntry *next;
+} BinaryEntry;
+
+static BinaryEntry *g_binary_head = NULL;
+static uint32_t g_binary_next_id = 0;
+static size_t g_binary_bytes = 0;
+
+// Insert an already-malloc'd block; the table takes ownership. Returns the
+// new id, or 0 on OOM (the block is freed, the caller never owns it again).
+static uint32_t binary_table_insert(uint8_t *data, size_t len) {
+    BinaryEntry *e = malloc(sizeof(BinaryEntry));
+    if (!e) {
+        free(data);
+        return 0;
+    }
+    e->id = ++g_binary_next_id;
+    e->data = data;
+    e->len = len;
+    e->next = g_binary_head;
+    g_binary_head = e;
+    g_binary_bytes += len;
+    return e->id;
+}
+
+// Unlink an entry and hand it to the caller (who now owns entry->data), or
+// NULL when the id is unknown / already consumed.
+static BinaryEntry *binary_table_detach(uint32_t id) {
+    BinaryEntry **p = &g_binary_head;
+    while (*p) {
+        if ((*p)->id == id) {
+            BinaryEntry *e = *p;
+            *p = e->next;
+            g_binary_bytes -= e->len;
+            return e;
+        }
+        p = &(*p)->next;
+    }
+    return NULL;
+}
+
+static void binary_table_clear(void) {
+    while (g_binary_head) {
+        BinaryEntry *e = g_binary_head;
+        g_binary_head = e->next;
+        free(e->data);
+        free(e);
+    }
+    g_binary_bytes = 0;
+}
+
+/**
+ * Host -> guest staging: `data` was malloc'd by the host via _malloc and
+ * ownership moves to the table. Returns the id for the {"$bin":id} sentinel,
+ * 0 on OOM.
+ */
+EXPORT uint32_t qjs_binary_stage(uint8_t *data, size_t len) {
+    return binary_table_insert(data, len);
+}
+
+/**
+ * Peek a staged block (guest -> host direction). Returns NULL for an
+ * unknown / consumed id or a zero-length block; pair with qjs_binary_len.
+ */
+EXPORT uint8_t *qjs_binary_ptr(uint32_t id) {
+    for (BinaryEntry *e = g_binary_head; e; e = e->next) {
+        if (e->id == id) return e->data;
+    }
+    return NULL;
+}
+
+EXPORT size_t qjs_binary_len(uint32_t id) {
+    for (BinaryEntry *e = g_binary_head; e; e = e->next) {
+        if (e->id == id) return e->len;
+    }
+    return 0;
+}
+
+/**
+ * Consume a staged block without reading it. No-op for an unknown or
+ * already-consumed id, so a sender may blanket-free every id of a payload
+ * on its failure path (consume-exactly-once stays intact).
+ */
+EXPORT void qjs_binary_free(uint32_t id) {
+    BinaryEntry *e = binary_table_detach(id);
+    if (e) {
+        free(e->data);
+        free(e);
+    }
+}
+
+/**
+ * Number of staged blocks still awaiting consumption. Steady-state MUST be
+ * 0 between bridge crossings; tests assert this to prove zero leakage.
+ */
+EXPORT int qjs_binary_count(void) {
+    int n = 0;
+    for (BinaryEntry *e = g_binary_head; e; e = e->next) n++;
+    return n;
+}
+
+// ============================================
 // Lifecycle
 // ============================================
 
@@ -73,6 +196,10 @@ EXPORT void qjs_destroy(void) {
         g_runtime = NULL;
     }
     g_host_callback = NULL;
+    g_host_binary_callback = NULL;
+    // Backstop for the consume-exactly-once discipline: any block a failed
+    // payload left behind is released with the context.
+    binary_table_clear();
 }
 
 // ============================================
@@ -281,7 +408,122 @@ static JSValue js_send_binary_to_host(JSContext *ctx, JSValueConst this_val,
 }
 
 /**
- * Install __sendToHost / __sendBinaryToHost functions in global scope
+ * __rill_stageBinary(arrayBufferOrView) -> id
+ *
+ * Guest -> host staging: copies the EXACT byte window of an ArrayBuffer or a
+ * typed-array view (byteOffset/byteLength respected — never the whole backing
+ * buffer) into the staging table and returns the id for a {"$bin":id}
+ * sentinel. Throws a TypeError on non-binary input so a marshalling bug
+ * surfaces in the guest instead of silently dropping bytes.
+ */
+static JSValue js_rill_stage_binary(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+    if (argc < 1) {
+        return JS_ThrowTypeError(ctx, "__rill_stageBinary: missing argument");
+    }
+
+    const uint8_t *src = NULL;
+    size_t len = 0;
+    JSValue backing = JS_UNDEFINED;
+
+    size_t size = 0;
+    uint8_t *data = JS_GetArrayBuffer(ctx, &size, argv[0]);
+    if (data || JS_IsArrayBuffer(ctx, argv[0])) {
+        // Plain ArrayBuffer (data may be NULL for a zero-length buffer).
+        src = data;
+        len = size;
+    } else {
+        // Not an ArrayBuffer: JS_GetArrayBuffer set an exception — clear it,
+        // then probe for a typed-array view and take its byte window.
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        size_t offset = 0, length = 0, bpe = 0;
+        backing = JS_GetTypedArrayBuffer(ctx, argv[0], &offset, &length, &bpe);
+        if (JS_IsException(backing)) {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+            return JS_ThrowTypeError(
+                ctx, "__rill_stageBinary: expected an ArrayBuffer or view");
+        }
+        size_t backing_size = 0;
+        uint8_t *backing_data = JS_GetArrayBuffer(ctx, &backing_size, backing);
+        if (!backing_data || offset + length > backing_size) {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+            JS_FreeValue(ctx, backing);
+            return JS_ThrowTypeError(ctx,
+                                     "__rill_stageBinary: detached view");
+        }
+        src = backing_data + offset;
+        len = length;
+    }
+
+    uint8_t *copy = NULL;
+    if (len > 0) {
+        copy = malloc(len);
+        if (!copy) {
+            JS_FreeValue(ctx, backing);
+            return JS_ThrowOutOfMemory(ctx);
+        }
+        memcpy(copy, src, len);
+    }
+    JS_FreeValue(ctx, backing);
+
+    uint32_t id = binary_table_insert(copy, len);
+    if (id == 0) {
+        return JS_ThrowOutOfMemory(ctx);
+    }
+    return JS_NewUint32(ctx, id);
+}
+
+// Free-func handed to JS_NewArrayBuffer for adopted staging blocks: every
+// block was plain-malloc'd (host _malloc or js_rill_stage_binary), so plain
+// free() matches.
+static void binary_js_free(JSRuntime *rt, void *opaque, void *ptr) {
+    (void)rt;
+    (void)opaque;
+    free(ptr);
+}
+
+/**
+ * __rill_takeBinary(id) -> ArrayBuffer
+ *
+ * Host -> guest consumption: removes the staged block and adopts it into a
+ * JS ArrayBuffer (zero-copy; the ArrayBuffer's free func releases the block).
+ * Throws on an unknown or already-consumed id — each id is single-use by
+ * design, and a double take indicates a marshalling bug.
+ */
+static JSValue js_rill_take_binary(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    uint32_t id = 0;
+    if (argc < 1 || JS_ToUint32(ctx, &id, argv[0])) {
+        return JS_ThrowTypeError(ctx, "__rill_takeBinary: bad id");
+    }
+
+    BinaryEntry *e = binary_table_detach(id);
+    if (!e) {
+        return JS_ThrowTypeError(
+            ctx, "__rill_takeBinary: unknown or already-consumed id");
+    }
+    uint8_t *data = e->data;
+    size_t len = e->len;
+    free(e);
+
+    if (len == 0 || !data) {
+        // JS_NewArrayBuffer would adopt the NULL/empty block as-is; allocate
+        // a real empty buffer instead so the guest sees a normal ArrayBuffer.
+        free(data);
+        return JS_NewArrayBufferCopy(ctx, NULL, 0);
+    }
+
+    JSValue ab = JS_NewArrayBuffer(ctx, data, len, binary_js_free, NULL, 0);
+    if (JS_IsException(ab)) {
+        // On failure QuickJS does NOT invoke the free func — release here.
+        free(data);
+    }
+    return ab;
+}
+
+/**
+ * Install __sendToHost / __sendBinaryToHost / binary staging helpers in
+ * global scope
  */
 EXPORT void qjs_install_host_functions(void) {
     if (!g_context) return;
@@ -296,6 +538,16 @@ EXPORT void qjs_install_host_functions(void) {
     JS_SetPropertyStr(g_context, global, "__sendBinaryToHost",
                       JS_NewCFunction(g_context, js_send_binary_to_host,
                                       "__sendBinaryToHost", 2));
+
+    // Binary staging helpers backing the {"$bin":id} JSON sentinel: the guest
+    // codec (__rill.__binenc/__binrev, injected by the provider) is their only
+    // intended caller.
+    JS_SetPropertyStr(g_context, global, "__rill_stageBinary",
+                      JS_NewCFunction(g_context, js_rill_stage_binary,
+                                      "__rill_stageBinary", 1));
+    JS_SetPropertyStr(g_context, global, "__rill_takeBinary",
+                      JS_NewCFunction(g_context, js_rill_take_binary,
+                                      "__rill_takeBinary", 1));
 
     JS_FreeValue(g_context, global);
 }
@@ -514,11 +766,15 @@ EXPORT void qjs_free_string(char *str) {
 
 /**
  * Get current memory usage
+ *
+ * Includes bytes parked in the binary staging table: they are runtime-owned
+ * transit memory JS_ComputeMemoryUsage cannot see (plain malloc, not the JS
+ * heap), and ignoring them would hide a marshalling leak from this metric.
  */
 EXPORT size_t qjs_get_memory_usage(void) {
     if (!g_runtime) return 0;
 
     JSMemoryUsage usage;
     JS_ComputeMemoryUsage(g_runtime, &usage);
-    return usage.memory_used_size;
+    return usage.memory_used_size + g_binary_bytes;
 }
