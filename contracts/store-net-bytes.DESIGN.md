@@ -304,26 +304,28 @@ The QuickJS shell is a **JSON string bridge** (§1.2), so raw segment bytes
 cannot ride structured clone there. rill wraps at the shell channel (the
 platform-stated preference), so the **handler still sees `Uint8Array`**:
 
-- **Guest → host:** upgrade `__invokeHostRpc`'s arg marshaling
-  (`quickjs-native-wasm-provider.ts:626-633`) so that, before `JSON.stringify`,
-  each `Uint8Array` in `args` is replaced by `{"$b64": "<base64>"}`. On the host
-  side, `onHostModuleEvent` (`:462-497`) revives `{"$b64":…}` → `Uint8Array`
-  **before** `fn(m.args)` (`:490`).
-- **Host → guest:** `resolveHostCall` (`:429-439`) walks `value`, replaces each
-  `Uint8Array` with `{"$b64":…}` before `JSON.stringify`; the guest-side
-  `__resolveHostCall` revives them to `Uint8Array`.
-- Base64 is the transport encoding *only inside the JSON string bridge*; it is
-  bounded by the same caps (§B.4). This is strictly better than the number-array
-  hack (base64 is ~1.33× vs ~3–4× for `JSON.stringify` of a typed array) and, if
-  profiling ever shows it hot, the sidecar can be upgraded to a real binary
-  channel without touching guests (same "Route B only if measured" logic as
-  canvas-wire §2.2).
+- **Guest → host:** before `JSON.stringify`, each binary value in `args` is
+  staged into wasm linear memory via the native `__rill_stageBinary` helper and
+  replaced by `{"$bin": <id>}` (plus `{"$view": "<Kind>"}` for typed-array
+  views). On the host side the payload is revived by copying the staged bytes
+  out of `HEAPU8` (`qjs_binary_ptr`/`qjs_binary_len`) and freeing the slot
+  (`qjs_binary_free`) **before** `fn(m.args)`.
+- **Host → guest:** the host stages bytes into wasm memory
+  (`_malloc` + `qjs_binary_stage`) and sends `{"$bin": <id>}` in the JSON
+  payload; the guest-side codec revives each id to a real `ArrayBuffer`
+  (zero-copy adoption via `__rill_takeBinary`) and rewraps the declared view
+  kind.
+- The staging table is the transport *only inside the JSON string bridge*; each
+  id is consumed exactly once and freed on consumption (error paths free in
+  `finally`), bounded by the same caps (§B.4). Bytes cross the boundary via
+  linear memory rather than any text encoding, so payload size stays ~1× the
+  raw bytes.
 
 So: **WASM** carries `RBS1` length-prefixed segments; **QuickJS** carries
-`$b64` sentinels in its JSON bridge; **both** deliver a `Uint8Array` to the same
-platform handler. The sentinel key differs (`$b` index vs `$b64` inline) because
-the transports differ, but the contract-level meaning ("this field is bytes") is
-one thing.
+`$bin` staging-table references in its JSON bridge; **both** deliver bytes to
+the same platform handler. The sentinel key differs (`$b` index vs `$bin`
+handle) because the transports differ, but the contract-level meaning ("this
+field is bytes") is one thing.
 
 ### C. rill-guest SDK binary wrappers
 
@@ -410,7 +412,7 @@ const got = await hostModules['host:store'].getBytes(key)                  // { 
 The optional rill guest SDK sugar (`rill/guest`) would expose typed
 `putBytes(key, value: Uint8Array)` / `getBytes(key): Promise<Uint8Array|null>`
 thin wrappers over those stubs — no encoding logic in the guest, since the shell
-does the `$b64` wrapping.
+does the `$bin` staging.
 
 ### D. Acceptance / property test
 

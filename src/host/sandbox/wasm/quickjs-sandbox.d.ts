@@ -36,6 +36,15 @@ interface QuickJSWASMModule {
   _qjs_inject_json: (namePtr: number, valuePtr: number) => number;
   _qjs_extract_json: (namePtr: number) => number;
   _qjs_set_host_callback: (fnPtr: number) => void;
+  _qjs_set_host_binary_callback: (fnPtr: number) => void;
+  // Binary staging table backing the {"$bin":id} JSON sentinel (first-class
+  // ArrayBuffer marshalling). Every staged id is consumed exactly once;
+  // qjs_binary_count() exists for zero-leak assertions.
+  _qjs_binary_stage: (ptr: number, len: number) => number;
+  _qjs_binary_ptr: (id: number) => number;
+  _qjs_binary_len: (id: number) => number;
+  _qjs_binary_free: (id: number) => void;
+  _qjs_binary_count: () => number;
   _qjs_install_host_functions: () => void;
   _qjs_set_timer_callback: (fnPtr: number) => void;
   _qjs_install_timer_functions: () => void;
@@ -48,6 +57,8 @@ interface QuickJSWASMModule {
 
 type QuickJSWASMFactoryModuleArg = {
   locateFile?: (path: string, scriptDirectory?: string) => string;
+  /** Instantiate from these bytes directly (no fetch; required under strict CSP). */
+  wasmBinary?: Uint8Array | ArrayBuffer;
 };
 
 type QuickJSWASMFactory = (moduleArg?: QuickJSWASMFactoryModuleArg) => Promise<QuickJSWASMModule>;
