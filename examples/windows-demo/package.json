@@ -17,7 +17,7 @@
     "@babel/runtime": "^7.28.4",
     "react": "19.1.0",
     "react-native": "0.81.5",
-    "react-native-windows": "^0.81.2",
+    "react-native-windows": "0.81.2",
     "react-reconciler": "0.31.0",
     "rill": "file:../../"
   },
@@ -37,5 +37,9 @@
       "namespace": "WindowsDemo",
       "template": "cpp-app"
     }
+  },
+  "overrides": {
+    "@xmldom/xmldom": "^0.8.13",
+    "fast-xml-parser": "^5.7.0"
   }
 }
