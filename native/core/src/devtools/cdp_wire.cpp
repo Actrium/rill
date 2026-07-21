@@ -5,6 +5,12 @@
  *
  * Licensed under the Apache License, Version 2.0.
  */
+
+// WIP subsystem — gated behind RILL_WIP_CDP_DEVTOOLS (off by default in production
+// builds). The debug wasm builds pass -DRILL_WIP_CDP_DEVTOOLS=1 and need these
+// helpers; a normal Apple pod build leaves an empty TU instead of shipping them.
+#if RILL_WIP_CDP_DEVTOOLS
+
 #include "cdp_wire.h"
 
 #include <cctype>
@@ -169,3 +175,5 @@ std::optional<int> parseJSONInt(const std::string& json, const std::string& key)
 
 }  // namespace cdp
 }  // namespace rill::devtools
+
+#endif  // RILL_WIP_CDP_DEVTOOLS

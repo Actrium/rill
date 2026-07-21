@@ -1,3 +1,9 @@
+// WIP subsystem — gated behind RILL_WIP_CDP_DEVTOOLS (off by default in production builds).
+// Rationale, goals, current status, and completion TODO live in devtools/CDPServer.h.
+// This TU references DebuggerAdapter (itself gated), so an ungated build would
+// link against symbols that collapse to an empty TU — guard it to match.
+#if RILL_WIP_CDP_DEVTOOLS
+
 #include "AdapterDebugTarget.h"
 
 #include "DebuggerAdapter.h"
@@ -148,3 +154,5 @@ void AdapterDebugTarget::dispatch(ConnectionId conn, const RawCdpMessage& raw) {
 }
 
 }  // namespace rill::devtools
+
+#endif  // RILL_WIP_CDP_DEVTOOLS

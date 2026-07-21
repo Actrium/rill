@@ -11,6 +11,13 @@
  *
  * Licensed under the Apache License, Version 2.0.
  */
+
+// Emscripten-only translation unit. It is swept into the QuickJS pod by the
+// source glob, so guard the whole body on __EMSCRIPTEN__ (always defined under
+// emcc, never under an Apple/host toolchain) — a non-emscripten build then sees
+// an empty TU instead of failing on <emscripten.h>.
+#ifdef __EMSCRIPTEN__
+
 #include "QuickJSDebugCore.h"
 #include "quickjs.h"
 
@@ -178,3 +185,5 @@ int qjsd_frame_line(int i) {
 }
 
 }  // extern "C"
+
+#endif  // __EMSCRIPTEN__
