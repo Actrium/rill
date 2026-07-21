@@ -73,10 +73,14 @@
 #define CONFIG_ATOMICS
 #endif
 
-#if !defined(EMSCRIPTEN)
-/* enable stack limitation */
+/* enable stack limitation. Also under EMSCRIPTEN: with the LLVM wasm
+   backend the C stack is a shadow stack in linear memory that grows
+   downward, and __builtin_frame_address(0) returns the current shadow
+   stack pointer, so the generic downward-growth check below is valid.
+   Without this, JS_SetMaxStackSize is a no-op and deep recursion hits
+   the wasm stack ceiling as an unrecoverable trap instead of a
+   catchable "stack overflow" JS error. */
 #define CONFIG_STACK_CHECK
-#endif
 
 #ifdef __ANDROID__
 #include <android/log.h>
