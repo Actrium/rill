@@ -16,6 +16,110 @@
 #define EXPORT
 #endif
 
+// Wasm resource ceilings, injected by CMakeLists.wasm.txt from the same values
+// fed to Emscripten's -sMAXIMUM_MEMORY / -sSTACK_SIZE link options. Deriving the
+// QuickJS soft limits from these guarantees they can never drift above the hard
+// wasm ceilings (where the module would OOM/trap ungracefully) the way two
+// independent magic numbers did. Fallbacks match the current CMake defaults
+// (WASM_MAX_MEMORY=32MB, WASM_STACK_SIZE=512KB) so a stray non-CMake build still
+// keeps the soft limits below the ceiling instead of disabling them.
+#ifndef RILL_WASM_MAX_MEMORY_BYTES
+#define RILL_WASM_MAX_MEMORY_BYTES (32 * 1024 * 1024)
+#endif
+#ifndef RILL_WASM_STACK_BYTES
+#define RILL_WASM_STACK_BYTES (512 * 1024)
+#endif
+
+// Headroom fractions. The linear-memory ceiling holds far more than the QuickJS
+// heap — the C stack, static data, and the Emscripten runtime all live in the
+// same address space — so the heap soft limit sits at 75% of MAX, leaving ~25%
+// (8MB at the 32MB default) for everything else; QuickJS reports "out of memory"
+// before the module hard-OOMs. Likewise the wasm stack is shared with non-QuickJS
+// C frames (Emscripten init, host callbacks), so the interpreter's stack soft
+// limit sits at 75% of the wasm stack, leaving ~25% (128KB at the 512KB default)
+// for those frames; QuickJS throws "stack overflow" before the wasm stack traps.
+#define RILL_QJS_MEMORY_LIMIT_BYTES ((RILL_WASM_MAX_MEMORY_BYTES / 4) * 3)
+#define RILL_QJS_STACK_LIMIT_BYTES ((RILL_WASM_STACK_BYTES / 4) * 3)
+
+#ifdef __EMSCRIPTEN__
+// Accurate allocation accounting so the memory soft limit can actually fire.
+//
+// QuickJS's default allocator meters malloc_state.malloc_size through a
+// platform usable-size probe, and vendor quickjs.c compiles that probe to
+// `return 0` under EMSCRIPTEN — each allocation then accrues only the 8-byte
+// MALLOC_OVERHEAD constant, the meter undercounts real usage by orders of
+// magnitude, and JS_SetMemoryLimit can never trip before the wasm linear
+// memory hard-OOMs. Emscripten's dlmalloc DOES implement
+// malloc_usable_size(), so this runtime is created via JS_NewRuntime2 with
+// allocator functions that meter real usable sizes. The limit/accounting
+// logic mirrors quickjs.c's js_def_malloc/js_def_free/js_def_realloc; no
+// MALLOC_OVERHEAD constant is added because usable_size already includes
+// the allocator's real rounding (same approach as the macOS branch).
+#include <assert.h>
+#include <malloc.h>
+
+static void *rill_qjs_malloc(JSMallocState *s, size_t size) {
+    void *ptr;
+
+    // QuickJS never requests zero bytes (same contract as js_def_malloc).
+    assert(size != 0);
+
+    if (s->malloc_size + size > s->malloc_limit) {
+        return NULL; // Soft limit hit: QuickJS raises a catchable OOM.
+    }
+    ptr = malloc(size);
+    if (!ptr) {
+        return NULL;
+    }
+    s->malloc_count++;
+    s->malloc_size += malloc_usable_size(ptr);
+    return ptr;
+}
+
+static void rill_qjs_free(JSMallocState *s, void *ptr) {
+    if (!ptr) {
+        return;
+    }
+    s->malloc_count--;
+    s->malloc_size -= malloc_usable_size(ptr);
+    free(ptr);
+}
+
+static void *rill_qjs_realloc(JSMallocState *s, void *ptr, size_t size) {
+    size_t old_size;
+
+    if (!ptr) {
+        if (size == 0) {
+            return NULL;
+        }
+        return rill_qjs_malloc(s, size);
+    }
+    old_size = malloc_usable_size(ptr);
+    if (size == 0) {
+        s->malloc_count--;
+        s->malloc_size -= old_size;
+        free(ptr);
+        return NULL;
+    }
+    if (s->malloc_size + size - old_size > s->malloc_limit) {
+        return NULL;
+    }
+    ptr = realloc(ptr, size);
+    if (!ptr) {
+        return NULL;
+    }
+    s->malloc_size += malloc_usable_size(ptr) - old_size;
+    return ptr;
+}
+
+static const JSMallocFunctions rill_qjs_malloc_funcs = {
+    rill_qjs_malloc,
+    rill_qjs_free,
+    rill_qjs_realloc,
+    (size_t (*)(const void *))malloc_usable_size,
+};
+#endif // __EMSCRIPTEN__
+
 // Global runtime and context (one per WASM instance)
 static JSRuntime *g_runtime = NULL;
 static JSContext *g_context = NULL;
@@ -204,16 +308,27 @@ EXPORT int qjs_init(void) {
         return 0; // Already initialized
     }
 
+#ifdef __EMSCRIPTEN__
+    // Metered allocator: without it the memory soft limit is inert (see
+    // rill_qjs_malloc_funcs above).
+    g_runtime = JS_NewRuntime2(&rill_qjs_malloc_funcs, NULL);
+#else
     g_runtime = JS_NewRuntime();
+#endif
     if (!g_runtime) {
         return -1;
     }
 
-    // Set memory limit (64MB)
-    JS_SetMemoryLimit(g_runtime, 64 * 1024 * 1024);
-
-    // Set max stack size (1MB)
-    JS_SetMaxStackSize(g_runtime, 1024 * 1024);
+    // Soft limits kept safely below the actual wasm ceilings so QuickJS raises a
+    // graceful JS error ("out of memory" / "stack overflow") before the module
+    // hits the hard wasm trap. Both are derived from the build's real ceilings
+    // (see RILL_WASM_* / headroom rationale above), not standalone constants, so
+    // they cannot silently drift above the ceiling and go dead again. They only
+    // fire because the two enforcement mechanisms are made real on wasm:
+    // accurate byte metering via rill_qjs_malloc_funcs (memory), and
+    // CONFIG_STACK_CHECK enabled under EMSCRIPTEN in vendor quickjs.c (stack).
+    JS_SetMemoryLimit(g_runtime, RILL_QJS_MEMORY_LIMIT_BYTES);
+    JS_SetMaxStackSize(g_runtime, RILL_QJS_STACK_LIMIT_BYTES);
 
     // Interrupt runaway guest code (e.g. `while(true){}`) once the
     // host-armed deadline expires.
