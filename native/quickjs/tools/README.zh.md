@@ -23,9 +23,28 @@ HOSTBIN=/tmp/cdp_host PORT=9411 node cdp_ws_bridge.js &   # 起桥
 PORT=9411 node cdp_client_probe.js                        # 跑探针
 ```
 
-期望 **8/8 ALL PASS**：scriptParsed → getScriptSource → setBreakpointByUrl（解析
-出真 scriptId）→ 断点命中（真 `greet → <eval>` 双帧栈）→ evaluateOnCallFrame
-`count=1` → resume 跑完。Linux 与 macOS(arm64) 均已实测通过。
+期望 **12/12 ALL PASS**：executionContextCreated → Runtime.evaluate（空闲态求值
++ 异常呈现）→ scriptParsed → getScriptSource → setBreakpointByUrl（解析出真
+scriptId）→ 断点命中（真 `greet → <eval>` 双帧栈）→ evaluateOnCallFrame
+`count=1` → Runtime.evaluate（暂停态）→ resume 跑完。Linux 与 macOS(arm64)
+均已实测通过。
+
+## Console 支持范围（MVP）
+
+主机在 `Runtime.enable` 时通告执行上下文（DevTools 没看到执行上下文就根本
+不会发 Console 输入），并处理 `Runtime.evaluate`：
+
+- **暂停态**：经 `runOnPausedThread` 在被扣住的 runtime 线程上求值（调试钩子
+  抑制，不会自暂停）；DevTools 选中帧后的 Console 输入走
+  `Debugger.evaluateOnCallFrame`（Debugger 域，原有能力）。
+- **空闲态**：投给 guest 线程的任务队列求值；guest 忙/正暂停在断点时 3 秒超时
+  回明确错误（避免卡死 stdin 令 resume 无法送达）。
+- **结果呈现**：基本类型全保真；对象/函数给描述文本（优先 JSON 序列化），
+  **不带 objectId**（引擎的 objectId 注册表是暂停期作用域、resume 时释放，
+  Console 结果的可展开性留作后续）。
+
+**仍未覆盖**：`console.log` 转发（`Runtime.consoleAPICalled` 事件）、Console
+结果对象展开、`awaitPromise`、命令行 API（`$0`、`copy` 等）。
 
 ## 真 Chrome DevTools 联调（人肉一步）
 

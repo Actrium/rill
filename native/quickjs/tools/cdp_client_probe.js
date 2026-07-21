@@ -42,6 +42,7 @@ const waitFor = (pred, ms, label) =>
 
   const scripts = [];
   let paused = null;
+  let execCtx = null;
   Debugger.scriptParsed((p) => scripts.push(p));
   Debugger.paused((p) => {
     paused = p;
@@ -49,9 +50,30 @@ const waitFor = (pred, ms, label) =>
   Debugger.resumed(() => {
     paused = null;
   });
+  Runtime.executionContextCreated((p) => {
+    execCtx = p.context;
+  });
 
   await Runtime.enable();
   await Debugger.enable();
+
+  // Console prerequisite: the host must announce an execution context, or the
+  // DevTools front-end never sends Runtime.evaluate at all.
+  await waitFor(() => execCtx !== null, 2000, 'executionContextCreated');
+  check(!!execCtx, `Runtime.enable announced an execution context (${execCtx && execCtx.name})`);
+
+  // Console input outside a pause = Runtime.evaluate, served on the idle guest
+  // thread.
+  const idleEv = await Runtime.evaluate({ expression: '6 * 7' });
+  check(
+    idleEv.result && idleEv.result.type === 'number' && idleEv.result.value === 42,
+    `Runtime.evaluate (idle) 6 * 7 -> ${idleEv.result && idleEv.result.value}`
+  );
+  const idleErr = await Runtime.evaluate({ expression: 'nosuchvar + 1' });
+  check(
+    !!idleErr.exceptionDetails,
+    'Runtime.evaluate (idle) surfaces a thrown ReferenceError as exceptionDetails'
+  );
 
   // The host pre-registers guest.js, so Debugger.enable replays scriptParsed.
   await waitFor(
@@ -101,6 +123,15 @@ const waitFor = (pred, ms, label) =>
     check(
       ev.result && ev.result.type === 'number',
       `Debugger.evaluateOnCallFrame globalThis.count -> ${ev.result && ev.result.value}`
+    );
+
+    // Console input while paused = Runtime.evaluate too (watch expressions,
+    // typed input before selecting a frame); served on the captive paused
+    // thread, global scope.
+    const pausedEv = await Runtime.evaluate({ expression: 'globalThis.count + 41' });
+    check(
+      pausedEv.result && pausedEv.result.value === 42,
+      `Runtime.evaluate (paused) globalThis.count + 41 -> ${pausedEv.result && pausedEv.result.value}`
     );
 
     await Debugger.resume();
