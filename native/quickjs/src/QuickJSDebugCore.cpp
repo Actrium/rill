@@ -112,6 +112,18 @@ void QuickJSDebugCore::resume() {
   wakeFromPause();
 }
 
+void QuickJSDebugCore::detach() {
+  detaching_.store(true);  // future onStep calls short-circuit before any pause
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    breakpoints_.clear();
+    stepMode_ = StepMode::None;
+    pauseRequested_ = false;
+    resumeRequested_ = true;  // release a runtime currently parked in the pump
+  }
+  wakeFromPause();
+}
+
 void QuickJSDebugCore::stepInto() {
   {
     std::lock_guard<std::mutex> lk(mutex_);
@@ -222,6 +234,8 @@ void QuickJSDebugCore::onStep(JSContext* ctx, const void* token, int line,
   // Suppress the hook while evaluating in the paused context: a re-entrant eval
   // runs on this same thread and would otherwise self-pause / recurse.
   if (inEval_) return;
+  // Session teardown: never pause again (see detach()).
+  if (detaching_.load(std::memory_order_relaxed)) return;
 #if defined(__EMSCRIPTEN__)
   // Web: the pause unwinds the C stack instead of blocking a thread, so guest
   // bytecode CAN run while already parked (a second eval entry, or a host that

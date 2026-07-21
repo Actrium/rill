@@ -323,9 +323,13 @@ int main() {
     }
   }
 
-  // stdin closed: make sure a paused runtime can exit, then tear down.
+  // stdin closed: tear down. detach() (not a single resume()) clears the
+  // breakpoints and latches the hook off, so a runtime parked at one breakpoint
+  // resumes AND does not re-trap on a downstream breakpoint — otherwise the
+  // guest would pause again with no reader left to resume it and the join below
+  // would block forever.
   quit.store(true);
-  core->resume();
+  core->detach();
   runCv.notify_all();
   guestThread.join();
   target->onClientDisconnect(conn);

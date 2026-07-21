@@ -15,6 +15,7 @@
 
 #ifdef RILL_QJS_DEBUG
 
+#include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
@@ -116,6 +117,12 @@ public:
   void stepOver();
   void stepOut();
   bool isPaused();
+  // Teardown: permanently stop pausing and release a parked runtime. Clears all
+  // breakpoints/step state and wakes any current pause, and every subsequent
+  // onStep short-circuits — so a runtime paused at EOF cannot re-trap on a
+  // downstream breakpoint and wedge the joining thread. One-way; call once while
+  // tearing the session down.
+  void detach();
 
   // Run a job on the (blocked) runtime thread while it is paused, then return.
   // Used to evaluate expressions in the paused context: the debug hook is
@@ -160,6 +167,7 @@ private:
   const EvalJob* pendingJob_ = nullptr;  // guarded by mutex_
   bool jobDone_ = false;                 // guarded by mutex_
   bool inEval_ = false;  // runtime-thread-only: suppress the hook during eval
+  std::atomic<bool> detaching_{false};  // one-way teardown latch (see detach())
   StepMode stepMode_ = StepMode::None;                 // guarded by mutex_
   int stepDepth_ = 0;    // call depth the step was armed at; guarded by mutex_
   int stepLine_ = 0;     // source line the step was armed at; guarded by mutex_
