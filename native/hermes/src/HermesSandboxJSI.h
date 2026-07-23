@@ -8,6 +8,7 @@
 //
 // For Windows (Hermes NuGet, N-API-only), see HermesSandboxNAPI.h instead.
 
+#include <cstdint>
 #include <jsi/jsi.h>
 #include <memory>
 #include <mutex>
@@ -20,6 +21,19 @@ namespace hermes {
 class HermesRuntime;
 } // namespace hermes
 } // namespace facebook
+
+#if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
+#include "devtools/CdpDebuggable.h"  // rill::devtools::ICdpDebuggable (capability seam)
+#endif
+
+namespace facebook {
+namespace hermes {
+class HermesRuntime;  // fwd-decl: keep the concrete runtime type off this header
+namespace cdp {
+class CDPDebugAPI;
+}
+}
+}  // namespace facebook
 
 namespace hermes_sandbox {
 
@@ -34,7 +48,12 @@ using namespace facebook;
  * - extract(name: string): unknown
  * - dispose(): void
  */
-class HermesSandboxContext : public jsi::HostObject {
+class HermesSandboxContext : public jsi::HostObject
+#if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
+    ,
+    public rill::devtools::ICdpDebuggable
+#endif
+{
 public:
   HermesSandboxContext(jsi::Runtime &hostRuntime, double timeout);
   ~HermesSandboxContext() override;
@@ -69,15 +88,47 @@ public:
 
   bool isDisposed() const { return disposed_; }
 
+#if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
+  // CDP debug handles for the relay layer: RillTenantManager builds a
+  // CDPAgentTarget from the runtime + this shared CDPDebugAPI. Dev-only.
+  facebook::hermes::HermesRuntime &hermesRuntime() { return *sandboxRuntime_; }
+  std::shared_ptr<facebook::hermes::cdp::CDPDebugAPI> cdpDebugAPI() { return cdpDebugAPI_; }
+
+  // ICdpDebuggable: build a per-tenant CDP target. Runtime tasks are pumped onto
+  // the host JS thread (where this guest runtime runs) via `callInvoker`.
+  std::shared_ptr<rill::devtools::IEngineDebugTarget> createCdpDebugTarget(
+      std::shared_ptr<facebook::react::CallInvoker> callInvoker,
+      std::int32_t executionContextId) override;
+#endif
+
 private:
-  std::unique_ptr<jsi::Runtime> sandboxRuntime_;
-  // Typed view of sandboxRuntime_ for Hermes-specific APIs (watchTimeLimit).
-  // Owned by sandboxRuntime_; nulled in dispose().
-  facebook::hermes::HermesRuntime *hermesRuntime_ = nullptr;
+  // Stored as its concrete Hermes type (not sliced to jsi::Runtime) so both the
+  // watchdog (watchTimeLimit) and the CDP debug layer (CDPDebugAPI::create) can
+  // call Hermes-specific APIs on it directly. HermesRuntime IS-A jsi::Runtime, so
+  // every existing jsi:: use of *sandboxRuntime_ is unaffected.
+  std::unique_ptr<facebook::hermes::HermesRuntime> sandboxRuntime_;
   // Wall-clock execution budget per top-level eval; <= 0 means unlimited.
   double timeoutMs_ = 0;
   // Nesting depth for TimeLimitScope (guarded by mutex_).
   int timeLimitDepth_ = 0;
+#if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
+  // Per-runtime CDP debug API (owns the AsyncDebuggerAPI). Constructed with the
+  // runtime; inert until a CDPAgent attaches a pause callback. Destroyed before
+  // the runtime in dispose(). Dev-only.
+  std::shared_ptr<facebook::hermes::cdp::CDPDebugAPI> cdpDebugAPI_;
+  // Liveness token for the runtime-task pump: enqueued tasks hold a weak_ptr and
+  // drop themselves if the runtime was disposed before the host CallInvoker got
+  // to them (guards against use-after-free on *sandboxRuntime_). Reset first in
+  // dispose(). Dev-only.
+  std::shared_ptr<int> runtimeAlive_;
+  // Suspends the eval-timeout watchdog while paused at a breakpoint so stopped
+  // wall-clock time is not charged against the eval budget (see the debugger
+  // event callback in the ctor). Both touched only on the runtime thread. The id
+  // is a debugger::DebuggerEventCallbackID (uint32_t; 0 == invalid) kept untyped
+  // here to keep the Hermes debugger headers off this header.
+  std::uint32_t watchdogPauseCallbackId_ = 0;
+  bool watchdogSuspended_ = false;
+#endif
   jsi::Runtime *hostRuntime_;
   bool disposed_;
   std::recursive_mutex mutex_;

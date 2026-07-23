@@ -5,6 +5,14 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
+#ifdef RILL_QJS_DEBUG
+#include "QuickJSDebugCore.h"
+#include "QuickJSEngineDebugger.h"
+#include "devtools/AdapterDebugTarget.h"
+#include "devtools/DebuggerAdapter.h"
+#include <ReactCommon/CallInvoker.h>
+#endif
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -183,11 +191,60 @@ void QuickJSSandboxContext::dispose() {
   }
   wrapperCache_.clear();
 
+#ifdef RILL_QJS_DEBUG
+  // Unregister the interpreter debug hook before the context it references goes
+  // away (the QuickJSEngineDebugger that captured the paused callback has already
+  // been torn down with its debug target at tenant destroy).
+  debugCore_.reset();
+#endif
+
   if (qjsContext_) {
     JS_FreeContext(qjsContext_);
     qjsContext_ = nullptr;
   }
 }
+
+#ifdef RILL_QJS_DEBUG
+std::shared_ptr<rill::devtools::IEngineDebugTarget>
+QuickJSSandboxContext::createCdpDebugTarget(
+    std::shared_ptr<facebook::react::CallInvoker> /*callInvoker*/,
+    std::int32_t executionContextId) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (disposed_) return nullptr;
+
+  // Lazily attach the engine debug controller — creating it registers the global
+  // interpreter hook, so only a tenant that is actually being debugged pays for
+  // it (non-debugged QuickJS contexts stay on the pristine dispatch path).
+  if (!debugCore_) {
+    debugCore_ =
+        std::make_unique<rill::qjs_debug::QuickJSDebugCore>(qjsRuntime_, qjsContext_);
+  }
+
+  const auto tenantId = static_cast<rill::devtools::TenantId>(executionContextId);
+  auto engineDbg = std::make_shared<rill::qjs_debug::QuickJSEngineDebugger>(
+      debugCore_.get(), tenantId);
+  auto adapter = std::make_shared<rill::devtools::DebuggerAdapter>();
+  adapter->setEngineDebugger(engineDbg);
+  auto target = std::make_shared<rill::devtools::AdapterDebugTarget>(adapter, tenantId);
+
+  // Engine pause -> Debugger.paused through the adapter's per-connection sinks.
+  // Capture the adapter raw (no ownership cycle): the adapter owns engineDbg,
+  // which owns this notifier, so the adapter outlives every notifier call.
+  rill::devtools::DebuggerAdapter* adapterRaw = adapter.get();
+  engineDbg->setPausedNotifier(
+      [adapterRaw, tenantId](rill::devtools::PauseReason r,
+                             const std::vector<rill::devtools::CallFrame>& frames,
+                             const std::vector<std::string>& hits) {
+        adapterRaw->onPaused(tenantId, r, frames, hits);
+      });
+  // Script first seen -> Debugger.scriptParsed (drives setBreakpointByUrl).
+  engineDbg->setScriptParsedNotifier(
+      [adapterRaw, tenantId](const rill::devtools::ScriptInfo& info) {
+        adapterRaw->onScriptParsed(tenantId, info);
+      });
+  return target;
+}
+#endif
 
 void QuickJSSandboxContext::installConsole() {
   const char *consoleScript = R"(

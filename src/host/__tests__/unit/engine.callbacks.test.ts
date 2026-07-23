@@ -163,14 +163,20 @@ describe('Engine Metrics', () => {
       ok: true,
       text: () => Promise.resolve('console.log("fetched")'),
     });
+    // Restore: bun test shares one process across files — a leaked global
+    // fetch mock breaks later files that talk to a real local server.
+    const realFetch = global.fetch;
     global.fetch = mockFetch;
+    try {
+      await engine.loadBundle('https://example.com/bundle.js');
 
-    await engine.loadBundle('https://example.com/bundle.js');
-
-    const fetchMetric = metricsCollector.find((m) => m.name === 'engine.fetchBundle');
-    expect(fetchMetric).toBeDefined();
-    expect(fetchMetric?.extra).toHaveProperty('status', 200);
-    expect(fetchMetric?.extra).toHaveProperty('size');
+      const fetchMetric = metricsCollector.find((m) => m.name === 'engine.fetchBundle');
+      expect(fetchMetric).toBeDefined();
+      expect(fetchMetric?.extra).toHaveProperty('status', 200);
+      expect(fetchMetric?.extra).toHaveProperty('size');
+    } finally {
+      global.fetch = realFetch;
+    }
   });
 
   it('should emit metrics for executeBundle', async () => {

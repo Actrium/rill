@@ -6,6 +6,10 @@
 #include <mutex>
 #include <string>
 
+#if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
+#include "devtools/CdpDebuggable.h"
+#endif
+
 namespace rill::tenant_manager {
 
 /// Unified wrapper around engine-specific sandbox contexts.
@@ -50,6 +54,15 @@ public:
   TenantContext& context() { return *context_; }
 
   bool isDisposed() const;
+
+#if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
+  // Recover the CDP debug capability from the opaque sandbox context. Returns
+  // null unless the engine is CDP-capable (today: Hermes). RTTI is enabled in
+  // this build (Meta's JSI implementation itself uses dynamic_cast).
+  rill::devtools::ICdpDebuggable *cdpDebuggable() {
+    return dynamic_cast<rill::devtools::ICdpDebuggable *>(sandboxContext_.get());
+  }
+#endif
 
 private:
   TenantId id_;

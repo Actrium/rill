@@ -6,6 +6,12 @@
 #else
 #error "Rill Hermes sandbox requires Hermes headers. Enable Hermes in the host (hermes_enabled: true / USE_HERMES=1) or build with RILL_SANDBOX_ENGINE=jsc|quickjs."
 #endif
+#if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
+#include <hermes/AsyncDebuggerAPI.h>
+#include <hermes/cdp/CDPDebugAPI.h>
+#include <ReactCommon/CallInvoker.h>
+#include "devtools/CDPAgentTarget.h"
+#endif
 #include <string>
 #include <cstring>
 
@@ -672,11 +678,9 @@ HermesSandboxContext::HermesSandboxContext(jsi::Runtime &hostRuntime,
   // thread. timeout <= 0 means unlimited.
   timeoutMs_ = timeout;
 
-  // Create an isolated Hermes runtime for the sandbox. Keep a typed pointer
-  // for Hermes-specific APIs; ownership stays with sandboxRuntime_.
-  auto hermesRt = facebook::hermes::makeHermesRuntime();
-  hermesRuntime_ = hermesRt.get();
-  sandboxRuntime_ = std::move(hermesRt);
+  // Create an isolated Hermes runtime for the sandbox, kept as its concrete
+  // HermesRuntime type so watchTimeLimit / CDPDebugAPI can use it directly.
+  sandboxRuntime_ = facebook::hermes::makeHermesRuntime();
 
   if (!sandboxRuntime_) {
     throw jsi::JSError(hostRuntime, "Failed to create Hermes sandbox runtime");
@@ -743,6 +747,52 @@ HermesSandboxContext::HermesSandboxContext(jsi::Runtime &hostRuntime,
 
   installTaskQueueShim(hostRuntime);
 
+#if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
+  // Create the CDP debug API alongside the runtime — its AsyncDebuggerAPI must
+  // be constructed with the runtime. Inert (no pausing) until a CDPAgent
+  // attaches a pause callback. Dev-only.
+  cdpDebugAPI_ = facebook::hermes::cdp::CDPDebugAPI::create(*sandboxRuntime_);
+  runtimeAlive_ = std::make_shared<int>(1);
+
+  // Reconcile the eval-timeout watchdog with debugger pauses: the watchdog is a
+  // wall-clock timer, but time spent stopped at a breakpoint is not execution
+  // and must not be charged against the eval budget — otherwise stepping off a
+  // breakpoint after the budget elapsed would immediately kill the program. On
+  // every pause suspend the watchdog (unwatchTimeLimit); on resume re-arm it with
+  // a fresh budget. Fires on the runtime thread, so the plain-bool/id state is
+  // single-threaded. Only meaningful when a finite timeout is set.
+  watchdogPauseCallbackId_ =
+      cdpDebugAPI_->asyncDebuggerAPI().addDebuggerEventCallback_TS(
+          [this](facebook::hermes::HermesRuntime &rt,
+                 facebook::hermes::debugger::AsyncDebuggerAPI &,
+                 facebook::hermes::debugger::DebuggerEventType event) {
+            using ET = facebook::hermes::debugger::DebuggerEventType;
+            if (!(timeoutMs_ > 0 && timeoutMs_ < 4294967295.0)) {
+              return;
+            }
+            switch (event) {
+              case ET::Breakpoint:
+              case ET::DebuggerStatement:
+              case ET::StepFinish:
+              case ET::ExplicitPause:
+              case ET::Exception:
+                if (!watchdogSuspended_) {
+                  rt.unwatchTimeLimit();
+                  watchdogSuspended_ = true;
+                }
+                break;
+              case ET::Resumed:
+                if (watchdogSuspended_) {
+                  rt.watchTimeLimit(static_cast<uint32_t>(timeoutMs_));
+                  watchdogSuspended_ = false;
+                }
+                break;
+              default:
+                break;
+            }
+          });
+#endif
+
   rill_log(kLogTag, "Created new Hermes sandbox context");
 }
 
@@ -758,10 +808,52 @@ void HermesSandboxContext::dispose() {
   wrapperCache_.clear();
   callbacks_.clear();
   sandboxFunctions_.clear();
-  hermesRuntime_ = nullptr; // owned by sandboxRuntime_, about to be freed
+#if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
+  // Detach the watchdog-pause observer (it captures this) before its owner dies.
+  if (watchdogPauseCallbackId_ != 0 && cdpDebugAPI_) {
+    cdpDebugAPI_->asyncDebuggerAPI().removeDebuggerEventCallback_TS(
+        watchdogPauseCallbackId_);
+    watchdogPauseCallbackId_ = 0;
+  }
+  // Expire the pump token first so any task still queued on the host CallInvoker
+  // drops instead of touching a half-torn-down runtime, then destroy the CDP
+  // debug API before the runtime it wraps (hard order).
+  runtimeAlive_.reset();
+  cdpDebugAPI_.reset();
+#endif
   sandboxRuntime_.reset();
   rill_log(kLogTag, "Disposed sandbox context");
 }
+
+#if defined(RILL_WIP_CDP_DEVTOOLS) && !defined(NDEBUG)
+std::shared_ptr<rill::devtools::IEngineDebugTarget>
+HermesSandboxContext::createCdpDebugTarget(
+    std::shared_ptr<facebook::react::CallInvoker> callInvoker,
+    std::int32_t executionContextId) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  if (disposed_ || !cdpDebugAPI_ || !callInvoker) {
+    return nullptr;
+  }
+  // Runtime-task pump. Hermes emits tasks that must run on the runtime thread;
+  // this guest runtime runs on the host JS thread, so bounce each task through
+  // the host CallInvoker. Capturing the raw runtime pointer is safe because
+  // RillTenantManager tears the target down (resume + unregister) before it
+  // disposes this context, so no task outlives *rt.
+  auto *rt = sandboxRuntime_.get();
+  std::weak_ptr<int> alive = runtimeAlive_;
+  facebook::hermes::debugger::EnqueueRuntimeTaskFunc enqueue =
+      [callInvoker, rt, alive](facebook::hermes::debugger::RuntimeTask task) {
+        callInvoker->invokeAsync([task = std::move(task), rt, alive]() {
+          // Drop the task if the runtime was disposed before we ran.
+          if (auto keep = alive.lock()) {
+            task(*rt);
+          }
+        });
+      };
+  return std::make_shared<rill::devtools::CDPAgentTarget>(
+      executionContextId, cdpDebugAPI_, std::move(enqueue));
+}
+#endif
 
 jsi::Value HermesSandboxContext::get(jsi::Runtime &rt,
                                      const jsi::PropNameID &name) {
@@ -932,9 +1024,9 @@ HermesSandboxContext::TimeLimitScope::TimeLimitScope(HermesSandboxContext &ctx)
     : ctx_(ctx) {
   // Guard the double->uint32 cast (Infinity / oversized budgets are UB to
   // cast — treat them as unlimited), and only arm at the outermost entry.
-  if (ctx_.hermesRuntime_ && ctx_.timeoutMs_ > 0 &&
+  if (ctx_.sandboxRuntime_ && ctx_.timeoutMs_ > 0 &&
       ctx_.timeoutMs_ < 4294967295.0 && ctx_.timeLimitDepth_ == 0) {
-    ctx_.hermesRuntime_->watchTimeLimit(
+    ctx_.sandboxRuntime_->watchTimeLimit(
         static_cast<uint32_t>(ctx_.timeoutMs_));
     armedHere_ = true;
   }
@@ -943,8 +1035,8 @@ HermesSandboxContext::TimeLimitScope::TimeLimitScope(HermesSandboxContext &ctx)
 
 HermesSandboxContext::TimeLimitScope::~TimeLimitScope() {
   ctx_.timeLimitDepth_--;
-  if (armedHere_ && ctx_.hermesRuntime_) {
-    ctx_.hermesRuntime_->unwatchTimeLimit();
+  if (armedHere_ && ctx_.sandboxRuntime_) {
+    ctx_.sandboxRuntime_->unwatchTimeLimit();
   }
 }
 

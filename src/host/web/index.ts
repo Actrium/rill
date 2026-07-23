@@ -48,14 +48,49 @@ export {
 } from './keyboard';
 export { type EngineViewMount, mountEngineView } from './mount';
 export { toWebStyle, type WebStyleInput, withBaseStyle } from './style';
+// In-worker fat CDP debug-wasm driver (Milestone B web-debug side, design P2). The 3.6MB
+// debug wasm it drives is reached only via a dynamic import(), so it is code-split out of
+// the production bundle (guarded by cdp-debug-guard.test.ts).
+export {
+  type CdpDebugModule,
+  CdpDebugSession,
+  type CdpDebugSessionOptions,
+  type CdpMessageSink,
+} from './worker/cdp-debug-session';
+export {
+  type CdpDomainSet,
+  CdpTranslator,
+  type TranslatedInbound,
+} from './worker/cdp-translator';
 export type {
+  DbgBreakpointResult,
+  DbgCallFrame,
+  DbgEvalResult,
+  DbgLocation,
+  DbgPauseReason,
+  DbgPropertiesResult,
+  DbgPropertyDescriptor,
+  DbgScope,
+  DbgScript,
+  DbgSetBreakpointOptions,
+  DbgStepAction,
   MainToWorkerMessage,
   WorkerSandbox,
   WorkerToMainMessage,
 } from './worker/protocol';
+// Guest-eval entry gate + in-worker dispatch (Milestone B web-debug side)
+export { TurnGate } from './worker/turn-gate';
+export {
+  type GuestEngineLike,
+  isControlPlaneDbg,
+  WorkerDispatch,
+  type WorkerDispatchDeps,
+} from './worker/worker-dispatch';
 // Off-main-thread engine (issue #19, L1)
 export {
   createWorkerEngine,
+  type DbgPausedEvent,
+  type DbgResumedEvent,
   type WatchdogKillInfo,
   WorkerEngine,
   type WorkerEngineEventMap,

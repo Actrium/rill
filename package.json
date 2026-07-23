@@ -82,6 +82,7 @@
     "test:native": "bash native/core/run-tests.sh && bash native/quickjs/run-tests.sh && bash native/jsc/run-tests.sh",
     "test:bundle": "bash tests/guest-bundle/run-tests.sh",
     "test:e2e:wasm": "bun tests/wasm-sandbox/run.ts",
+    "test:e2e:cdp": "bun tests/cdp-debug/run.ts",
     "test:e2e:rn": "bash tests/rn-macos-bridgeless/run-tests.sh all",
     "test:e2e:rn:jsc-jsc": "bash tests/rn-macos-bridgeless/run-tests.sh jsc-jsc",
     "test:e2e:rn:jsc-quickjs": "bash tests/rn-macos-bridgeless/run-tests.sh jsc-quickjs",

@@ -82,7 +82,11 @@ Pod::Spec.new do |s|
     ]
   elsif sandbox_engine == 'hermes'
     s.source_files = common_sources + [
-      "native/hermes/src/HermesSandboxJSI.{h,cpp}"
+      "native/hermes/src/HermesSandboxJSI.{h,cpp}",
+      # CDP DevTools relay for guest debugging. Whole TU is gated on
+      # RILL_WIP_CDP_DEVTOOLS && !NDEBUG, so it compiles to nothing unless the
+      # dev flag is on (see the ENV opt-in below).
+      "native/hermes/src/devtools/*.{h,cpp}"
     ]
     s.public_header_files = [
       "native/core/src/SandboxEngineConfig.h",
@@ -138,14 +142,37 @@ Pod::Spec.new do |s|
     preprocessor_defs += ' RILL_SANDBOX_ENGINE=1'
   end
 
-  # WIP subsystems, opt-in for evaluation builds (off by default). See the
-  # common_sources note above and the headers for status/TODO.
-  preprocessor_defs += ' RILL_WIP_CDP_DEVTOOLS=1' if ENV['RILL_WIP_CDP_DEVTOOLS'] == '1'
+  # Dev-only: opt JSC sandbox contexts into Apple's Remote Inspector (Safari Web
+  # Inspector) when explicitly requested via ENV. The code path is ALSO gated on
+  # !NDEBUG, so a Release archive strips it even if this define leaks in — never
+  # ship an inspectable sandbox. Only meaningful for sandbox_engine == 'jsc'.
+  preprocessor_defs += ' RILL_WIP_JSC_INSPECTOR=1' if ENV['RILL_WIP_JSC_INSPECTOR'] == '1'
+
+  # Dev-only: opt guest sandboxes into the CDP DevTools relay (debugging over
+  # Chrome DevTools Protocol) when explicitly requested via ENV. The code paths
+  # are ALSO gated on !NDEBUG, so a Release archive strips them even if this
+  # define leaks in — never ship an inspectable sandbox. Each engine gets its
+  # own debug enabler alongside the relay flag:
+  #   - Hermes: HERMES_ENABLE_DEBUGGER so our TUs bind the real cdp::CDPAgent /
+  #     AsyncDebuggerAPI (a debug Hermes build ships them);
+  #   - QuickJS: RILL_QJS_DEBUG, which compiles the interpreter debug hook in.
+  if ENV['RILL_WIP_CDP_DEVTOOLS'] == '1'
+    preprocessor_defs += ' RILL_WIP_CDP_DEVTOOLS=1'
+    if sandbox_engine == 'hermes'
+      preprocessor_defs += ' HERMES_ENABLE_DEBUGGER=1'
+    elsif sandbox_engine == 'quickjs'
+      preprocessor_defs += ' RILL_QJS_DEBUG=1'
+    end
+  end
+  # Other WIP subsystem, opt-in for evaluation builds (off by default).
   preprocessor_defs += ' RILL_WIP_NATIVE_SECURITY=1' if ENV['RILL_WIP_NATIVE_SECURITY'] == '1'
 
   s.pod_target_xcconfig = {
     'GCC_PREPROCESSOR_DEFINITIONS' => preprocessor_defs,
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++17',
-    'HEADER_SEARCH_PATHS' => '$(inherited) $(PODS_ROOT)/Headers/Public/ReactCommon $(PODS_ROOT)/Headers/Private/ReactCommon $(PODS_ROOT)/Headers/Public/React-RuntimeApple'
+    # native/core/src on the path lets the Hermes CDP relay resolve its
+    # cross-module quoted includes ("devtools/CdpDebuggable.h",
+    # "devtools/EngineDebugTarget.h") when RILL_WIP_CDP_DEVTOOLS is on.
+    'HEADER_SEARCH_PATHS' => '$(inherited) $(PODS_ROOT)/Headers/Public/ReactCommon $(PODS_ROOT)/Headers/Private/ReactCommon $(PODS_ROOT)/Headers/Public/React-RuntimeApple $(PODS_TARGET_SRCROOT)/native/core/src $(PODS_TARGET_SRCROOT)/native/hermes/src'
   }
 end

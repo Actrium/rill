@@ -95,6 +95,10 @@
 #include <vector>
 #include <atomic>
 #include <optional>
+#include <unordered_set>
+
+#include "ConnectionId.h"
+#include "cdp_wire.h"  // cdp:: JSON wire helpers (usable without the server)
 
 namespace rill::devtools {
 
@@ -104,6 +108,7 @@ class RuntimeAdapter;
 class DOMAdapter;
 class DebuggerAdapter;
 class NetworkAdapter;
+class IEngineDebugTarget;
 
 // ============================================
 // Type Definitions
@@ -114,11 +119,26 @@ class NetworkAdapter;
  */
 using TenantId = uint32_t;
 
+// ConnectionId lives in ConnectionId.h (shared with the relay seam).
+
+// ============================================
+// HTTP Discovery Response
+// ============================================
+
 /**
- * WebSocket connection identifier
- * (forward-declared here for CDPTransport)
+ * A minimal HTTP/1.1 response for the CDP target-discovery endpoint (the
+ * `/json*` routes chrome://inspect fetches before it opens a WebSocket).
+ *
+ * Kept deliberately small and loopback-only: no CORS / wildcard headers are ever
+ * emitted, so a discovered target list (tenant titles and URLs) can never leak
+ * off-box even if the endpoint is probed cross-origin.
  */
-using ConnectionId = uint64_t;
+struct HttpResponse {
+  int status = 200;
+  std::string statusText = "OK";
+  std::string contentType = "application/json; charset=UTF-8";
+  std::string body;
+};
 
 // ============================================
 // WebSocket Transport Interface
@@ -144,15 +164,46 @@ public:
 
   /**
    * Connection callback: transport calls this on connect/disconnect.
+   * `path` is the WebSocket upgrade request target (e.g. "/tenant/3"); it binds
+   * the connection to a tenant. Empty when the transport cannot supply it.
    */
-  using OnConnectCallback = std::function<void(ConnectionId connId)>;
+  using OnConnectCallback = std::function<void(ConnectionId connId, const std::string& path)>;
   using OnDisconnectCallback = std::function<void(ConnectionId connId)>;
+
+  /**
+   * HTTP GET callback: a path-capable transport calls this for a plain HTTP GET
+   * (the chrome://inspect discovery probe) BEFORE any WebSocket upgrade, and
+   * writes the returned response straight back to the socket. Transports that
+   * cannot surface a plain GET (e.g. an auto-upgrading WebSocket listener) simply
+   * never invoke it; CDPServer works either way (unit code calls
+   * handleDiscoveryRequest directly).
+   *
+   * On Apple, the ws listener auto-upgrades and never yields a plain GET, so the
+   * transport surfaces this callback from a sibling loopback plain-TCP listener.
+   * That sibling holds the CONFIGURED port — chrome://inspect probes /json on
+   * exactly the host:port the user typed in — and the WebSocket listener moves
+   * to webSocketPort() (configured port + 1); see CDPTransportApple.
+   */
+  using OnHttpGetCallback =
+      std::function<HttpResponse(const std::string& method, const std::string& path)>;
 
   /**
    * Start listening on the given host:port.
    * @return true if started successfully
    */
   virtual bool start(const std::string& host, uint16_t port) = 0;
+
+  /**
+   * The port the WebSocket surface actually listens on, for a given configured
+   * port. Defaults to the configured port itself (one listener speaks both HTTP
+   * discovery and WebSocket). A transport that cannot serve both on one listener
+   * overrides this: discovery keeps the configured port (chrome://inspect probes
+   * /json on exactly the host:port the user configured) and the ws listener
+   * moves to the returned port. CDPServer uses this to build every
+   * webSocketDebuggerUrl, so discovered targets always point at the real ws
+   * listener. Must be stable from construction (CDPServer reads it once).
+   */
+  virtual uint16_t webSocketPort(uint16_t configuredPort) const { return configuredPort; }
 
   /**
    * Stop the transport and close all connections.
@@ -175,11 +226,13 @@ public:
   void setOnMessage(OnMessageCallback cb) { onMessage_ = std::move(cb); }
   void setOnConnect(OnConnectCallback cb) { onConnect_ = std::move(cb); }
   void setOnDisconnect(OnDisconnectCallback cb) { onDisconnect_ = std::move(cb); }
+  void setOnHttpGet(OnHttpGetCallback cb) { onHttpGet_ = std::move(cb); }
 
 protected:
   OnMessageCallback onMessage_;
   OnConnectCallback onConnect_;
   OnDisconnectCallback onDisconnect_;
+  OnHttpGetCallback onHttpGet_;
 };
 
 /**
@@ -298,7 +351,18 @@ struct CDPSession {
   SessionId id;                  // Session identifier
   TenantId tenantId = 0;         // Associated tenant (0 if not attached)
   ConnectionId connectionId = 0; // WebSocket connection
-  
+
+  // Debug-target binding for the sessionId multiplex: one WebSocket may hold
+  // several Target-attached sessions, and each must look like its OWN client
+  // to the tenant's debug target (own agent, own sink, own sessionId tag). So
+  // the server presents the session to the target under a server-generated
+  // VIRTUAL connection id rather than the shared socket id. 0 = not bound yet
+  // (bound lazily on the session's first owned-domain request).
+  ConnectionId targetConnId = 0;
+  // The target the virtual connection was handed to, so detach/teardown can
+  // call onClientDisconnect(targetConnId) even after tenantTargets_ changed.
+  std::shared_ptr<IEngineDebugTarget> target;
+
   // Enabled domains
   bool consoleEnabled = false;
   bool runtimeEnabled = false;
@@ -400,9 +464,16 @@ public:
   bool isRunning() const;
   
   /**
-   * Get server port
+   * Get the configured (discovery) port
    */
   uint16_t getPort() const { return config_.port; }
+
+  /**
+   * Get the port the WebSocket surface actually listens on. Equals getPort()
+   * unless the transport splits discovery and ws across sibling ports (see
+   * CDPTransport::webSocketPort).
+   */
+  uint16_t getWebSocketPort() const { return wsPort_; }
   
   // ============================================
   // Tenant Management
@@ -431,7 +502,31 @@ public:
    * Get all registered tenant IDs
    */
   std::vector<TenantId> getTenantIds() const;
-  
+
+  // ============================================
+  // Debug Targets (relay seam)
+  // ============================================
+
+  /**
+   * Register a per-tenant debug target. A request whose CDP domain the target
+   * owns (see IEngineDebugTarget::ownedDomains) is forwarded to it verbatim,
+   * OUTSIDE the server lock, and the target alone emits the response and any
+   * events — the built-in domain handlers are bypassed for that domain. Domains
+   * the target does not own keep going through the local handlers.
+   */
+  void registerDebugTarget(TenantId id, std::shared_ptr<IEngineDebugTarget> target);
+
+  /**
+   * Remove a tenant's debug target (its owned domains fall back to local handlers).
+   */
+  void unregisterDebugTarget(TenantId id);
+
+  /**
+   * Parse a tenant id from a WebSocket upgrade path of the form
+   * ".../tenant/{id}". Returns nullopt when the path carries no tenant segment.
+   */
+  static std::optional<TenantId> parseTenantFromPath(const std::string& path);
+
   // ============================================
   // Event Emission
   // ============================================
@@ -505,14 +600,37 @@ public:
   /**
    * Handle HTTP request (for /json target discovery)
    * @return JSON response body, empty string for 404
+   *
+   * Body-only shim over handleDiscoveryRequest, kept for callers/tests that only
+   * want the JSON body and treat 404 as empty.
    */
   std::string handleHttpRequest(const std::string& path);
+
+  /**
+   * Handle a CDP discovery HTTP request (what chrome://inspect fetches to
+   * enumerate targets). GET-only; anything else is 405. Routes:
+   *   /json, /json/list  -> 200 target list (buildTargetListJSON)
+   *   /json/version      -> 200 Browser + Protocol-Version + a single root
+   *                         webSocketDebuggerUrl (no tenant path)
+   *   /json/protocol     -> 200 {"domains":[]}
+   *   anything else      -> 404
+   * Loopback-only by construction: no CORS/wildcard headers are emitted (see
+   * HttpResponse). Safe to call with mutex_ released — it locks internally only
+   * where it needs the tenant list.
+   */
+  HttpResponse handleDiscoveryRequest(const std::string& method, const std::string& path) const;
 
 private:
   // ============================================
   // Internal Types
   // ============================================
-  
+
+  // (Possibly virtual) connection ids paired with the target they were handed
+  // to, collected under mutex_ so the caller can invoke onClientDisconnect
+  // OUTSIDE the lock (the target may re-enter the server).
+  using TargetDetachList =
+      std::vector<std::pair<ConnectionId, std::shared_ptr<IEngineDebugTarget>>>;
+
   struct Connection {
     ConnectionId id = 0;
     std::string remoteAddress;
@@ -542,9 +660,12 @@ private:
   std::optional<CDPRequest> parseRequest(const std::string& json);
   
   /**
-   * Route request to appropriate domain adapter
+   * Route request to appropriate domain adapter. Runs under mutex_; any target
+   * connections it drops (Target.detachFromTarget) are appended to
+   * `deferredTargetDetach` for the caller to release OUTSIDE the lock.
    */
-  CDPResponse routeRequest(const CDPRequest& request, const CDPSession& session);
+  CDPResponse routeRequest(const CDPRequest& request, const CDPSession& session,
+                           TargetDetachList& deferredTargetDetach);
   
   /**
    * Send response to connection
@@ -584,6 +705,38 @@ private:
    * Get or create session from request (caller must hold mutex_)
    */
   CDPSession* getOrCreateSessionLocked(ConnectionId connId, const CDPRequest& request);
+
+  /**
+   * Create a session bound to `tenantId` for a Target.attachToTarget request and
+   * return its id. Unlike createSession this does NOT claim connectionToSession_,
+   * so one connection may hold several attached sessions at once — the sessionId
+   * multiplex, where each subsequent request names its session explicitly.
+   * Caller must hold mutex_.
+   */
+  SessionId createAttachedSessionLocked(ConnectionId connId, TenantId tenantId);
+
+  /**
+   * Build a CDP Target.TargetInfo object ("{...}") for tenant `id`.
+   * Caller must hold mutex_.
+   */
+  std::string buildTargetInfoLocked(TenantId id) const;
+
+  /**
+   * Remove and return the (connection, target) bindings matching `target`
+   * (nullptr = all), so the caller can invoke onClientDisconnect OUTSIDE the
+   * lock. Caller must hold mutex_.
+   */
+  TargetDetachList
+  detachConnectionTargetsLocked(const std::shared_ptr<IEngineDebugTarget>& target);
+
+  /**
+   * The per-session counterpart: clear the virtual target connections of every
+   * session bound to `target` (nullptr = any) and return the (virtualConnId,
+   * target) pairs for onClientDisconnect OUTSIDE the lock. The sessions
+   * themselves are left in place. Caller must hold mutex_.
+   */
+  TargetDetachList
+  detachSessionTargetsLocked(const std::shared_ptr<IEngineDebugTarget>& target);
   
   // ============================================
   // Domain Handlers
@@ -595,7 +748,8 @@ private:
   CDPResponse handleDOMMethod(const CDPRequest& req, CDPSession& session);
   CDPResponse handleNetworkMethod(const CDPRequest& req, CDPSession& session);
   CDPResponse handleProfilerMethod(const CDPRequest& req, CDPSession& session);
-  CDPResponse handleTargetMethod(const CDPRequest& req, CDPSession& session);
+  CDPResponse handleTargetMethod(const CDPRequest& req, CDPSession& session,
+                                 TargetDetachList& deferredTargetDetach);
   
   // ============================================
   // Utility
@@ -605,6 +759,14 @@ private:
    * Generate unique connection ID
    */
   ConnectionId generateConnectionId();
+
+  /**
+   * Generate a VIRTUAL connection id for a Target-attached session (see
+   * CDPSession::targetConnId). Lives in its own id namespace — top bit set —
+   * so it can never collide with a transport-assigned socket id, which targets
+   * also key their per-connection state by.
+   */
+  ConnectionId generateVirtualConnectionId();
   
   /**
    * Generate unique session ID
@@ -631,7 +793,12 @@ private:
   // ============================================
   
   CDPServerConfig config_;
-  
+
+  // The port the WebSocket surface actually listens on (config_.port unless the
+  // transport splits ws and discovery across sibling ports). Every
+  // webSocketDebuggerUrl is built from this, never from config_.port.
+  uint16_t wsPort_ = 0;
+
   mutable std::mutex mutex_;
   
   // Server state
@@ -645,9 +812,23 @@ private:
   // Sessions
   std::unordered_map<SessionId, CDPSession> sessions_;
   std::unordered_map<ConnectionId, SessionId> connectionToSession_;
-  
+  // Tenant bound at connect time from the "/tenant/{id}" upgrade path. Takes
+  // precedence over the per-request sessionId when creating a session.
+  std::unordered_map<ConnectionId, TenantId> connectionTenant_;
+  // Connections that have been handed to a debug target (first owned-domain
+  // request installs the target's persistent sink). Drives onClientDisconnect on
+  // teardown so the target can drop per-connection state.
+  std::unordered_map<ConnectionId, std::shared_ptr<IEngineDebugTarget>> connectionTarget_;
+  // Connections that issued Target.setDiscoverTargets{discover:true}; they receive
+  // Target.targetCreated / Target.targetDestroyed as tenants come and go.
+  std::unordered_set<ConnectionId> discoveringConnections_;
+
   // Registered tenants
   std::unordered_map<TenantId, TenantInfo> tenants_;
+
+  // Per-tenant debug targets (relay seam). A request for a domain the target
+  // owns is forwarded verbatim outside the lock; see handleMessage.
+  std::unordered_map<TenantId, std::shared_ptr<IEngineDebugTarget>> tenantTargets_;
   
   // Statistics
   std::atomic<uint64_t> messagesReceived_{0};
@@ -660,37 +841,37 @@ private:
 
 namespace cdp {
 
-/**
- * Build CDP event JSON
- */
-std::string buildEventJSON(const std::string& method, 
-                           const std::string& params,
-                           const std::optional<SessionId>& sessionId = std::nullopt);
+// buildEventJSON / buildResponseJSON / buildErrorJSON / escapeJSON /
+// parseJSONString / parseJSONInt are declared in cdp_wire.h (included above) so
+// they can be linked into the debug wasm without CDPServer. The HTTP / discovery
+// helpers below stay here because they depend on CDPServer's own types.
 
 /**
- * Build CDP response JSON
+ * Frame an HttpResponse into an HTTP/1.1 wire string: status line, Content-Type,
+ * Content-Length, blank line, then body. No CORS headers by design (loopback
+ * only).
  */
-std::string buildResponseJSON(int id, const std::string& result);
+std::string buildHttpResponse(const HttpResponse& resp);
 
 /**
- * Build CDP error response JSON
+ * Extract the method and path from the first line of an HTTP/1.1 request.
+ *
+ * Scans `requestBytes` up to the first CRLF (or end of string when the CRLF is
+ * absent), splits the request line on spaces into [method, target, version],
+ * and truncates `target` at the first '?' (query) or '#' (fragment) to yield
+ * `path`. The HTTP-version token is ignored. Returns false when the line has
+ * fewer than two whitespace-separated tokens or either method or target is
+ * empty; on false, `method` and `path` are left unspecified.
  */
-std::string buildErrorJSON(int id, int code, const std::string& message);
+bool parseRequestLine(const std::string& requestBytes, std::string& method,
+                      std::string& path);
 
 /**
- * Escape string for JSON
+ * Insert a top-level "sessionId" member into a raw CDP message object if it does
+ * not already carry one. Used to tag a Target-attached (flatten-mode) session's
+ * outbound messages so the client can demultiplex them.
  */
-std::string escapeJSON(const std::string& str);
-
-/**
- * Parse JSON string value
- */
-std::optional<std::string> parseJSONString(const std::string& json, const std::string& key);
-
-/**
- * Parse JSON int value
- */
-std::optional<int> parseJSONInt(const std::string& json, const std::string& key);
+std::string injectSessionId(const std::string& rawCdp, const SessionId& sessionId);
 
 } // namespace cdp
 

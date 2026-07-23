@@ -362,6 +362,36 @@ JSCSandboxContext::JSCSandboxContext(jsi::Runtime &hostRuntime,
         )";
     [ctx evaluateScript:consoleScript];
 
+    // WIP, dev-only: opt this sandbox JSContext into Apple's out-of-process
+    // Remote Inspector so a developer can attach Safari's Web Inspector to a
+    // running JS guest (JSGlobalContextSetInspectable is public SDK API,
+    // macOS 13.3 / iOS 16.4). Quadruple-gated so it can NEVER reach an App
+    // Store archive: (1) RILL_WIP_JSC_INSPECTOR compile flag (off by default),
+    // (2) !NDEBUG belt-and-suspenders — a release archive strips this branch
+    // even if the flag leaks in, (3) _JSC_HAS_INSPECTABLE SDK guard,
+    // (4) __builtin_available runtime OS guard. An inspectable, breakpoint-
+    // pausable context is a data-exposure / tenant-isolation hole, so the
+    // NDEBUG gate is load-bearing. Not CDP/Chrome — Safari Web Inspector only.
+    // See docs/architecture/cdp-debugging.zh.md.
+#if defined(RILL_WIP_JSC_INSPECTOR) && !defined(NDEBUG)
+#if !defined(_JSC_HAS_INSPECTABLE)
+#if (defined(__IPHONE_OS_VERSION_MAX_ALLOWED) &&                                \
+     __IPHONE_OS_VERSION_MAX_ALLOWED >= 160400) ||                             \
+    (defined(__MAC_OS_X_VERSION_MAX_ALLOWED) &&                                \
+     __MAC_OS_X_VERSION_MAX_ALLOWED >= 130300)
+#define _JSC_HAS_INSPECTABLE
+#endif
+#endif
+#ifdef _JSC_HAS_INSPECTABLE
+    if (__builtin_available(macOS 13.3, iOS 16.4, *)) {
+      ctx.name = @"rill guest (JSC, dev inspector)";
+      JSGlobalContextSetInspectable(ctx.JSGlobalContextRef, true);
+      NSLog(@"[JSCSandbox] Remote Inspector ENABLED (dev-only) — attach via "
+            @"Safari > Develop");
+    }
+#endif
+#endif
+
     jsContext_ = (__bridge_retained void *)ctx;
   }
 }

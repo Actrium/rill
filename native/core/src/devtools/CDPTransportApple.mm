@@ -8,6 +8,28 @@
  *
  * Uses Network.framework C API (nw_listener_t / nw_connection_t / ws_options.h)
  * to implement a WebSocket server for Chrome DevTools Protocol.
+ *
+ * PORT LAYOUT (why two listeners, and which port holds which surface):
+ * Network.framework's nw_ws listener performs the WebSocket upgrade for us and
+ * only ever yields WebSocket frames — a client that speaks plain HTTP GET on
+ * the same port never surfaces its request line or path here, so one listener
+ * cannot serve both /json discovery and ws. Same-port byte-sniffing is also
+ * infeasible with nw_ws: once bytes are peeked off a raw nw_connection they
+ * cannot be re-injected into the ws protocol stack. Hence two sibling
+ * listeners, both 127.0.0.1-only:
+ *
+ *   configured port      -> plain-TCP HTTP listener serving the /json* routes
+ *                           (CDPServer::handleDiscoveryRequest via onHttpGet_).
+ *                           chrome://inspect requests /json on exactly the
+ *                           host:port the user configured, so discovery MUST
+ *                           hold this port — with ws here instead, the probe
+ *                           would hit the auto-upgrading ws listener and the
+ *                           target list would never appear.
+ *   configured port + 1  -> the nw_ws WebSocket listener (webSocketPort()).
+ *                           Clients never guess it: every webSocketDebuggerUrl
+ *                           CDPServer hands out (in /json, /json/version, and
+ *                           Target.*) is built from webSocketPort(), so the
+ *                           discovery flow lands on the right socket.
  */
 
 #import "CDPTransportApple.h"
@@ -83,6 +105,20 @@ static nw_content_context_t createWSTextContext() {
   return ctx;
 }
 
+// Create a listener from already-configured parameters, pinned to a loopback
+// local endpoint. nw_listener_create_with_port binds every interface; requiring
+// a 127.0.0.1 local endpoint keeps both the ws surface and the /json discovery
+// list (which carries tenant titles and URLs) off the LAN.
+static nw_listener_t createLoopbackListener(nw_parameters_t params,
+                                            const std::string& host,
+                                            uint16_t port) {
+  const char* hostStr = host.empty() ? "127.0.0.1" : host.c_str();
+  std::string portStr = std::to_string(port);
+  nw_endpoint_t endpoint = nw_endpoint_create_host(hostStr, portStr.c_str());
+  nw_parameters_set_local_endpoint(params, endpoint);
+  return nw_listener_create(params);
+}
+
 } // namespace
 
 CDPTransportApple::CDPTransportApple() {
@@ -101,7 +137,14 @@ bool CDPTransportApple::start(const std::string& host, uint16_t port) {
     return false; // Already running
   }
 
-  (void)host; // Currently ignored; listener binds to the given port.
+  // The ws surface lives on port + 1 (see the PORT LAYOUT header note); the
+  // configured port itself serves discovery. Reject the one value where the
+  // sibling port cannot exist.
+  if (port == 0xFFFF) {
+    NSLog(@"[CDPTransport] Cannot start on port 65535 (WebSocket needs port + 1)");
+    return false;
+  }
+  const uint16_t wsPort = webSocketPort(port);
 
   nw_parameters_t params = nw_parameters_create_secure_tcp(
       NW_PARAMETERS_DISABLE_PROTOCOL, NW_PARAMETERS_DEFAULT_CONFIGURATION);
@@ -115,9 +158,8 @@ bool CDPTransportApple::start(const std::string& host, uint16_t port) {
   nw_ws_options_set_maximum_message_size(wsOptions, 16 * 1024 * 1024);
   nw_protocol_stack_prepend_application_protocol(stack, wsOptions);
 
-  // Create listener on the requested port.
-  std::string portStr = std::to_string(port);
-  nw_listener_t listener = nw_listener_create_with_port(portStr.c_str(), params);
+  // Create the ws listener bound to loopback only (see createLoopbackListener).
+  nw_listener_t listener = createLoopbackListener(params, host, wsPort);
   // ARC owns params; let it release automatically.
 
   if (listener == nullptr) {
@@ -135,7 +177,7 @@ bool CDPTransportApple::start(const std::string& host, uint16_t port) {
   nw_listener_set_state_changed_handler(listener, ^(nw_listener_state_t state, nw_error_t error) {
     switch (state) {
       case nw_listener_state_ready:
-        NSLog(@"[CDPTransport] Listening on port %u", port);
+        NSLog(@"[CDPTransport] WebSocket listening on port %u", wsPort);
         break;
       case nw_listener_state_failed:
         NSLog(@"[CDPTransport] Listener failed: %@", error ? (id)error : @"(unknown)");
@@ -155,6 +197,17 @@ bool CDPTransportApple::start(const std::string& host, uint16_t port) {
   listener_ = (__bridge_retained void *)listener;
 
   running_.store(true);
+
+  // Bring up the sibling plain-TCP discovery listener on the CONFIGURED port —
+  // this is what chrome://inspect probes with GET /json. Its failure is
+  // non-fatal for a direct-ws client (the ws/Target-domain path still routes
+  // tenants), but it does break discovery, so say exactly that.
+  if (!startHttpListener(host, port)) {
+    NSLog(@"[CDPTransport] /json discovery listener did not start on port %u — "
+          @"chrome://inspect will not find targets; direct ws attach on port %u still works",
+          static_cast<unsigned>(port), static_cast<unsigned>(wsPort));
+  }
+
   return true;
 }
 
@@ -178,6 +231,18 @@ void CDPTransportApple::stop() {
     nw_listener_cancel(listener);
     listener_ = nullptr;
   }
+
+  // Tear down the HTTP discovery sibling listener and drop any in-flight request
+  // buffers. Discovery connections are ephemeral (one request, one response),
+  // so cancelling the listener stops new ones and outstanding receive callbacks
+  // unwind against the now-empty buffer map.
+  if (httpListener_) {
+    nw_listener_t httpListener = (__bridge_transfer nw_listener_t)httpListener_;
+    nw_listener_cancel(httpListener);
+    httpListener_ = nullptr;
+  }
+  httpBuffers_.clear();
+  httpPort_ = 0;
 }
 
 void CDPTransportApple::send(ConnectionId connId, const std::string& message) {
@@ -249,7 +314,13 @@ void CDPTransportApple::handleNewConnection(void* nwConnection) {
       case nw_connection_state_ready:
         NSLog(@"[CDPTransport] Connection %llu ready", connId);
         if (this->onConnect_) {
-          this->onConnect_(connId);
+          // Network.framework's server-side WebSocket (nw_ws_request) exposes
+          // subprotocols and additional headers but not the HTTP request-line
+          // target, so the "/tenant/{id}" path shortcut is unavailable here.
+          // Tenant routing on this transport therefore relies on the CDP-standard
+          // sessionId (target-attach) flow handled by CDPServer. The path arg is
+          // wired for transports/clients that can supply it (discovery endpoint).
+          this->onConnect_(connId, std::string());
         }
         this->receiveLoop(connId);
         break;
@@ -326,6 +397,193 @@ void CDPTransportApple::removeConnection(ConnectionId connId) {
   if (onDisconnect_) {
     onDisconnect_(connId);
   }
+}
+
+// ============================================
+// HTTP discovery sibling listener
+// ============================================
+
+bool CDPTransportApple::startHttpListener(const std::string& host, uint16_t port) {
+  // Plain TCP: no WebSocket options in the protocol stack. The discovery client
+  // speaks raw HTTP/1.1 GET and we answer with a single framed HttpResponse.
+  nw_parameters_t params = nw_parameters_create_secure_tcp(
+      NW_PARAMETERS_DISABLE_PROTOCOL, NW_PARAMETERS_DEFAULT_CONFIGURATION);
+  if (params == nullptr) {
+    return false;
+  }
+
+  nw_listener_t listener = createLoopbackListener(params, host, port);
+  if (listener == nullptr) {
+    return false;
+  }
+
+  nw_listener_set_queue(listener, queue_);
+
+  nw_listener_set_new_connection_handler(listener, ^(nw_connection_t connection) {
+    // Retain the connection past this block; released in closeHttpConnection.
+    void *connPtr = (__bridge_retained void *)connection;
+    this->handleNewHttpConnection(connPtr);
+  });
+
+  nw_listener_set_state_changed_handler(listener, ^(nw_listener_state_t state, nw_error_t error) {
+    switch (state) {
+      case nw_listener_state_ready:
+        NSLog(@"[CDPTransport] HTTP discovery listening on port %u", port);
+        break;
+      case nw_listener_state_failed:
+        // Non-fatal: the ws surface keeps working without discovery.
+        NSLog(@"[CDPTransport] HTTP discovery listener failed: %@",
+              error ? (id)error : @"(unknown)");
+        break;
+      case nw_listener_state_cancelled:
+        NSLog(@"[CDPTransport] HTTP discovery listener cancelled");
+        break;
+      default:
+        break;
+    }
+  });
+
+  nw_listener_start(listener);
+
+  httpListener_ = (__bridge_retained void *)listener;
+  httpPort_ = port;
+  return true;
+}
+
+void CDPTransportApple::handleNewHttpConnection(void* nwConnection) {
+  nw_connection_t conn = (__bridge nw_connection_t)nwConnection;
+
+  ConnectionId connId = nextId_.fetch_add(1);
+
+  // Allocate the per-connection read buffer.
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    httpBuffers_[connId] = std::make_shared<std::string>();
+  }
+
+  nw_connection_set_queue(conn, queue_);
+
+  nw_connection_set_state_changed_handler(conn, ^(nw_connection_state_t state, nw_error_t error) {
+    switch (state) {
+      case nw_connection_state_ready:
+        this->httpReceiveLoop(connId, nwConnection);
+        break;
+      case nw_connection_state_failed:
+        NSLog(@"[CDPTransport] HTTP connection %llu failed: %@", connId,
+              error ? (id)error : @"(unknown)");
+        this->closeHttpConnection(connId, nwConnection);
+        break;
+      case nw_connection_state_cancelled:
+        this->closeHttpConnection(connId, nwConnection);
+        break;
+      default:
+        break;
+    }
+  });
+
+  nw_connection_start(conn);
+}
+
+void CDPTransportApple::httpReceiveLoop(ConnectionId connId, void* nwConnection) {
+  std::shared_ptr<std::string> buffer;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = httpBuffers_.find(connId);
+    if (it == httpBuffers_.end()) return;  // already closed
+    buffer = it->second;
+  }
+
+  nw_connection_t conn = (__bridge nw_connection_t)nwConnection;
+
+  nw_connection_receive(conn, 1, 8192, ^(dispatch_data_t content,
+                                         nw_content_context_t context,
+                                         bool is_complete,
+                                         nw_error_t error) {
+    (void)context;
+
+    if (content != nullptr) {
+      buffer->append(dispatchDataToString(content));
+
+      // Header terminator seen: the request line + headers are complete.
+      if (buffer->find("\r\n\r\n") != std::string::npos) {
+        this->finishHttpRequest(connId, nwConnection, *buffer);
+        return;
+      }
+
+      // Header flood guard: refuse an oversized request and close.
+      if (buffer->size() > 8192) {
+        HttpResponse tooLarge;
+        tooLarge.status = 431;
+        tooLarge.statusText = "Request Header Fields Too Large";
+        tooLarge.body = R"({"error":"request header fields too large"})";
+        std::string wire = cdp::buildHttpResponse(tooLarge);
+        dispatch_data_t out = copyStringToDispatchData(this->queue_, wire);
+        nw_connection_send(conn, out, NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, true,
+                           ^(nw_error_t) {
+                             this->closeHttpConnection(connId, nwConnection);
+                           });
+        return;
+      }
+    }
+
+    if (error || is_complete) {
+      // EOF or error before a full request: nothing to answer.
+      this->closeHttpConnection(connId, nwConnection);
+      return;
+    }
+
+    if (this->running_.load()) {
+      this->httpReceiveLoop(connId, nwConnection);
+    } else {
+      this->closeHttpConnection(connId, nwConnection);
+    }
+  });
+}
+
+void CDPTransportApple::finishHttpRequest(ConnectionId connId, void* nwConnection,
+                                          const std::string& request) {
+  nw_connection_t conn = (__bridge nw_connection_t)nwConnection;
+
+  std::string method, path;
+  HttpResponse resp;
+  if (cdp::parseRequestLine(request, method, path)) {
+    resp = onHttpGet_ ? onHttpGet_(method, path)
+                      : HttpResponse{404, "Not Found",
+                                     "application/json; charset=UTF-8",
+                                     R"({"error":"not found"})"};
+  } else {
+    resp.status = 400;
+    resp.statusText = "Bad Request";
+    resp.body = R"({"error":"bad request"})";
+  }
+
+  std::string wire = cdp::buildHttpResponse(resp);
+  dispatch_data_t out = copyStringToDispatchData(queue_, wire);
+
+  // Cancel ONLY inside the send completion: cancelling before the write drains
+  // would drop the response on the floor.
+  nw_connection_send(conn, out, NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, true,
+                     ^(nw_error_t error) {
+                       if (error) {
+                         NSLog(@"[CDPTransport] HTTP send error on %llu: %@", connId,
+                               (id)error);
+                       }
+                       this->closeHttpConnection(connId, nwConnection);
+                     });
+}
+
+void CDPTransportApple::closeHttpConnection(ConnectionId connId, void* nwConnection) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = httpBuffers_.find(connId);
+    if (it == httpBuffers_.end()) {
+      return;  // already closed: do not transfer/cancel the connection twice
+    }
+    httpBuffers_.erase(it);
+  }
+
+  nw_connection_t conn = (__bridge_transfer nw_connection_t)nwConnection;
+  nw_connection_cancel(conn);
 }
 
 } // namespace rill::devtools

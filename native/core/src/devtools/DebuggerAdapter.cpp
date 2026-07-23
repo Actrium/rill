@@ -12,9 +12,16 @@
 
 namespace rill::devtools {
 
-DebuggerAdapter::DebuggerAdapter(CDPServer& server)
-    : server_(server)
-    , engineDebugger_(std::make_shared<StubEngineDebugger>()) {}
+DebuggerAdapter::DebuggerAdapter()
+    : engineDebugger_(std::make_shared<StubEngineDebugger>()) {}
+
+void DebuggerAdapter::setEventSink(EventSink sink) {
+  eventSink_ = std::move(sink);
+}
+
+void DebuggerAdapter::emitEvent(const CDPEvent& event) {
+  if (eventSink_) eventSink_(cdp::buildEventJSON(event.method, event.params));
+}
 
 void DebuggerAdapter::setEngineDebugger(std::shared_ptr<IEngineDebugger> debugger) {
   engineDebugger_ = debugger ? debugger : std::make_shared<StubEngineDebugger>();
@@ -38,6 +45,29 @@ CDPResponse DebuggerAdapter::handleEnable(TenantId tenantId, int requestId) {
         onScriptParsed(tenantId, script);
       }
     }
+  }
+
+  // Replay Debugger.paused to a client that enables while the guest is already
+  // parked at a pause. Debugger.paused is a one-shot event fired when the guest
+  // first stopped, so a client that attaches afterwards (e.g. a DevTools GUI
+  // opened after a script parked the guest) would otherwise see an empty Call
+  // Stack and no paused banner even though the guest is stopped. The pause
+  // scope is still live, so the frames (and their objectIds) resolve. Reason
+  // and hit breakpoints are not retained across the enable, so replay as
+  // "other" with no hits — enough for the GUI to render the paused state.
+  //
+  // Known bounded limitation: onPaused() fans out through the target's
+  // broadcast sink, so if two debug clients share one tenant target, a client
+  // that was already attached (and already saw the original paused) receives a
+  // duplicate paused with no intervening resumed. This only surfaces with 2+
+  // concurrent clients on a single tenant — a topology the adapter does not
+  // otherwise fully support anyway (enabled state is per-tenant, so a second
+  // client gets no scriptParsed replay either). Standard frontends re-render
+  // the same paused state idempotently. If multi-client-per-tenant ever becomes
+  // supported, move this replay to the target layer and send it only to the
+  // enabling connection's sink instead of broadcasting.
+  if (state.enabled && engineDebugger_->isPaused(tenantId)) {
+    onPaused(tenantId, PauseReason::Other, engineDebugger_->getCallFrames(tenantId), {});
   }
   
   CDPResponse response;
@@ -104,9 +134,10 @@ CDPResponse DebuggerAdapter::handleSetBreakpointByUrl(TenantId tenantId, int req
       condition.value_or(""));
   
   if (result) {
+    if (!result->empty()) breakpointId = *result;  // engine-authoritative id
     std::lock_guard<std::mutex> lock(stateMutex_);
     auto& state = tenantStates_[tenantId];
-    
+
     BreakpointInfo bp;
     bp.breakpointId = breakpointId;
     bp.scriptId = scriptId;
@@ -138,8 +169,8 @@ CDPResponse DebuggerAdapter::handleSetBreakpoint(TenantId tenantId, int requestI
   CDPResponse response;
   response.id = requestId;
   
-  auto scriptId = cdp::parseJSONString(params, "location.scriptId");
-  auto lineNumber = cdp::parseJSONInt(params, "location.lineNumber");
+  auto scriptId = cdp::parseJSONString(params, "scriptId");
+  auto lineNumber = cdp::parseJSONInt(params, "lineNumber");
   
   if (!scriptId || !lineNumber) {
     // Try alternate parsing
@@ -150,7 +181,7 @@ CDPResponse DebuggerAdapter::handleSetBreakpoint(TenantId tenantId, int requestI
   }
   
   int columnNumber = 0;
-  auto colOpt = cdp::parseJSONInt(params, "location.columnNumber");
+  auto colOpt = cdp::parseJSONInt(params, "columnNumber");
   if (colOpt) columnNumber = *colOpt;
   
   auto condition = cdp::parseJSONString(params, "condition");
@@ -161,9 +192,10 @@ CDPResponse DebuggerAdapter::handleSetBreakpoint(TenantId tenantId, int requestI
       condition.value_or(""));
   
   if (result) {
+    if (!result->empty()) breakpointId = *result;  // engine-authoritative id
     std::lock_guard<std::mutex> lock(stateMutex_);
     auto& state = tenantStates_[tenantId];
-    
+
     BreakpointInfo bp;
     bp.breakpointId = breakpointId;
     bp.scriptId = *scriptId;
@@ -227,8 +259,11 @@ CDPResponse DebuggerAdapter::handlePause(TenantId tenantId, int requestId) {
 }
 
 CDPResponse DebuggerAdapter::handleResume(TenantId tenantId, int requestId) {
+  // Emit Debugger.resumed before unblocking the engine so a front-end can clear
+  // its paused UI state; resume() carries no subsequent paused event.
+  onResumed(tenantId);
   engineDebugger_->resume(tenantId);
-  
+
   CDPResponse response;
   response.id = requestId;
   response.result = "{}";
@@ -236,8 +271,11 @@ CDPResponse DebuggerAdapter::handleResume(TenantId tenantId, int requestId) {
 }
 
 CDPResponse DebuggerAdapter::handleStepOver(TenantId tenantId, int requestId) {
+  // A step resumes, then re-pauses at the next stop. Emit resumed first so it
+  // always precedes the Debugger.paused the engine delivers on step completion.
+  onResumed(tenantId);
   engineDebugger_->step(tenantId, StepAction::StepOver);
-  
+
   CDPResponse response;
   response.id = requestId;
   response.result = "{}";
@@ -245,8 +283,9 @@ CDPResponse DebuggerAdapter::handleStepOver(TenantId tenantId, int requestId) {
 }
 
 CDPResponse DebuggerAdapter::handleStepInto(TenantId tenantId, int requestId) {
+  onResumed(tenantId);
   engineDebugger_->step(tenantId, StepAction::StepInto);
-  
+
   CDPResponse response;
   response.id = requestId;
   response.result = "{}";
@@ -254,8 +293,9 @@ CDPResponse DebuggerAdapter::handleStepInto(TenantId tenantId, int requestId) {
 }
 
 CDPResponse DebuggerAdapter::handleStepOut(TenantId tenantId, int requestId) {
+  onResumed(tenantId);
   engineDebugger_->step(tenantId, StepAction::StepOut);
-  
+
   CDPResponse response;
   response.id = requestId;
   response.result = "{}";
@@ -301,6 +341,24 @@ CDPResponse DebuggerAdapter::handleGetScriptSource(TenantId tenantId, int reques
   ss << "{\"scriptSource\":\"" << cdp::escapeJSON(source) << "\"}";
   response.result = ss.str();
   
+  return response;
+}
+
+CDPResponse DebuggerAdapter::handleGetProperties(TenantId tenantId, int requestId,
+                                                  const std::string& params) {
+  CDPResponse response;
+  response.id = requestId;
+
+  auto objectId = cdp::parseJSONString(params, "objectId");
+  if (!objectId) {
+    response.error = cdp::buildErrorJSON(requestId, CDPErrorCode::INVALID_PARAMS,
+                                         "Missing objectId parameter");
+    return response;
+  }
+
+  // The engine returns the full CDP payload {"result":[...]} already (unlike
+  // evaluateOnCallFrame, whose engine result is a bare RemoteObject).
+  response.result = engineDebugger_->getProperties(tenantId, *objectId);
   return response;
 }
 
@@ -362,21 +420,21 @@ void DebuggerAdapter::onPaused(TenantId tenantId, PauseReason reason,
   params << "}";
   event.params = params.str();
   
-  server_.sendEvent(tenantId, event);
+  emitEvent(event);
 }
 
 void DebuggerAdapter::onResumed(TenantId tenantId) {
   CDPEvent event;
   event.method = "Debugger.resumed";
   event.params = "{}";
-  server_.sendEvent(tenantId, event);
+  emitEvent(event);
 }
 
 void DebuggerAdapter::onScriptParsed(TenantId tenantId, const ScriptInfo& script) {
   CDPEvent event;
   event.method = "Debugger.scriptParsed";
   event.params = scriptInfoToJSON(script);
-  server_.sendEvent(tenantId, event);
+  emitEvent(event);
 }
 
 void DebuggerAdapter::onScriptFailedToParse(TenantId tenantId, const ScriptInfo& script,
@@ -392,7 +450,7 @@ void DebuggerAdapter::onScriptFailedToParse(TenantId tenantId, const ScriptInfo&
   json += ",\"errorMessage\":\"" + cdp::escapeJSON(errorMessage) + "\"}";
   
   event.params = json;
-  server_.sendEvent(tenantId, event);
+  emitEvent(event);
 }
 
 // ============================================

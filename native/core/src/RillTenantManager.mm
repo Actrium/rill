@@ -2,6 +2,10 @@
 #include <stdexcept>
 #import <Foundation/Foundation.h>
 
+#if RILL_WIP_CDP_DEVTOOLS
+#include "devtools/CDPTransportApple.h"
+#endif
+
 namespace rill::tenant_manager {
 
 // Singleton instance
@@ -11,7 +15,27 @@ RillTenantManager::RillTenantManager(
     facebook::jsi::Runtime& hostRuntime,
     std::shared_ptr<facebook::react::CallInvoker> callInvoker)
     : hostRuntime_(&hostRuntime),
-      callInvoker_(std::move(callInvoker)) {}
+      callInvoker_(std::move(callInvoker)) {
+#if RILL_WIP_CDP_DEVTOOLS
+  // Stand up the loopback CDP server once, up front. Per-tenant targets attach
+  // as tenants are created.
+  devTools_ = std::make_unique<rill::devtools::DevToolsService>(
+      std::make_shared<rill::devtools::CDPTransportApple>());
+  if (!devTools_->start()) {
+    NSLog(@"[RillTenantManager] CDP DevTools server failed to start (dev-only)");
+  } else {
+    // Two sibling ports on this transport (see CDPTransportApple): the
+    // configured port answers chrome://inspect's /json probe, the ws surface
+    // sits one up. Log both so a user knows what to type where.
+    auto& srv = devTools_->server();
+    NSLog(@"[RillTenantManager] CDP DevTools up (dev-only): add 127.0.0.1:%u in "
+          @"chrome://inspect (serves %s); WebSocket on ws://127.0.0.1:%u",
+          static_cast<unsigned>(srv.getPort()),
+          srv.getTargetListUrl().c_str(),
+          static_cast<unsigned>(srv.getWebSocketPort()));
+  }
+#endif
+}
 
 void RillTenantManager::install(
     facebook::jsi::Runtime& hostRuntime,
@@ -749,6 +773,26 @@ TenantId RillTenantManager::createTenant(facebook::jsi::Runtime& rt,
     throw;
   }
 
+#if RILL_WIP_CDP_DEVTOOLS
+  if (devTools_) {
+    devTools_->onTenantCreated(
+        id, tc.appId.empty() ? ("rill guest " + std::to_string(id)) : tc.appId);
+#if !defined(NDEBUG)
+    // Register an engine-specific CDP target when the sandbox is debug-capable
+    // (today: Hermes). One CDP execution context per tenant (dev-only MVP).
+    // Dev-only like its providers: TenantHandle::cdpDebuggable and the Hermes
+    // CDPAgentTarget are compiled out under NDEBUG, so a release build with the
+    // WIP flag still gets discovery/tenant listing but no breakpoint target.
+    if (auto* dbg = tenants_.at(id)->cdpDebuggable()) {
+      if (auto target =
+              dbg->createCdpDebugTarget(callInvoker_, static_cast<int32_t>(id))) {
+        devTools_->registerDebugTarget(id, std::move(target));
+      }
+    }
+#endif
+  }
+#endif
+
   return id;
 }
 
@@ -767,6 +811,14 @@ void RillTenantManager::destroyTenant(TenantId id) {
 #if RILL_WIP_NATIVE_SECURITY
   // WIP (RILL_WIP_NATIVE_SECURITY): tear down the native security context.
   securityManager_.destroySecurityContext(id);
+#endif
+
+#if RILL_WIP_CDP_DEVTOOLS
+  // Tear down the CDP target BEFORE disposing the runtime: unregistering the
+  // tenant disconnects any DevTools clients, which force-resumes a runtime left
+  // paused at a breakpoint. Disposing first would destroy the runtime out from
+  // under a pending resume.
+  if (devTools_) devTools_->onTenantDestroyed(id);
 #endif
 
   it->second->dispose();

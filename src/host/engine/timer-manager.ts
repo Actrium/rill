@@ -48,6 +48,18 @@ export class TimerManager {
   private intervalIdCounter = 0;
   private _isPaused = false;
 
+  /**
+   * When set, every guest timer callback is routed through this runner instead
+   * of being invoked inline. Timer callbacks are guest-eval ENTRY fired from
+   * the host event loop — not from an inbound worker message — so a debug
+   * harness that serializes guest entry (the worker's TurnGate) must be able to
+   * front them too: while a guest turn is suspended at a breakpoint, a timer
+   * callback re-entering the runtime on top of the parked stack is undefined
+   * behaviour. Null (the default) means direct invocation — the release path
+   * is untouched.
+   */
+  private callbackRunner: ((run: () => void) => void) | null = null;
+
   // Native timer references (captured during initialization)
   private nativeSetTimeout: typeof setTimeout;
   private nativeClearTimeout: typeof clearTimeout;
@@ -83,6 +95,24 @@ export class TimerManager {
       this.options.logger.log(
         `[TimerManager] Constructor: globalThis.setTimeout is ${typeof globalThis.setTimeout}`
       );
+    }
+  }
+
+  /**
+   * Install (or clear) the guest-callback runner. See {@link callbackRunner};
+   * installed by the worker debug harness so timer-driven guest entry queues
+   * behind an outstanding breakpoint suspend.
+   */
+  setCallbackRunner(runner: ((run: () => void) => void) | null): void {
+    this.callbackRunner = runner;
+  }
+
+  /** Invoke a guest-callback thunk, through {@link callbackRunner} when installed. */
+  private runGuestCallback(run: () => void): void {
+    if (this.callbackRunner) {
+      this.callbackRunner(run);
+    } else {
+      run();
     }
   }
 
@@ -135,7 +165,7 @@ export class TimerManager {
       (current) => {
         current.handle = this.nativeSetTimeout(() => {
           this.timeoutMap.delete(entry.id);
-          this.executeCallback(current.callback, 'setTimeout');
+          this.runGuestCallback(() => this.executeCallback(current.callback, 'setTimeout'));
         }, entry.delay);
       }
     );
@@ -148,27 +178,33 @@ export class TimerManager {
       entry.lastTickAt,
       delay,
       (current) => {
+        // The WHOLE tick body goes through the guest-callback runner, not just
+        // the callback: rescheduling only after the (possibly gate-deferred)
+        // callback actually ran means a debugger suspend defers ticks one at a
+        // time instead of piling up a burst behind the gate.
         const handle = this.nativeSetTimeout(() => {
-          current.lastTickAt = Date.now();
+          this.runGuestCallback(() => {
+            current.lastTickAt = Date.now();
 
-          try {
-            current.callback();
-          } catch (e) {
-            const error = e instanceof Error ? e : new Error(String(e));
-            this.options.logger.error(
-              `[rill:${this.options.engineId}] setInterval callback error:`,
-              error
-            );
-            this.options.onError?.(error);
-          }
+            try {
+              current.callback();
+            } catch (e) {
+              const error = e instanceof Error ? e : new Error(String(e));
+              this.options.logger.error(
+                `[rill:${this.options.engineId}] setInterval callback error:`,
+                error
+              );
+              this.options.onError?.(error);
+            }
 
-          if (!this.intervalMap.has(current.id)) return;
-          if (this._isPaused) {
-            current.remainingTime = current.delay;
-            current.handle = null;
-            return;
-          }
-          this.scheduleIntervalTick(current, current.delay);
+            if (!this.intervalMap.has(current.id)) return;
+            if (this._isPaused) {
+              current.remainingTime = current.delay;
+              current.handle = null;
+              return;
+            }
+            this.scheduleIntervalTick(current, current.delay);
+          });
         }, delay);
 
         current.handle = handle as unknown as ReturnType<typeof setInterval>;
@@ -309,7 +345,7 @@ export class TimerManager {
           this.nativeQueueMicrotask(() => {
             if (!this.timeoutMap.has(id)) return; // cleared
             this.timeoutMap.delete(id);
-            this.executeCallback(fn, 'setTimeout');
+            this.runGuestCallback(() => this.executeCallback(fn, 'setTimeout'));
           });
         } else {
           this.scheduleNativeTimeout(entry);

@@ -172,7 +172,18 @@ public:
       TenantId tenantId,
       const std::string& callFrameId,
       const std::string& expression) = 0;
-  
+
+  /**
+   * Get the properties of an object/scope by objectId (Runtime.getProperties),
+   * e.g. a call frame's scope object. Returns a CDP result payload
+   * {"result":[<PropertyDescriptor>...]}. Non-pure so engines that do not
+   * support scope inspection inherit an empty result.
+   */
+  virtual std::string getProperties(TenantId /*tenantId*/,
+                                    const std::string& /*objectId*/) {
+    return R"({"result":[]})";
+  }
+
   /**
    * Get current call frames (when paused)
    */
@@ -203,13 +214,22 @@ public:
  */
 class DebuggerAdapter {
 public:
-  explicit DebuggerAdapter(CDPServer& server);
+  // Raw CDP event JSON sink. The relay layer (AdapterDebugTarget) wires this to
+  // broadcast events to the tenant's connected DevTools clients through the same
+  // persistent per-connection sinks that carry command responses — so events and
+  // responses share one path, consistent with the CDP-native (Hermes) engine.
+  using EventSink = std::function<void(const std::string& rawEventJson)>;
+
+  DebuggerAdapter();
   ~DebuggerAdapter() = default;
-  
+
   // Non-copyable
   DebuggerAdapter(const DebuggerAdapter&) = delete;
   DebuggerAdapter& operator=(const DebuggerAdapter&) = delete;
-  
+
+  // Wire (or clear, with nullptr) the event broadcast sink.
+  void setEventSink(EventSink sink);
+
   /**
    * Set engine debugger implementation
    */
@@ -241,7 +261,14 @@ public:
                                      const std::string& params);
   CDPResponse handleSetPauseOnExceptions(TenantId tenantId, int requestId,
                                           const std::string& params);
-  
+  // Runtime.getProperties — scope / object expansion by objectId. The engine
+  // returns a full {"result":[...]} payload. On the multi-target native path the
+  // Runtime domain is owned by RuntimeAdapter, so this is reached only where the
+  // Debugger target also fronts Runtime.getProperties (the fat single-engine
+  // CDP wasm), letting a GUI expand paused scopes without a separate adapter.
+  CDPResponse handleGetProperties(TenantId tenantId, int requestId,
+                                   const std::string& params);
+
   // ============================================
   // Event Emitters
   // ============================================
@@ -284,8 +311,11 @@ private:
    * Generate unique breakpoint ID
    */
   std::string generateBreakpointId();
-  
-  CDPServer& server_;
+
+  // Serialize + emit a CDP event through the wired sink (no-op if unset).
+  void emitEvent(const CDPEvent& event);
+
+  EventSink eventSink_;
   std::shared_ptr<IEngineDebugger> engineDebugger_;
   
   // Per-tenant state

@@ -17,3 +17,16 @@ license = "Apache-2.0"
 panic = "abort"
 opt-level = "s"
 lto = true
+
+# Debug variant for source-level debugging of a native Rust guest inside V8's
+# wasm debugger (Chrome DevTools "C/C++ DevTools Support (DWARF)" extension).
+# Emits full DWARF and keeps it (strip = "none"); opt-level 1 + no LTO keeps
+# locals and line info resolvable. Built ONLY via `RILL_GUEST_DEBUG=1
+# crates/build.sh` into crates/debug-artifacts/ — never staged over the shipped,
+# DWARF-free release fixtures. See docs/native-guest-debugging.zh.md.
+[profile.debug-wasm]
+inherits = "release"
+opt-level = 1
+lto = false
+debug = 2
+strip = "none"

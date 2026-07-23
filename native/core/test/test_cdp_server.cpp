@@ -347,8 +347,8 @@ TestSuite createCDPServerTests() {
       void simulateMessage(ConnectionId connId, const std::string& msg) {
         if (onMessage_) onMessage_(connId, msg);
       }
-      void simulateConnect(ConnectionId connId) {
-        if (onConnect_) onConnect_(connId);
+      void simulateConnect(ConnectionId connId, const std::string& path = "") {
+        if (onConnect_) onConnect_(connId, path);
       }
       void simulateDisconnect(ConnectionId connId) {
         if (onDisconnect_) onDisconnect_(connId);
@@ -393,8 +393,8 @@ TestSuite createCDPServerTests() {
       }
       void close(ConnectionId) override {}
 
-      void simulateConnect(ConnectionId connId) {
-        if (onConnect_) onConnect_(connId);
+      void simulateConnect(ConnectionId connId, const std::string& path = "") {
+        if (onConnect_) onConnect_(connId, path);
       }
       void simulateMessage(ConnectionId connId, const std::string& msg) {
         if (onMessage_) onMessage_(connId, msg);
@@ -455,8 +455,8 @@ TestSuite createCDPServerTests() {
       void send(ConnectionId, const std::string&) override {}
       void close(ConnectionId) override {}
 
-      void simulateConnect(ConnectionId connId) {
-        if (onConnect_) onConnect_(connId);
+      void simulateConnect(ConnectionId connId, const std::string& path = "") {
+        if (onConnect_) onConnect_(connId, path);
       }
       void simulateDisconnect(ConnectionId connId) {
         if (onDisconnect_) onDisconnect_(connId);

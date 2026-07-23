@@ -24,11 +24,14 @@ SRC_SECURITY = \
 # Source files under test (devtools subdirectory)
 SRC_DEVTOOLS = \
 	$(SRC_DIR)/devtools/CDPServer.cpp \
+	$(SRC_DIR)/devtools/cdp_wire.cpp \
 	$(SRC_DIR)/devtools/ConsoleAdapter.cpp \
 	$(SRC_DIR)/devtools/RuntimeAdapter.cpp \
 	$(SRC_DIR)/devtools/DOMAdapter.cpp \
 	$(SRC_DIR)/devtools/DebuggerAdapter.cpp \
-	$(SRC_DIR)/devtools/NetworkAdapter.cpp
+	$(SRC_DIR)/devtools/NetworkAdapter.cpp \
+	$(SRC_DIR)/devtools/AdapterDebugTarget.cpp \
+	$(SRC_DIR)/devtools/DevToolsService.cpp
 
 # Source files under test (protocol subdirectory).
 # WIP — bodies gated behind RILL_WIP_BINARY_PROTOCOL (see WIP_DEFS below);
@@ -50,6 +53,10 @@ TEST_SOURCES = \
 	$(TEST_DIR)/test_event_bus.cpp \
 	$(TEST_DIR)/test_cdp_server.cpp \
 	$(TEST_DIR)/test_cdp_adapters.cpp \
+	$(TEST_DIR)/test_cdp_discovery.cpp \
+	$(TEST_DIR)/test_engine_debug_target.cpp \
+	$(TEST_DIR)/test_adapter_debug_target.cpp \
+	$(TEST_DIR)/test_devtools_service.cpp \
 	$(TEST_DIR)/test_wire_decoder.cpp
 
 # Object files

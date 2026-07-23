@@ -1,0 +1,193 @@
+/*
+ * QuickJSDebugCore — engine-level pause/breakpoint controller for the QuickJS
+ * sandbox (dev-only, gated on RILL_QJS_DEBUG).
+ *
+ * It registers the interpreter debug hook (quickjs-debug.h) and turns raw
+ * per-line callbacks into breakpoint hits and pauses. When a breakpoint (or a
+ * pause request) lands, onStep() blocks the runtime thread on a condition
+ * variable — that IS the pause. resume()/requestPause() come from other threads
+ * (the CDP side) and coordinate through the same lock.
+ *
+ * This is the M1 core: pause / resume / line breakpoints. Call frames, stepping,
+ * and evaluate-on-frame build on top of it.
+ */
+#pragma once
+
+#ifdef RILL_QJS_DEBUG
+
+#include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
+#include <set>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+#include "quickjs.h"  // JSValue, held by value in the web pause-binding snapshot
+
+struct JSRuntime;
+
+namespace rill::qjs_debug {
+
+// Why the runtime paused. Core-local (kept independent of the devtools CDP
+// types); QuickJSEngineDebugger translates it to rill::devtools::PauseReason.
+enum class PauseReason { Breakpoint, Step, Pause };
+
+class QuickJSDebugCore {
+public:
+  // Invoked on the runtime thread the moment execution pauses, before it blocks.
+  using PausedFn =
+      std::function<void(const std::string& scriptId, int line, PauseReason)>;
+
+  // Invoked on the runtime thread the first time a script (by url/filename) is
+  // seen executing, carrying its full source. Drives Debugger.scriptParsed.
+  using ScriptSeenFn = std::function<void(const std::string& scriptId,
+                                          const std::string& url,
+                                          const std::string& source)>;
+
+  QuickJSDebugCore(JSRuntime* rt, JSContext* ctx);
+  ~QuickJSDebugCore();
+
+  QuickJSDebugCore(const QuickJSDebugCore&) = delete;
+  QuickJSDebugCore& operator=(const QuickJSDebugCore&) = delete;
+
+  // One live call-stack frame, top (innermost) first. Line is 1-based.
+  struct FrameSnapshot {
+    std::string scriptId;
+    std::string functionName;
+    int line1Based;
+  };
+
+  // A variable captured from a frame at pause time: its name and an owned dup of
+  // its value (freed when the pause ends). Objects share identity with the live
+  // frame's value, so mutating an object property through the dup is observed by
+  // the frame after resume.
+  struct CapturedVar {
+    std::string name;
+    JSValue value;  // owned (JS_DupValue'd); freed by freeSnapshot()
+  };
+
+  // A frame's full binding set, captured BEFORE the web Asyncify unwind so an
+  // evaluate arriving after the unwind can reconstruct the frame's scope. Empty
+  // on native (which reads live frames instead).
+  struct FrameBindings {
+    std::vector<CapturedVar> args;
+    std::vector<CapturedVar> locals;
+    std::vector<CapturedVar> closures;
+    JSValue thisVal;  // owned; JS_UNDEFINED when the frame has no receiver
+  };
+
+  // Invoked on the runtime thread as a pause is torn down (resume or a step
+  // leaving the current stop), while the runtime thread is still the one running.
+  // Lets an observer free pause-scoped state (e.g. dup'd JSValues) on the correct
+  // thread — resume()/step are called from the CDP thread and must not free them.
+  using ResumingFn = std::function<void(JSContext*)>;
+
+  void setPausedCallback(PausedFn fn);
+  void setScriptSeenCallback(ScriptSeenFn fn);
+  void setResumingCallback(ResumingFn fn);
+
+  // Snapshot the live call stack. Runtime-thread-only: valid only while paused
+  // (the frame chain must be intact), i.e. called from within the paused
+  // callback. Native/stripped frames (no source location) are skipped.
+  std::vector<FrameSnapshot> captureFrames();
+
+  // Frames captured at the current pause. On the web (Asyncify) build the C call
+  // stack is UNWOUND while paused, so callers cannot walk it — they read this
+  // pre-unwind snapshot instead. Runtime-thread-only; valid only while paused.
+  const std::vector<FrameSnapshot>& pausedFrames() const { return snapshotFrames_; }
+
+  // Per-frame bindings captured at the current pause (web only; empty on native).
+  // Parallel to pausedFrames() by index. An evaluate arriving after the unwind
+  // reads these instead of the (gone) live frame. Valid only while paused.
+  const std::vector<FrameBindings>& pausedBindings() const {
+    return snapshotBindings_;
+  }
+
+  // Breakpoint + control surface — all safe to call from any thread.
+  void addBreakpoint(const std::string& scriptId, int line);
+  void removeBreakpoint(const std::string& scriptId, int line);
+  void requestPause();  // pause at the next source line
+  void resume();
+  // Stepping: arm the mode against the paused call depth, then resume. A pause
+  // (breakpoint, request, or the step landing) disarms it.
+  void stepInto();
+  void stepOver();
+  void stepOut();
+  bool isPaused();
+  // Teardown: permanently stop pausing and release a parked runtime. Clears all
+  // breakpoints/step state and wakes any current pause, and every subsequent
+  // onStep short-circuits — so a runtime paused at EOF cannot re-trap on a
+  // downstream breakpoint and wedge the joining thread. One-way; call once while
+  // tearing the session down.
+  void detach();
+
+  // Run a job on the (blocked) runtime thread while it is paused, then return.
+  // Used to evaluate expressions in the paused context: the debug hook is
+  // suppressed for the duration so a re-entrant eval cannot self-pause. Returns
+  // false (without running) if the runtime is not currently paused. Safe to call
+  // from the CDP thread only.
+  using EvalJob = std::function<void(JSContext*)>;
+  bool runOnPausedThread(const EvalJob& job);
+
+  // C hook entry (registered with the engine); dispatches to onStep. `depth` is
+  // the live call-stack length (1 = top-level), used by stepping.
+  void onStep(JSContext* ctx, const void* scriptToken, int line, int depth);
+
+private:
+  std::string resolveScript(JSContext* ctx, const void* scriptToken);
+
+  // Block the runtime thread at a pause until resume()/step wakes it. Native:
+  // a condition_variable wait that also services runOnPausedThread jobs. Web
+  // (__EMSCRIPTEN__): snapshot the frames, then hand control to the JS event loop
+  // via an Asyncify stack unwind that returns only after wake + rewind.
+  void suspendAtPause(JSContext* ctx, std::unique_lock<std::mutex>& lk);
+  // Wake a suspended runtime. Native: cv_.notify_all(); web: the Asyncify wake.
+  void wakeFromPause();
+  // Capture / drop the pre-unwind frame snapshot (web pause path).
+  void buildSnapshot();
+  void freeSnapshot();
+  // Free the dup'd JSValues held in snapshotBindings_ and clear it (web only;
+  // no-op on native, where it stays empty). Idempotent.
+  void freeSnapshotBindings();
+
+  JSContext* ctx_;
+
+  enum class StepMode { None, Into, Over, Out };
+
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  std::condition_variable jobCv_;  // signals a paused-thread job completed
+  std::set<std::pair<std::string, int>> breakpoints_;  // guarded by mutex_
+  bool pauseRequested_ = false;                        // guarded by mutex_
+  bool paused_ = false;                                // guarded by mutex_
+  bool resumeRequested_ = false;                       // guarded by mutex_
+  const EvalJob* pendingJob_ = nullptr;  // guarded by mutex_
+  bool jobDone_ = false;                 // guarded by mutex_
+  bool inEval_ = false;  // runtime-thread-only: suppress the hook during eval
+  std::atomic<bool> detaching_{false};  // one-way teardown latch (see detach())
+  StepMode stepMode_ = StepMode::None;                 // guarded by mutex_
+  int stepDepth_ = 0;    // call depth the step was armed at; guarded by mutex_
+  int stepLine_ = 0;     // source line the step was armed at; guarded by mutex_
+  int pausedDepth_ = 0;  // call depth at the current pause; guarded by mutex_
+  int pausedLine_ = 0;   // source line at the current pause; guarded by mutex_
+
+  // Runtime-thread-only state (touched only inside onStep / captureFrames).
+  std::vector<FrameSnapshot> snapshotFrames_;  // frames captured at the pause
+  std::vector<FrameBindings> snapshotBindings_;  // per-frame vars (web only)
+  std::unordered_map<const void*, std::string> scriptNames_;
+  std::set<std::string> seenScripts_;  // scripts already announced (by url)
+  const void* lastToken_ = nullptr;
+  int lastLine_ = -1;
+  int lastDepth_ = -1;
+
+  PausedFn onPaused_;         // set once before debugging starts
+  ScriptSeenFn onScriptSeen_;  // set once before debugging starts
+  ResumingFn onResuming_;      // set once before debugging starts
+};
+
+}  // namespace rill::qjs_debug
+
+#endif  // RILL_QJS_DEBUG

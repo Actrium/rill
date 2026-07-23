@@ -18,6 +18,10 @@
 #include <unordered_map>
 #include <vector>
 
+#if RILL_WIP_CDP_DEVTOOLS
+#include "devtools/DevToolsService.h"
+#endif
+
 namespace rill::tenant_manager {
 
 /// Configuration passed from JS when creating a tenant.
@@ -159,6 +163,12 @@ private:
   std::recursive_mutex mutex_;
   std::mutex callbacksMutex_;
   TenantId nextTenantId_ = 1;
+
+#if RILL_WIP_CDP_DEVTOOLS
+  // CDP DevTools server (loopback-only), mirroring the tenant lifecycle into
+  // CDP target discovery. WIP-gated; absent from shipping builds.
+  std::unique_ptr<rill::devtools::DevToolsService> devTools_;
+#endif
 
   static std::shared_ptr<RillTenantManager> instance_;
 };

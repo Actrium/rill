@@ -17,6 +17,8 @@
  */
 
 #include "CDPServer.h"
+#include "EngineDebugTarget.h"
+#include "cdp_wire.h"  // cdp:: JSON wire helpers (moved out for the debug wasm)
 
 #include <chrono>
 #include <climits>
@@ -55,7 +57,11 @@ std::string CDPTarget::toJSON() const {
 
 CDPServer::CDPServer(CDPServerConfig config)
     : config_(std::move(config)) {
-  // Platform-specific impl will be created in start()
+  // Where the WebSocket surface really lives: transports that cannot serve
+  // discovery and ws on one listener move ws to a sibling port (Apple). All
+  // webSocketDebuggerUrl values are built from this.
+  wsPort_ = config_.transport ? config_.transport->webSocketPort(config_.port)
+                              : config_.port;
 }
 
 CDPServer::~CDPServer() {
@@ -78,22 +84,55 @@ bool CDPServer::start() {
           handleMessage(connId, msg);
         });
     config_.transport->setOnConnect(
-        [this](ConnectionId connId) {
+        [this](ConnectionId connId, const std::string& path) {
           std::lock_guard<std::mutex> lock(mutex_);
           Connection conn;
           conn.id = connId;
           conn.connectedAt = currentTimeMs();
           connections_[connId] = std::move(conn);
+          // Bind the connection to a tenant from its "/tenant/{id}" path, so
+          // relay and events route to the right guest without a per-request
+          // sessionId.
+          if (auto tenantId = parseTenantFromPath(path)) {
+            connectionTenant_[connId] = *tenantId;
+          }
         });
     config_.transport->setOnDisconnect(
         [this](ConnectionId connId) {
-          std::lock_guard<std::mutex> lock(mutex_);
-          auto it = connectionToSession_.find(connId);
-          if (it != connectionToSession_.end()) {
-            sessions_.erase(it->second);
-            connectionToSession_.erase(it);
+          TargetDetachList toDisconnect;
+          {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto ct = connectionTarget_.find(connId);
+            if (ct != connectionTarget_.end()) {
+              toDisconnect.emplace_back(connId, ct->second);
+              connectionTarget_.erase(ct);
+            }
+            // Drop EVERY session riding this socket — the path/default-bound one
+            // and any Target-attached ones — releasing each attached session's
+            // virtual target connection along the way.
+            for (auto it = sessions_.begin(); it != sessions_.end();) {
+              if (it->second.connectionId == connId) {
+                if (it->second.targetConnId != 0 && it->second.target) {
+                  toDisconnect.emplace_back(it->second.targetConnId, it->second.target);
+                }
+                it = sessions_.erase(it);
+              } else {
+                ++it;
+              }
+            }
+            connectionToSession_.erase(connId);
+            connectionTenant_.erase(connId);
+            discoveringConnections_.erase(connId);
+            connections_.erase(connId);
           }
-          connections_.erase(connId);
+          // Outside the lock: let the target(s) tear down per-connection state.
+          for (auto& [conn, target] : toDisconnect) target->onClientDisconnect(conn);
+        });
+    // Discovery seam: a path-capable transport serves chrome://inspect's /json
+    // probe through this. No-op when the transport never sees a plain GET.
+    config_.transport->setOnHttpGet(
+        [this](const std::string& method, const std::string& path) {
+          return handleDiscoveryRequest(method, path);
         });
 
     if (!config_.transport->start(config_.host, config_.port)) {
@@ -119,12 +158,20 @@ void CDPServer::stop() {
   }
 
   // Close all sessions
+  TargetDetachList toDisconnect;
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    toDisconnect = detachConnectionTargetsLocked(nullptr);
+    TargetDetachList sessionDetach = detachSessionTargetsLocked(nullptr);
+    toDisconnect.insert(toDisconnect.end(), sessionDetach.begin(), sessionDetach.end());
     sessions_.clear();
     connectionToSession_.clear();
+    connectionTenant_.clear();
+    discoveringConnections_.clear();
     connections_.clear();
   }
+  // Outside the lock: tear down each target's per-connection state.
+  for (auto& [connId, target] : toDisconnect) target->onClientDisconnect(connId);
 
   if (serverThread_ && serverThread_->joinable()) {
     serverThread_->join();
@@ -148,30 +195,127 @@ void CDPServer::registerTenant(TenantId id, const std::string& title, const std:
   info.title = title;
   info.url = url.empty() ? ("rill://tenant/" + std::to_string(id)) : url;
   info.registeredAt = currentTimeMs();
-  
+
   tenants_[id] = std::move(info);
+
+  // Tell clients that are discovering targets (Target.setDiscoverTargets) about
+  // the new one. Emitting under the lock is safe: sendToConnection does not
+  // re-acquire mutex_.
+  if (!discoveringConnections_.empty()) {
+    std::string params = "{\"targetInfo\":" + buildTargetInfoLocked(id) + "}";
+    std::string json = cdp::buildEventJSON("Target.targetCreated", params, std::nullopt);
+    for (ConnectionId connId : discoveringConnections_) {
+      sendToConnection(connId, json);
+    }
+  }
+}
+
+void CDPServer::registerDebugTarget(TenantId id, std::shared_ptr<IEngineDebugTarget> target) {
+  if (!target) {
+    unregisterDebugTarget(id);  // erase == unregister (disconnects bound clients)
+    return;
+  }
+  TargetDetachList toDisconnect;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Replacing a live target: release every binding to the OLD one first, so
+    // no session/connection keeps dispatching into a target the server no
+    // longer routes to.
+    auto existing = tenantTargets_.find(id);
+    if (existing != tenantTargets_.end() && existing->second && existing->second != target) {
+      toDisconnect = detachConnectionTargetsLocked(existing->second);
+      TargetDetachList sessionDetach = detachSessionTargetsLocked(existing->second);
+      toDisconnect.insert(toDisconnect.end(), sessionDetach.begin(), sessionDetach.end());
+    }
+    tenantTargets_[id] = std::move(target);
+  }
+  for (auto& [connId, old] : toDisconnect) old->onClientDisconnect(connId);
+}
+
+void CDPServer::unregisterDebugTarget(TenantId id) {
+  TargetDetachList toDisconnect;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto tt = tenantTargets_.find(id);
+    if (tt != tenantTargets_.end()) {
+      toDisconnect = detachConnectionTargetsLocked(tt->second);
+      TargetDetachList sessionDetach = detachSessionTargetsLocked(tt->second);
+      toDisconnect.insert(toDisconnect.end(), sessionDetach.begin(), sessionDetach.end());
+      tenantTargets_.erase(tt);
+    }
+  }
+  for (auto& [connId, target] : toDisconnect) target->onClientDisconnect(connId);
 }
 
 void CDPServer::unregisterTenant(TenantId id) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  
-  tenants_.erase(id);
-  
-  // Close sessions for this tenant
-  std::vector<SessionId> sessionsToRemove;
-  for (const auto& [sessionId, session] : sessions_) {
-    if (session.tenantId == id) {
-      sessionsToRemove.push_back(sessionId);
+  TargetDetachList toDisconnect;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // Notify discovering clients before the tenant is gone.
+    if (!discoveringConnections_.empty() && tenants_.find(id) != tenants_.end()) {
+      std::string params = "{\"targetId\":\"" + std::to_string(id) + "\"}";
+      std::string json = cdp::buildEventJSON("Target.targetDestroyed", params, std::nullopt);
+      for (ConnectionId connId : discoveringConnections_) {
+        sendToConnection(connId, json);
+      }
+    }
+
+    tenants_.erase(id);
+    auto tt = tenantTargets_.find(id);
+    if (tt != tenantTargets_.end()) {
+      toDisconnect = detachConnectionTargetsLocked(tt->second);
+      TargetDetachList sessionDetach = detachSessionTargetsLocked(tt->second);
+      toDisconnect.insert(toDisconnect.end(), sessionDetach.begin(), sessionDetach.end());
+      tenantTargets_.erase(tt);
+    }
+
+    // Close sessions for this tenant
+    std::vector<SessionId> sessionsToRemove;
+    for (const auto& [sessionId, session] : sessions_) {
+      if (session.tenantId == id) {
+        sessionsToRemove.push_back(sessionId);
+      }
+    }
+
+    for (const auto& sessionId : sessionsToRemove) {
+      auto it = sessions_.find(sessionId);
+      if (it != sessions_.end()) {
+        connectionToSession_.erase(it->second.connectionId);
+        sessions_.erase(it);
+      }
     }
   }
-  
-  for (const auto& sessionId : sessionsToRemove) {
-    auto it = sessions_.find(sessionId);
-    if (it != sessions_.end()) {
-      connectionToSession_.erase(it->second.connectionId);
-      sessions_.erase(it);
+  for (auto& [connId, target] : toDisconnect) target->onClientDisconnect(connId);
+}
+
+CDPServer::TargetDetachList
+CDPServer::detachConnectionTargetsLocked(const std::shared_ptr<IEngineDebugTarget>& target) {
+  TargetDetachList detached;
+  for (auto it = connectionTarget_.begin(); it != connectionTarget_.end();) {
+    if (!target || it->second == target) {
+      detached.emplace_back(it->first, it->second);
+      it = connectionTarget_.erase(it);
+    } else {
+      ++it;
     }
   }
+  return detached;
+}
+
+CDPServer::TargetDetachList
+CDPServer::detachSessionTargetsLocked(const std::shared_ptr<IEngineDebugTarget>& target) {
+  TargetDetachList detached;
+  for (auto& [sessionId, session] : sessions_) {
+    (void)sessionId;
+    if (session.targetConnId == 0 || !session.target) continue;
+    if (!target || session.target == target) {
+      detached.emplace_back(session.targetConnId, session.target);
+      session.targetConnId = 0;
+      session.target.reset();
+    }
+  }
+  return detached;
 }
 
 bool CDPServer::hasTenant(TenantId id) const {
@@ -229,7 +373,7 @@ void CDPServer::broadcastEvent(const CDPEvent& event) {
 
 std::string CDPServer::getWebSocketUrl(TenantId id) const {
   std::ostringstream ss;
-  ss << "ws://" << config_.host << ":" << config_.port << "/tenant/" << id;
+  ss << "ws://" << config_.host << ":" << wsPort_ << "/tenant/" << id;
   return ss.str();
 }
 
@@ -238,7 +382,7 @@ std::string CDPServer::getDevToolsUrl(TenantId id) const {
   // URL encode the WebSocket URL for the DevTools frontend
   std::ostringstream ss;
   ss << "devtools://devtools/bundled/inspector.html?ws=";
-  ss << config_.host << ":" << config_.port << "/tenant/" << id;
+  ss << config_.host << ":" << wsPort_ << "/tenant/" << id;
   return ss.str();
 }
 
@@ -276,23 +420,120 @@ void CDPServer::handleMessage(ConnectionId connId, const std::string& message) {
     return;
   }
 
-  // All session/routing operations must be under mutex to prevent races.
-  std::lock_guard<std::mutex> lock(mutex_);
-
-  // Get or create session
-  CDPSession* session = getOrCreateSessionLocked(connId, *request);
-  if (!session) {
-    CDPResponse error = makeError(request->id, CDPErrorCode::SESSION_NOT_FOUND, "Session not found");
-    sendResponse(connId, error);
-    return;
+  // Domain of this request ("Runtime.evaluate" -> "Runtime"), for the
+  // forward-vs-local routing decision below.
+  std::string domain;
+  {
+    size_t dotPos = request->method.find('.');
+    if (dotPos != std::string::npos) {
+      domain = request->method.substr(0, dotPos);
+    }
   }
 
-  // Update activity timestamp
-  session->lastActivityAt = currentTimeMs();
+  // Decide routing under the lock, then act. A domain owned by the tenant's
+  // debug target is forwarded verbatim OUTSIDE the lock, so the outbound sink
+  // may re-enter the server (sendToConnection) without self-deadlock.
+  std::shared_ptr<IEngineDebugTarget> forwardTarget;
+  bool needClientConnect = false;
+  // When forwarding on behalf of a Target-attached (flatten-mode) session, the
+  // target's outbound messages must be tagged with that sessionId so the client
+  // can demultiplex them. Empty on the path-bind route (one tenant per socket).
+  std::optional<SessionId> sinkSessionId;
+  // The connection id the TARGET sees. The raw socket id on the path-bind route;
+  // the session's own virtual connection id on the sessionId-attach route, so
+  // each of a socket's attached sessions is a separate client to the target
+  // (own agent, own sink, own sessionId tag).
+  ConnectionId targetConn = connId;
+  // Target connections dropped by Target.detachFromTarget while the lock was
+  // held; released after it (the target may re-enter the server).
+  TargetDetachList deferredTargetDetach;
+  bool handledLocally = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
 
-  // Route to appropriate handler
-  CDPResponse response = routeRequest(*request, *session);
-  sendResponse(connId, response);
+    // Two routing authorities resolve the tenant this request belongs to:
+    //   * an explicit request.sessionId names a session created by
+    //     Target.attachToTarget (the sessionId multiplex) — one browser socket
+    //     may hold several such sessions, one per attached tenant;
+    //   * otherwise the connection's own session (bound to a tenant via the
+    //     "/tenant/{id}" path, or the default browser session).
+    CDPSession* session = nullptr;
+    if (request->sessionId) {
+      auto sit = sessions_.find(*request->sessionId);
+      if (sit == sessions_.end()) {
+        // Unknown sessionId: the session was never attached or has been detached.
+        // Do NOT silently reconstruct it — that would keep routing to the tenant
+        // after Target.detachFromTarget.
+        CDPResponse error = makeError(request->id, CDPErrorCode::SESSION_NOT_FOUND, "Session not found");
+        sendResponse(connId, error);
+        return;
+      }
+      session = &sit->second;
+      sinkSessionId = *request->sessionId;
+    } else {
+      session = getOrCreateSessionLocked(connId, *request);
+      if (!session) {
+        CDPResponse error = makeError(request->id, CDPErrorCode::SESSION_NOT_FOUND, "Session not found");
+        sendResponse(connId, error);
+        return;
+      }
+    }
+    session->lastActivityAt = currentTimeMs();
+
+    auto it = tenantTargets_.find(session->tenantId);
+    if (it != tenantTargets_.end() && it->second && it->second->ownedDomains().owns(domain)) {
+      forwardTarget = it->second;  // forward below, outside the lock
+      if (sinkSessionId) {
+        // sessionId-attach route: bind the SESSION (not the socket) to the
+        // target on first owned-domain contact, under a fresh virtual
+        // connection id. A second session on the same socket — same tenant or
+        // another — gets its own binding instead of silently reusing (and
+        // mis-tagging through) the first one's sink.
+        if (session->targetConnId != 0 && session->target != forwardTarget) {
+          // The tenant's target was replaced since this session last spoke:
+          // release the stale binding and connect fresh.
+          deferredTargetDetach.emplace_back(session->targetConnId, session->target);
+          session->targetConnId = 0;
+          session->target.reset();
+        }
+        if (session->targetConnId == 0) {
+          session->targetConnId = generateVirtualConnectionId();
+          session->target = forwardTarget;
+          needClientConnect = true;
+        }
+        targetConn = session->targetConnId;
+      } else {
+        // Path-bind route (one tenant per socket): at most one onClientConnect
+        // per raw connection.
+        needClientConnect = connectionTarget_.try_emplace(connId, forwardTarget).second;
+      }
+    } else {
+      // Local path: the built-in domain handler synthesizes the response.
+      CDPResponse response = routeRequest(*request, *session, deferredTargetDetach);
+      sendResponse(connId, response);
+      handledLocally = true;
+    }
+  }  // mutex_ released
+
+  // Outside the lock: release target connections dropped by
+  // Target.detachFromTarget (the target tears down that session's agent/sink).
+  for (auto& [conn, target] : deferredTargetDetach) target->onClientDisconnect(conn);
+  if (handledLocally) return;
+
+  // Owned domain: the target is the sole authority. On first contact install a
+  // persistent per-(target)connection sink (the target emits its response AND
+  // any async events through it); then forward the raw request verbatim. Both
+  // run with mutex_ released so the sink may re-enter the server
+  // (sendToConnection) without self-deadlock, and outbound bypasses
+  // buildEventJSON (the target already speaks CDP). The sink captures the RAW
+  // socket id — that is where bytes go — while the target itself only ever sees
+  // targetConn.
+  if (needClientConnect) {
+    forwardTarget->onClientConnect(targetConn, [this, connId, sinkSessionId](const RawCdpMessage& out) {
+      sendToConnection(connId, sinkSessionId ? cdp::injectSessionId(out, *sinkSessionId) : out);
+    });
+  }
+  forwardTarget->dispatch(targetConn, message);
 }
 
 std::optional<CDPRequest> CDPServer::parseRequest(const std::string& json) {
@@ -361,7 +602,8 @@ std::optional<CDPRequest> CDPServer::parseRequest(const std::string& json) {
   return request;
 }
 
-CDPResponse CDPServer::routeRequest(const CDPRequest& request, const CDPSession& session) {
+CDPResponse CDPServer::routeRequest(const CDPRequest& request, const CDPSession& session,
+                                    TargetDetachList& deferredTargetDetach) {
   // Extract domain from method (e.g., "Runtime.evaluate" -> "Runtime")
   std::string domain;
   std::string methodName;
@@ -392,7 +634,7 @@ CDPResponse CDPServer::routeRequest(const CDPRequest& request, const CDPSession&
   } else if (domain == "Profiler") {
     return handleProfilerMethod(request, mutableSession);
   } else if (domain == "Target") {
-    return handleTargetMethod(request, mutableSession);
+    return handleTargetMethod(request, mutableSession, deferredTargetDetach);
   }
   
   return makeError(request.id, CDPErrorCode::METHOD_NOT_FOUND, 
@@ -426,17 +668,47 @@ void CDPServer::sendToConnection(ConnectionId connId, const std::string& json) {
 // ============================================
 
 std::string CDPServer::handleHttpRequest(const std::string& path) {
-  if (path == "/json" || path == "/json/list") {
-    return buildTargetListJSON();
-  } else if (path == "/json/version") {
-    return R"({"Browser":"Rill/1.0","Protocol-Version":"1.3"})";
-  } else if (path == "/json/protocol") {
-    // Return minimal protocol descriptor
-    return R"({"domains":[]})";
+  // Body-only shim: keep the old "empty string == 404" contract for callers that
+  // only want the JSON body. All routing lives in handleDiscoveryRequest.
+  HttpResponse resp = handleDiscoveryRequest("GET", path);
+  return resp.status == 200 ? resp.body : std::string();
+}
+
+HttpResponse CDPServer::handleDiscoveryRequest(const std::string& method,
+                                               const std::string& path) const {
+  // Loopback-only endpoint: the transport binds 127.0.0.1 and HttpResponse emits
+  // no CORS/wildcard headers, so a discovered target list never leaves the box.
+  HttpResponse resp;
+
+  if (method != "GET") {
+    resp.status = 405;
+    resp.statusText = "Method Not Allowed";
+    resp.body = R"({"error":"method not allowed"})";
+    return resp;
   }
-  
-  // 404 for unknown paths
-  return "";
+
+  if (path == "/json" || path == "/json/list") {
+    resp.body = buildTargetListJSON();
+    return resp;
+  }
+  if (path == "/json/version") {
+    // A single root webSocketDebuggerUrl (no tenant path): stock chrome://inspect
+    // opens it and drives tenants through the Target domain (attachToTarget).
+    std::ostringstream ss;
+    ss << "{\"Browser\":\"Rill/1.0\",\"Protocol-Version\":\"1.3\","
+       << "\"webSocketDebuggerUrl\":\"ws://" << config_.host << ":" << wsPort_ << "/\"}";
+    resp.body = ss.str();
+    return resp;
+  }
+  if (path == "/json/protocol") {
+    resp.body = R"({"domains":[]})";
+    return resp;
+  }
+
+  resp.status = 404;
+  resp.statusText = "Not Found";
+  resp.body = R"({"error":"not found"})";
+  return resp;
 }
 
 std::string CDPServer::buildTargetListJSON() const {
@@ -505,9 +777,12 @@ CDPSession* CDPServer::getOrCreateSessionLocked(ConnectionId connId, const CDPRe
     return getSession(connIt->second);
   }
   
-  // Determine tenant from request sessionId or URL
+  // Prefer the tenant bound at connect time from the "/tenant/{id}" path.
   TenantId tenantId = 0;
-  if (request.sessionId) {
+  auto ctIt = connectionTenant_.find(connId);
+  if (ctIt != connectionTenant_.end()) {
+    tenantId = ctIt->second;
+  } else if (request.sessionId) {
     // Parse tenant ID from session ID (format: "tenant-{id}-{uuid}")
     const std::string& sid = *request.sessionId;
     size_t dashPos = sid.find('-');
@@ -527,6 +802,53 @@ CDPSession* CDPServer::getOrCreateSessionLocked(ConnectionId connId, const CDPRe
   // Create new session
   SessionId newSessionId = createSession(connId, tenantId);
   return getSession(newSessionId);
+}
+
+SessionId CDPServer::createAttachedSessionLocked(ConnectionId connId, TenantId tenantId) {
+  SessionId sessionId = generateSessionId(tenantId);
+
+  CDPSession session;
+  session.id = sessionId;
+  session.tenantId = tenantId;
+  session.connectionId = connId;
+  session.createdAt = currentTimeMs();
+  session.lastActivityAt = session.createdAt;
+
+  sessions_[sessionId] = std::move(session);
+  // NB: intentionally NOT touching connectionToSession_ — an attached session is
+  // addressed by its sessionId, and one connection can hold several at once.
+  return sessionId;
+}
+
+std::string CDPServer::buildTargetInfoLocked(TenantId id) const {
+  auto it = tenants_.find(id);
+  std::string title = it != tenants_.end() ? it->second.title : std::string();
+  std::string url = it != tenants_.end() ? it->second.url : std::string();
+
+  std::ostringstream ss;
+  ss << "{\"targetId\":\"" << id << "\",";
+  ss << "\"type\":\"node\",";
+  ss << "\"title\":\"" << cdp::escapeJSON(title) << "\",";
+  ss << "\"url\":\"" << cdp::escapeJSON(url) << "\",";
+  ss << "\"attached\":false}";
+  return ss.str();
+}
+
+std::optional<TenantId> CDPServer::parseTenantFromPath(const std::string& path) {
+  // Match ".../tenant/{digits}", tolerating a leading path and trailing
+  // segments/query (e.g. "/tenant/3", "/devtools/tenant/12/page").
+  static const std::string kMarker = "/tenant/";
+  size_t pos = path.find(kMarker);
+  if (pos == std::string::npos) return std::nullopt;
+  size_t start = pos + kMarker.size();
+  size_t end = start;
+  while (end < path.size() && path[end] >= '0' && path[end] <= '9') ++end;
+  if (end == start) return std::nullopt;  // no digits after the marker
+  try {
+    return static_cast<TenantId>(std::stoul(path.substr(start, end - start)));
+  } catch (...) {
+    return std::nullopt;
+  }
 }
 
 // ============================================
@@ -645,26 +967,113 @@ CDPResponse CDPServer::handleProfilerMethod(const CDPRequest& req, CDPSession& s
                    "Profiler." + methodName + " not implemented");
 }
 
-CDPResponse CDPServer::handleTargetMethod(const CDPRequest& req, CDPSession& /*session*/) {
+CDPResponse CDPServer::handleTargetMethod(const CDPRequest& req, CDPSession& session,
+                                          TargetDetachList& deferredTargetDetach) {
+  // NB: mutex_ is held by the handleMessage caller for the whole Target flow, so
+  // reads of tenants_/sessions_ and emits via sendToConnection are all in-lock
+  // and consistent; sendToConnection does not re-acquire the mutex. Target
+  // connections to release (detachFromTarget) go into deferredTargetDetach —
+  // the caller invokes onClientDisconnect after dropping the lock.
   std::string methodName = req.method.substr(req.method.find('.') + 1);
 
   if (methodName == "getTargets") {
-    // mutex_ already held by handleMessage caller
     std::ostringstream ss;
     ss << "{\"targetInfos\":[";
     bool first = true;
     for (const auto& [id, info] : tenants_) {
+      (void)info;
       if (!first) ss << ",";
       first = false;
-      ss << "{\"targetId\":\"" << id << "\",";
-      ss << "\"type\":\"node\",";
-      ss << "\"title\":\"" << cdp::escapeJSON(info.title) << "\",";
-      ss << "\"url\":\"" << cdp::escapeJSON(info.url) << "\"}";
+      ss << buildTargetInfoLocked(id);
     }
     ss << "]}";
     return makeSuccess(req.id, ss.str());
   }
-  
+
+  if (methodName == "setDiscoverTargets") {
+    // Chrome enables discovery, then expects a Target.targetCreated burst for the
+    // current targets plus create/destroy deltas thereafter (see register/
+    // unregisterTenant).
+    bool discover = req.params.find("\"discover\":true") != std::string::npos;
+    if (discover) {
+      discoveringConnections_.insert(session.connectionId);
+      for (const auto& [id, info] : tenants_) {
+        (void)info;
+        std::string params = "{\"targetInfo\":" + buildTargetInfoLocked(id) + "}";
+        std::string json = cdp::buildEventJSON("Target.targetCreated", params, std::nullopt);
+        sendToConnection(session.connectionId, json);
+      }
+    } else {
+      discoveringConnections_.erase(session.connectionId);
+    }
+    return makeSuccess(req.id);
+  }
+
+  if (methodName == "getTargetInfo") {
+    auto targetId = cdp::parseJSONString(req.params, "targetId");
+    TenantId id = 0;
+    if (targetId) {
+      try {
+        id = static_cast<TenantId>(std::stoul(*targetId));
+      } catch (...) {
+        return makeError(req.id, CDPErrorCode::TARGET_NOT_FOUND, "Invalid targetId");
+      }
+    }
+    if (tenants_.find(id) == tenants_.end()) {
+      return makeError(req.id, CDPErrorCode::TARGET_NOT_FOUND, "No such target");
+    }
+    return makeSuccess(req.id, "{\"targetInfo\":" + buildTargetInfoLocked(id) + "}");
+  }
+
+  if (methodName == "attachToTarget") {
+    auto targetId = cdp::parseJSONString(req.params, "targetId");
+    if (!targetId) {
+      return makeError(req.id, CDPErrorCode::INVALID_PARAMS, "Missing targetId");
+    }
+    TenantId id = 0;
+    try {
+      id = static_cast<TenantId>(std::stoul(*targetId));
+    } catch (...) {
+      return makeError(req.id, CDPErrorCode::TARGET_NOT_FOUND, "Invalid targetId");
+    }
+    if (tenants_.find(id) == tenants_.end()) {
+      return makeError(req.id, CDPErrorCode::TARGET_NOT_FOUND, "No such target");
+    }
+    // Create a session bound to the tenant; subsequent requests carry its
+    // sessionId and route to this tenant's target (the sessionId multiplex).
+    SessionId sid = createAttachedSessionLocked(session.connectionId, id);
+    // flatten mode: announce the attach as an event, then reply with the id.
+    std::string params = "{\"sessionId\":\"" + cdp::escapeJSON(sid) +
+                         "\",\"targetInfo\":" + buildTargetInfoLocked(id) +
+                         ",\"waitingForDebugger\":false}";
+    std::string evt = cdp::buildEventJSON("Target.attachedToTarget", params, std::nullopt);
+    sendToConnection(session.connectionId, evt);
+    return makeSuccess(req.id, "{\"sessionId\":\"" + cdp::escapeJSON(sid) + "\"}");
+  }
+
+  if (methodName == "detachFromTarget") {
+    auto sid = cdp::parseJSONString(req.params, "sessionId");
+    if (sid) {
+      TenantId tid = 0;
+      auto it = sessions_.find(*sid);
+      if (it != sessions_.end()) {
+        tid = it->second.tenantId;
+        // Release the session's virtual target connection too, so the target
+        // tears down this session's agent/sink instead of leaking it until the
+        // socket closes.
+        if (it->second.targetConnId != 0 && it->second.target) {
+          deferredTargetDetach.emplace_back(it->second.targetConnId, it->second.target);
+        }
+        sessions_.erase(it);
+      }
+      std::string params = "{\"sessionId\":\"" + cdp::escapeJSON(*sid) +
+                           "\",\"targetId\":\"" + std::to_string(tid) + "\"}";
+      std::string evt = cdp::buildEventJSON("Target.detachedFromTarget", params, std::nullopt);
+      sendToConnection(session.connectionId, evt);
+    }
+    return makeSuccess(req.id);
+  }
+
   return makeError(req.id, CDPErrorCode::METHOD_NOT_FOUND,
                    "Target." + methodName + " not implemented");
 }
@@ -675,6 +1084,14 @@ CDPResponse CDPServer::handleTargetMethod(const CDPRequest& req, CDPSession& /*s
 
 ConnectionId CDPServer::generateConnectionId() {
   return nextConnectionId_.fetch_add(1);
+}
+
+ConnectionId CDPServer::generateVirtualConnectionId() {
+  // Own namespace (top bit set): transports hand out their own socket ids, and
+  // a target keys per-connection state by whatever id the server presents — a
+  // clash would silently merge two clients inside the target.
+  constexpr ConnectionId kVirtualBit = ConnectionId(1) << 63;
+  return kVirtualBit | nextConnectionId_.fetch_add(1);
 }
 
 SessionId CDPServer::generateSessionId(TenantId tenantId) {
@@ -717,159 +1134,68 @@ CDPResponse CDPServer::makeSuccess(int requestId, const std::string& resultJson)
 
 namespace cdp {
 
-/**
- * Quick validation: params must start with '{' and end with '}'.
- * Not a full JSON parser, but catches obviously malformed input.
- */
-static bool looksLikeJSONObject(const std::string& s) {
-  if (s.empty()) return false;
-  size_t first = 0;
-  while (first < s.size() && std::isspace(static_cast<unsigned char>(s[first]))) first++;
-  size_t last = s.size();
-  while (last > first && std::isspace(static_cast<unsigned char>(s[last - 1]))) last--;
-  return (last > first) && s[first] == '{' && s[last - 1] == '}';
-}
+// buildEventJSON / buildResponseJSON / buildErrorJSON / escapeJSON /
+// parseJSONString / parseJSONInt moved to cdp_wire.cpp so the debug wasm can
+// link them without CDPServer. The HTTP / discovery helpers below stay here
+// because they depend on CDPServer's own types.
 
-std::string buildEventJSON(const std::string& method,
-                           const std::string& params,
-                           const std::optional<SessionId>& sessionId) {
+std::string buildHttpResponse(const HttpResponse& resp) {
   std::ostringstream ss;
-  ss << "{\"method\":\"" << escapeJSON(method) << "\"";
-  // Validate params is a JSON object; fallback to empty object
-  ss << ",\"params\":" << (looksLikeJSONObject(params) ? params : std::string("{}"));
-  if (sessionId) {
-    ss << ",\"sessionId\":\"" << escapeJSON(*sessionId) << "\"";
-  }
-  ss << "}";
+  ss << "HTTP/1.1 " << resp.status << " " << resp.statusText << "\r\n";
+  ss << "Content-Type: " << resp.contentType << "\r\n";
+  ss << "Content-Length: " << resp.body.size() << "\r\n";
+  ss << "\r\n";
+  ss << resp.body;
   return ss.str();
 }
 
-std::string buildResponseJSON(int id, const std::string& result) {
-  std::ostringstream ss;
-  ss << "{\"id\":" << id;
-  ss << ",\"result\":" << result;
-  ss << "}";
-  return ss.str();
+bool parseRequestLine(const std::string& requestBytes, std::string& method,
+                      std::string& path) {
+  // Isolate the request line: everything up to the first CRLF. Tolerate a
+  // missing CRLF (a bare request line) by falling back to the whole string.
+  size_t lineEnd = requestBytes.find("\r\n");
+  std::string line = (lineEnd == std::string::npos)
+                         ? requestBytes
+                         : requestBytes.substr(0, lineEnd);
+
+  // Split the line on runs of spaces into up to three tokens:
+  //   [method, target, version]. Only method and target are required.
+  std::string tokens[3];
+  int count = 0;
+  size_t i = 0;
+  while (i < line.size() && count < 3) {
+    while (i < line.size() && line[i] == ' ') ++i;  // skip leading spaces
+    if (i >= line.size()) break;
+    size_t start = i;
+    while (i < line.size() && line[i] != ' ') ++i;
+    tokens[count++] = line.substr(start, i - start);
+  }
+
+  if (count < 2 || tokens[0].empty() || tokens[1].empty()) {
+    return false;
+  }
+
+  method = tokens[0];
+  // Path is the target with any query ('?') or fragment ('#') stripped.
+  const std::string& target = tokens[1];
+  size_t cut = target.find_first_of("?#");
+  path = (cut == std::string::npos) ? target : target.substr(0, cut);
+  return true;
 }
 
-std::string buildErrorJSON(int id, int code, const std::string& message) {
-  std::ostringstream ss;
-  ss << "{\"id\":" << id;
-  ss << ",\"error\":{\"code\":" << code;
-  ss << ",\"message\":\"" << escapeJSON(message) << "\"}}";
-  return ss.str();
-}
-
-std::string escapeJSON(const std::string& str) {
-  std::ostringstream ss;
-  for (char c : str) {
-    switch (c) {
-      case '"':  ss << "\\\""; break;
-      case '\\': ss << "\\\\"; break;
-      case '\b': ss << "\\b"; break;
-      case '\f': ss << "\\f"; break;
-      case '\n': ss << "\\n"; break;
-      case '\r': ss << "\\r"; break;
-      case '\t': ss << "\\t"; break;
-      default:
-        if (static_cast<unsigned char>(c) < 0x20) {
-          ss << "\\u" << std::hex << std::setfill('0') << std::setw(4) 
-             << static_cast<int>(static_cast<unsigned char>(c));
-        } else {
-          ss << c;
-        }
-    }
+std::string injectSessionId(const std::string& rawCdp, const SessionId& sessionId) {
+  // Already tagged, or not a JSON object we can splice into: pass through.
+  if (rawCdp.find("\"sessionId\"") != std::string::npos) return rawCdp;
+  size_t close = rawCdp.rfind('}');
+  size_t open = rawCdp.find('{');
+  if (close == std::string::npos || open == std::string::npos || open >= close) {
+    return rawCdp;
   }
-  return ss.str();
-}
-
-std::optional<std::string> parseJSONString(const std::string& json, const std::string& key) {
-  std::string searchKey = "\"" + key + "\"";
-  size_t keyPos = json.find(searchKey);
-  if (keyPos == std::string::npos) {
-    return std::nullopt;
-  }
-  
-  // Find colon after key
-  size_t colonPos = json.find(':', keyPos + searchKey.length());
-  if (colonPos == std::string::npos) {
-    return std::nullopt;
-  }
-  
-  // Find opening quote
-  size_t quoteStart = json.find('"', colonPos + 1);
-  if (quoteStart == std::string::npos) {
-    return std::nullopt;
-  }
-  
-  // Find closing quote (handle escapes)
-  size_t i = quoteStart + 1;
-  std::string result;
-  while (i < json.size()) {
-    if (json[i] == '\\' && i + 1 < json.size()) {
-      // Handle escape sequences
-      switch (json[i + 1]) {
-        case '"':  result += '"'; break;
-        case '\\': result += '\\'; break;
-        case 'n':  result += '\n'; break;
-        case 'r':  result += '\r'; break;
-        case 't':  result += '\t'; break;
-        default:   result += json[i + 1]; break;
-      }
-      i += 2;
-    } else if (json[i] == '"') {
-      return result;
-    } else {
-      result += json[i];
-      i++;
-    }
-  }
-  
-  return std::nullopt;
-}
-
-std::optional<int> parseJSONInt(const std::string& json, const std::string& key) {
-  std::string searchKey = "\"" + key + "\"";
-  size_t keyPos = json.find(searchKey);
-  if (keyPos == std::string::npos) {
-    return std::nullopt;
-  }
-  
-  // Find colon after key
-  size_t colonPos = json.find(':', keyPos + searchKey.length());
-  if (colonPos == std::string::npos) {
-    return std::nullopt;
-  }
-  
-  // Skip whitespace
-  size_t numStart = colonPos + 1;
-  while (numStart < json.size() && std::isspace(json[numStart])) {
-    numStart++;
-  }
-  
-  // Parse number
-  if (numStart >= json.size()) {
-    return std::nullopt;
-  }
-  
-  bool negative = false;
-  if (json[numStart] == '-') {
-    negative = true;
-    numStart++;
-  }
-  
-  long long result = 0;
-  while (numStart < json.size() &&
-         std::isdigit(static_cast<unsigned char>(json[numStart]))) {
-    result = result * 10 + (json[numStart] - '0');
-    if (result > INT32_MAX) {
-      return std::nullopt; // Overflow
-    }
-    numStart++;
-  }
-
-  int intResult = static_cast<int>(negative ? -result : result);
-  return intResult;
+  // Empty object "{}" needs no leading comma before the new member.
+  bool empty = rawCdp.find_first_not_of(" \t\r\n", open + 1) == close;
+  std::string member = (empty ? std::string() : std::string(",")) +
+                       "\"sessionId\":\"" + escapeJSON(sessionId) + "\"";
+  return rawCdp.substr(0, close) + member + rawCdp.substr(close);
 }
 
 } // namespace cdp

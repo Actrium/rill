@@ -54,7 +54,18 @@ struct CDPServerConfig {
 
 ## Target Discovery
 
-The CDPServer implements the `/json` HTTP endpoint for target discovery. Chrome DevTools (`chrome://inspect`) polls this endpoint to find debuggable targets.
+The CDPServer implements the `/json` HTTP endpoint for target discovery. Chrome DevTools (`chrome://inspect`) polls this endpoint to find debuggable targets — always on exactly the host:port the user configured.
+
+### Port layout (Apple transport)
+
+Network.framework's WebSocket listener auto-upgrades and cannot answer a plain HTTP GET, so `CDPTransportApple` splits the two surfaces across sibling loopback ports:
+
+| Surface | Port |
+|---|---|
+| `/json` discovery (what `chrome://inspect` probes) | configured port (default 9229) |
+| WebSocket (CDP traffic) | configured port + 1 (default 9230) |
+
+Clients never guess the ws port: every `webSocketDebuggerUrl` the server hands out already points at it (`CDPTransport::webSocketPort`). Transports that can serve both on one listener keep everything on the configured port.
 
 ### /json Response
 
@@ -65,8 +76,8 @@ The CDPServer implements the `/json` HTTP endpoint for target discovery. Chrome 
     "type": "node",
     "title": "Rill Guest: MyApp",
     "url": "rill://tenant/42",
-    "webSocketDebuggerUrl": "ws://127.0.0.1:9229/tenant/42",
-    "devtoolsFrontendUrl": "devtools://devtools/bundled/inspector.html?ws=127.0.0.1:9229/tenant/42"
+    "webSocketDebuggerUrl": "ws://127.0.0.1:9230/tenant/42",
+    "devtoolsFrontendUrl": "devtools://devtools/bundled/inspector.html?ws=127.0.0.1:9230/tenant/42"
   }
 ]
 ```
@@ -75,10 +86,10 @@ Each registered tenant appears as a separate target. Targets are registered/unre
 
 ### Connecting
 
-1. Open `chrome://inspect` in Chrome
+1. Open `chrome://inspect` in Chrome and add `127.0.0.1:9229` (the configured port) under "Discover network targets"
 2. Rill targets appear under "Remote Target"
 3. Click "inspect" to open DevTools connected to a specific tenant
-4. Alternatively, connect VS Code's JavaScript debugger to `ws://localhost:9229/tenant/<id>`
+4. Alternatively, connect VS Code's JavaScript debugger to the `webSocketDebuggerUrl` reported by `http://127.0.0.1:9229/json` (on the Apple transport: `ws://localhost:9230/tenant/<id>`)
 
 ## Domain Adapters
 

@@ -71,6 +71,12 @@ jobs:
       - name: Build WASM guests
         run: cargo build --workspace --target wasm32-unknown-unknown --release
 
+      # The DWARF debug branch of build.sh names crates explicitly (GUESTS),
+      # so a rename in the workspace can break it while --workspace above stays
+      # green. Build it for real so the list can never drift again.
+      - name: Build debug (DWARF) WASM guests
+        run: RILL_GUEST_DEBUG=1 bash build.sh
+
       # No `cargo test` step yet: the guest cdylibs are wasm32-only (their
       # panic handler uses core::arch::wasm32) and the workspace has no
       # host-runnable tests. Add one here once host-target unit tests land.

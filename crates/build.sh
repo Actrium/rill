@@ -17,9 +17,36 @@ cd "$(dirname "$0")"
 
 TARGET=wasm32-unknown-unknown
 FIXTURES=../src/host/wasm-guest/__tests__/fixtures
+# Single source of truth for both the debug (DWARF) and release fixture builds
+# below. canvas-binary-guest / ui-binary-guest are intentionally NOT here — they
+# need a separate cargo invocation (see the wip-binary-protocol note further down).
+GUESTS="kv-guest ui-guest seq-guest event-guest heap-churn-guest canvas-guest canvas-present-guest canvas-gpu-guest canvas-escape-guest asset-guest"
+
+# Optional debug build: DWARF-carrying guests for source-level debugging inside
+# V8's wasm debugger (Chrome DevTools "C/C++ DevTools Support (DWARF)"). Output
+# goes to a SEPARATE dir and NEVER overwrites the shipped, DWARF-free release
+# fixtures; real source paths are preserved (no --remap-path-prefix here). Runs
+# with the default target dir and exits before the reproducible fixtures build
+# below. See docs/native-guest-debugging.zh.md.
+if [ "${RILL_GUEST_DEBUG:-}" = "1" ]; then
+  DEBUG_OUT=debug-artifacts
+  mkdir -p "$DEBUG_OUT"
+  # shellcheck disable=SC2086
+  RUSTFLAGS=" " cargo build $(printf -- '-p %s ' $GUESTS) --target "$TARGET" --profile debug-wasm
+  for lib in $GUESTS; do
+    crate="${lib//-/_}"
+    cp "target/$TARGET/debug-wasm/$crate.wasm" "$DEBUG_OUT/$lib.wasm"
+    echo "debug (DWARF): $DEBUG_OUT/$lib.wasm ($(wc -c < "$DEBUG_OUT/$lib.wasm") bytes)"
+  done
+  echo "NOTE: debug guests carry DWARF + real source paths; do NOT commit them."
+  exit 0
+fi
+
+# Dedicated target dir for the reproducible fixtures build (see header note).
 export CARGO_TARGET_DIR=target/fixtures
 
-RUSTFLAGS="--remap-path-prefix=$(pwd)=." cargo build -p kv-guest -p ui-guest -p seq-guest -p event-guest -p heap-churn-guest -p canvas-guest -p canvas-present-guest -p canvas-gpu-guest -p canvas-escape-guest -p asset-guest --target "$TARGET" --release
+# shellcheck disable=SC2086
+RUSTFLAGS="--remap-path-prefix=$(pwd)=." cargo build $(printf -- '-p %s ' $GUESTS) --target "$TARGET" --release
 
 # canvas-binary-guest / ui-binary-guest are built in a SEPARATE cargo
 # invocation on purpose: they turn ON rill-guest's `wip-binary-protocol`
